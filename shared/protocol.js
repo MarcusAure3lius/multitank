@@ -157,8 +157,8 @@ export const GAME_CONFIG = Object.freeze({
   }),
   maxDeltaSeconds: 0.05,
   world: Object.freeze({
-    width: 3200,
-    height: 1800,
+    width: 9600,
+    height: 5400,
     padding: 80,
     obstacles: Object.freeze([
       Object.freeze({ id: "depot-nw", x: 420, y: 250, width: 260, height: 120 }),

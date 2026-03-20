@@ -99,6 +99,8 @@ let cameraZoom = 1;
 let cameraHasAnchor = false;
 let cameraAnchorX = GAME_CONFIG.world.width / 2;
 let cameraAnchorY = GAME_CONFIG.world.height / 2;
+let fallbackCameraX = 0;
+let fallbackCameraY = 0;
 
 let socket = null;
 let localPlayerId = null;
@@ -317,6 +319,8 @@ function resetCameraAnchor() {
   cameraHasAnchor = false;
   cameraAnchorX = GAME_CONFIG.world.width / 2;
   cameraAnchorY = GAME_CONFIG.world.height / 2;
+  fallbackCameraX = camera.x;
+  fallbackCameraY = camera.y;
 }
 
 function hasMovementInputActive() {
@@ -370,8 +374,8 @@ function positionFallbackMarker(element, worldX, worldY) {
     return;
   }
 
-  const screenX = (worldX - camera.x) * cameraZoom;
-  const screenY = (worldY - camera.y) * cameraZoom;
+  const screenX = (worldX - fallbackCameraX) * cameraZoom;
+  const screenY = (worldY - fallbackCameraY) * cameraZoom;
   element.style.left = `${screenX}px`;
   element.style.top = `${screenY}px`;
 }
@@ -380,6 +384,14 @@ function updateFallbackVisuals() {
   if (!playAreaElement || !fallbackVisualLayerElement) {
     requestAnimationFrame(updateFallbackVisuals);
     return;
+  }
+
+  if (hasMovementInputActive()) {
+    fallbackCameraX = lerp(fallbackCameraX, camera.x, 0.22);
+    fallbackCameraY = lerp(fallbackCameraY, camera.y, 0.22);
+  } else {
+    fallbackCameraX = camera.x;
+    fallbackCameraY = camera.y;
   }
 
   const minorSize = Math.max(20, 40 * cameraZoom);
@@ -392,10 +404,10 @@ function updateFallbackVisuals() {
   ].join(",");
   playAreaElement.style.backgroundSize = `${minorSize}px ${minorSize}px, ${minorSize}px ${minorSize}px, ${majorSize}px ${majorSize}px, ${majorSize}px ${majorSize}px`;
   playAreaElement.style.backgroundPosition =
-    `${-camera.x * cameraZoom}px ${-camera.y * cameraZoom}px, ` +
-    `${-camera.x * cameraZoom}px ${-camera.y * cameraZoom}px, ` +
-    `${-camera.x * cameraZoom}px ${-camera.y * cameraZoom}px, ` +
-    `${-camera.x * cameraZoom}px ${-camera.y * cameraZoom}px`;
+    `${-fallbackCameraX * cameraZoom}px ${-fallbackCameraY * cameraZoom}px, ` +
+    `${-fallbackCameraX * cameraZoom}px ${-fallbackCameraY * cameraZoom}px, ` +
+    `${-fallbackCameraX * cameraZoom}px ${-fallbackCameraY * cameraZoom}px, ` +
+    `${-fallbackCameraX * cameraZoom}px ${-fallbackCameraY * cameraZoom}px`;
 
   positionFallbackMarker(
     fallbackCenterMarkerElement,
