@@ -331,7 +331,7 @@ function updateDiagnosticBanner() {
   const snapshotState = hasSeenLocalPlayerSnapshot ? "yes" : "no";
   const spectatorState = latestYou?.isSpectator ?? localPlayer?.isSpectator ?? false;
   const playerSummary = localPlayer
-    ? `${localPlayer.name} @ ${Math.round(getPlayerVisualX(localPlayer))}, ${Math.round(getPlayerVisualY(localPlayer))}`
+    ? localPlayer.name
     : (localPlayerId ? `awaiting state for ${localPlayerId}` : "none");
 
   diagnosticBannerElement.hidden = false;
@@ -387,11 +387,8 @@ function updateFallbackVisuals() {
   }
 
   if (localPlayer && !localPlayer.isSpectator) {
-    positionFallbackMarker(
-      fallbackPlayerMarkerElement,
-      getPlayerVisualX(localPlayer),
-      getPlayerVisualY(localPlayer)
-    );
+    fallbackPlayerMarkerElement.style.left = `${playAreaElement.clientWidth / 2}px`;
+    fallbackPlayerMarkerElement.style.top = `${playAreaElement.clientHeight / 2}px`;
   }
 
   requestAnimationFrame(updateFallbackVisuals);
@@ -1016,8 +1013,8 @@ function getCameraFocusTarget() {
 
   if (localPlayer && !localPlayer.isSpectator) {
     return {
-      x: getPlayerVisualX(localPlayer),
-      y: getPlayerVisualY(localPlayer)
+      x: localPlayer.x ?? getPlayerVisualX(localPlayer),
+      y: localPlayer.y ?? getPlayerVisualY(localPlayer)
     };
   }
 
