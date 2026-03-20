@@ -332,8 +332,9 @@ canvas {
   position: absolute;
   width: 0;
   height: 0;
-  transform: translate(-50%, -50%) scale(var(--world-scale, 1));
+  transform: translate3d(-50%, -50%, 0) scale(var(--world-scale, 1));
   transform-origin: center center;
+  will-change: left, top, transform;
 }
 
 .fallback-player-ring,
@@ -375,8 +376,9 @@ canvas {
   position: absolute;
   width: 0;
   height: 0;
-  transform: translate(-50%, -50%) scale(var(--world-scale, 1));
+  transform: translate3d(-50%, -50%, 0) scale(var(--world-scale, 1));
   transform-origin: center center;
+  will-change: left, top, transform;
 }
 
 .fallback-remote-ring,

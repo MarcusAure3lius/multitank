@@ -359,7 +359,7 @@ function ensureLocalVisualState(localPlayer = getLocalPlayer()) {
   return localVisualState;
 }
 
-function syncLocalRenderState(force = false) {
+function ensureLocalRenderState(force = false) {
   const visualState = ensureLocalVisualState();
 
   if (!visualState) {
@@ -377,26 +377,73 @@ function syncLocalRenderState(force = false) {
     return localRenderState;
   }
 
-  const dx = visualState.x - localRenderState.x;
-  const dy = visualState.y - localRenderState.y;
-  const needsSnap = dx * dx + dy * dy > 220 * 220;
-  const follow = hasMovementInputActive() ? 0.34 : 0.2;
-
-  if (needsSnap) {
-    localRenderState.x = visualState.x;
-    localRenderState.y = visualState.y;
-  } else {
-    localRenderState.x = lerp(localRenderState.x, visualState.x, follow);
-    localRenderState.y = lerp(localRenderState.y, visualState.y, follow);
+  if (!localRenderState) {
+    localRenderState = {
+      x: visualState.x,
+      y: visualState.y,
+      angle: visualState.angle,
+      turretAngle: visualState.turretAngle
+    };
   }
 
-  localRenderState.angle = lerpAngle(localRenderState.angle, visualState.angle, 0.28);
-  localRenderState.turretAngle = lerpAngle(
-    localRenderState.turretAngle,
-    visualState.turretAngle,
-    0.28
-  );
+  const dx = visualState.x - localRenderState.x;
+  const dy = visualState.y - localRenderState.y;
+  if (dx * dx + dy * dy > 220 * 220) {
+    localRenderState.x = visualState.x;
+    localRenderState.y = visualState.y;
+    localRenderState.angle = visualState.angle;
+    localRenderState.turretAngle = visualState.turretAngle;
+  }
+
   return localRenderState;
+}
+
+function updateLocalRenderState(deltaSeconds) {
+  const localPlayer = getLocalPlayer();
+  const visualState = ensureLocalVisualState(localPlayer);
+  const renderState = ensureLocalRenderState();
+
+  if (!visualState || !renderState) {
+    return null;
+  }
+
+  if (canSimulateLocalPlayer() && localPlayer.alive) {
+    const inputState = getCapturedInputState();
+    const targetTurretAngle = Math.atan2(
+      lastPointerWorldPosition.y - renderState.y,
+      lastPointerWorldPosition.x - renderState.x
+    );
+    const simulated = simulateTankMovement(
+      {
+        x: renderState.x,
+        y: renderState.y,
+        angle: renderState.angle,
+        turretAngle: renderState.turretAngle
+      },
+      {
+        ...inputState,
+        turretAngle: targetTurretAngle
+      },
+      deltaSeconds
+    );
+    const correctionStrength = hasMovementInputActive() ? 0.1 : 0.24;
+
+    renderState.x = lerp(simulated.x, visualState.x, correctionStrength);
+    renderState.y = lerp(simulated.y, visualState.y, correctionStrength);
+    renderState.angle = lerpAngle(simulated.angle, visualState.angle, correctionStrength);
+    renderState.turretAngle = lerpAngle(
+      simulated.turretAngle,
+      visualState.turretAngle,
+      correctionStrength
+    );
+    return renderState;
+  }
+
+  renderState.x = lerp(renderState.x, visualState.x, 0.24);
+  renderState.y = lerp(renderState.y, visualState.y, 0.24);
+  renderState.angle = lerpAngle(renderState.angle, visualState.angle, 0.24);
+  renderState.turretAngle = lerpAngle(renderState.turretAngle, visualState.turretAngle, 0.24);
+  return renderState;
 }
 
 function hasPlayableSession() {
@@ -524,7 +571,7 @@ function updateFallbackVisuals() {
   }
 
   const localPlayer = getLocalPlayer();
-  const localDisplayState = syncLocalRenderState();
+  const localDisplayState = ensureLocalRenderState();
   if (fallbackPlayerMarkerElement) {
     fallbackPlayerMarkerElement.hidden = !(localPlayer && !localPlayer.isSpectator);
   }
@@ -1154,7 +1201,7 @@ function clampCameraPosition(x, y) {
 }
 
 function getCameraFocusTarget() {
-  const renderState = syncLocalRenderState();
+  const renderState = ensureLocalRenderState();
 
   if (renderState) {
     if (!cameraHasAnchor) {
@@ -1193,6 +1240,7 @@ function updateCamera() {
   const focus = getCameraFocusTarget();
   const viewport = getVisibleViewportSize();
   const target = clampCameraPosition(focus.x - viewport.width / 2, focus.y - viewport.height / 2);
+  const follow = localRenderState ? 0.32 : 0.18;
 
   if (cameraNeedsSnap) {
     camera.x = target.x;
@@ -1201,8 +1249,8 @@ function updateCamera() {
     return;
   }
 
-  camera.x = lerp(camera.x, target.x, 0.18);
-  camera.y = lerp(camera.y, target.y, 0.18);
+  camera.x = lerp(camera.x, target.x, follow);
+  camera.y = lerp(camera.y, target.y, follow);
   const clamped = clampCameraPosition(camera.x, camera.y);
   camera.x = clamped.x;
   camera.y = clamped.y;
@@ -2069,7 +2117,7 @@ function applySnapshot(payload) {
     if (!hasSeenLocalPlayerSnapshot) {
       cameraNeedsSnap = true;
       hasSeenLocalPlayerSnapshot = true;
-      syncLocalRenderState(true);
+      ensureLocalRenderState(true);
       updateSessionChrome();
       setStatus("Connected");
     }
@@ -2889,6 +2937,7 @@ function render(frameAt = performance.now()) {
     lastRenderFrameAt = frameAt;
 
     updateRenderState(deltaSeconds, frameAt);
+    updateLocalRenderState(deltaSeconds);
     updateCamera();
     drawBackground();
 
