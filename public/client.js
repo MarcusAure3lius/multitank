@@ -18,6 +18,7 @@ import {
 const canvas = document.getElementById("game");
 const context = canvas.getContext("2d");
 const devBadgeElement = document.getElementById("dev-badge");
+const diagnosticBannerElement = document.getElementById("diagnostic-banner");
 const statusElement = document.getElementById("status");
 const latencyElement = document.getElementById("latency");
 const matchStatusElement = document.getElementById("match-status");
@@ -159,6 +160,7 @@ function getOrCreateProfileId() {
 
 function setStatus(text) {
   statusElement.textContent = text;
+  updateDiagnosticBanner();
 }
 
 function updateLocalDevBadge() {
@@ -310,6 +312,27 @@ function updateSessionChrome() {
   document.body.classList.toggle("in-session", hasPlayableSession());
   document.body.classList.toggle("joining-session", false);
   syncJoinMatchButton();
+  updateDiagnosticBanner();
+}
+
+function updateDiagnosticBanner() {
+  if (!diagnosticBannerElement) {
+    return;
+  }
+
+  const localPlayer = getLocalPlayer();
+  const snapshotState = hasSeenLocalPlayerSnapshot ? "yes" : "no";
+  const spectatorState = latestYou?.isSpectator ?? localPlayer?.isSpectator ?? false;
+  const playerSummary = localPlayer
+    ? `${localPlayer.name} @ ${Math.round(getPlayerVisualX(localPlayer))}, ${Math.round(getPlayerVisualY(localPlayer))}`
+    : (localPlayerId ? `awaiting state for ${localPlayerId}` : "none");
+
+  diagnosticBannerElement.hidden = false;
+  diagnosticBannerElement.textContent =
+    `Status: ${statusElement.textContent}\n` +
+    `Room: ${currentRoomId ?? "-"} | Snapshot: ${snapshotState} | Players: ${players.size}\n` +
+    `Local Player: ${playerSummary}\n` +
+    `Playable: ${hasPlayableSession() ? "yes" : "no"} | Spectator: ${spectatorState ? "yes" : "no"} | Zoom: ${cameraZoom.toFixed(2)}`;
 }
 
 function setReadyButton(isReady, options = {}) {
@@ -2435,7 +2458,7 @@ function updateRenderState(deltaSeconds, frameAt) {
 }
 
 function drawBackground() {
-  context.fillStyle = "#cfcfcf";
+  context.fillStyle = "#8c8c8c";
   context.fillRect(0, 0, canvas.width, canvas.height);
 }
 
@@ -2447,11 +2470,36 @@ function drawMapSquare() {
   context.strokeRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
 }
 
+function drawCenterProbe() {
+  const centerX = GAME_CONFIG.world.width / 2;
+  const centerY = GAME_CONFIG.world.height / 2;
+
+  context.save();
+  context.strokeStyle = "#ff006e";
+  context.lineWidth = 10 / cameraZoom;
+  context.beginPath();
+  context.arc(centerX, centerY, 72, 0, Math.PI * 2);
+  context.stroke();
+
+  context.beginPath();
+  context.moveTo(centerX - 96, centerY);
+  context.lineTo(centerX + 96, centerY);
+  context.moveTo(centerX, centerY - 96);
+  context.lineTo(centerX, centerY + 96);
+  context.stroke();
+
+  context.fillStyle = "#111111";
+  context.font = `${Math.max(26 / cameraZoom, 12)}px Segoe UI`;
+  context.textAlign = "center";
+  context.fillText("MAP CENTER", centerX, centerY - 92);
+  context.restore();
+}
+
 function drawGrid() {
   const cellSize = 48;
   const majorEvery = 4;
-  const minorLineWidth = Math.max(1.2 / cameraZoom, 1);
-  const majorLineWidth = Math.max(3.5 / cameraZoom, 2.25);
+  const minorLineWidth = Math.max(1.5 / cameraZoom, 1.2);
+  const majorLineWidth = Math.max(4.5 / cameraZoom, 3);
 
   context.save();
 
@@ -2461,7 +2509,7 @@ function drawGrid() {
     context.moveTo(x, 0);
     context.lineTo(x, GAME_CONFIG.world.height);
     context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
-    context.strokeStyle = isMajor ? "rgba(17, 17, 17, 0.52)" : "rgba(17, 17, 17, 0.24)";
+    context.strokeStyle = isMajor ? "rgba(17, 17, 17, 0.68)" : "rgba(17, 17, 17, 0.34)";
     context.stroke();
   }
 
@@ -2471,7 +2519,7 @@ function drawGrid() {
     context.moveTo(0, y);
     context.lineTo(GAME_CONFIG.world.width, y);
     context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
-    context.strokeStyle = isMajor ? "rgba(17, 17, 17, 0.52)" : "rgba(17, 17, 17, 0.24)";
+    context.strokeStyle = isMajor ? "rgba(17, 17, 17, 0.68)" : "rgba(17, 17, 17, 0.34)";
     context.stroke();
   }
 
@@ -2543,12 +2591,12 @@ function drawTank(player) {
 
   context.save();
   context.beginPath();
-  context.arc(x, y, GAME_CONFIG.tank.radius + 8, 0, Math.PI * 2);
+  context.arc(x, y, GAME_CONFIG.tank.radius + (isLocalPlayer ? 18 : 8), 0, Math.PI * 2);
   context.fillStyle = player.alive
-    ? (isLocalPlayer ? "#ff7a00" : "#5f6f86")
+    ? (isLocalPlayer ? "#ff4d00" : "#5f6f86")
     : "rgba(255, 122, 0, 0.35)";
   context.fill();
-  context.lineWidth = 5;
+  context.lineWidth = isLocalPlayer ? 8 : 5;
   context.strokeStyle = isLocalPlayer ? "#111111" : "#2f3742";
   context.stroke();
   context.restore();
@@ -2655,6 +2703,7 @@ function render(frameAt = performance.now()) {
   context.translate(-camera.x, -camera.y);
   drawMapSquare();
   drawGrid();
+  drawCenterProbe();
   drawObstacles();
   drawObjective();
 
@@ -2675,6 +2724,7 @@ function render(frameAt = performance.now()) {
   if (debugUiEnabled) {
     drawOverlay();
   }
+  updateDiagnosticBanner();
   requestAnimationFrame(render);
 }
 

@@ -278,6 +278,23 @@ canvas {
   background: #f4f4f4;
 }
 
+.diagnostic-banner {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  z-index: 5;
+  max-width: min(720px, calc(100vw - 36px));
+  padding: 12px 14px;
+  border: 2px solid rgba(17, 17, 17, 0.82);
+  border-radius: 14px;
+  background: rgba(255, 245, 157, 0.96);
+  color: #111111;
+  font-size: 0.95rem;
+  line-height: 1.35;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+  white-space: pre-line;
+}
+
 .hud {
   position: absolute;
   top: 18px;
