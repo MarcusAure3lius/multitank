@@ -61,13 +61,14 @@ const STORAGE_KEYS = {
 };
 
 const NETWORK_RENDER = Object.freeze({
-  interpolationBackTimeMs: 100,
-  maxExtrapolationMs: 180,
+  interpolationBackTimeMs: 48,
+  minInterpolationBackTimeMs: 16,
+  maxExtrapolationMs: 96,
   historyLimit: 24,
   playerTeleportDistance: 220,
   bulletTeleportDistance: 140,
   snapDistance: 120,
-  remoteSmoothing: 0.38,
+  remoteSmoothing: 0.68,
   clockSmoothing: 0.12
 });
 
@@ -127,6 +128,7 @@ let reconnectAttempts = 0;
 let serverTimeOffset = 0;
 let lastResyncRequestAt = 0;
 let lastStallWarningAt = 0;
+let latestLatencyMs = 0;
 let lastPointerWorldPosition = {
   x: GAME_CONFIG.world.width / 2,
   y: GAME_CONFIG.world.height / 2
@@ -947,6 +949,15 @@ function lerpAngle(current, target, amount) {
 
 function estimateServerTime(frameAt = performance.now()) {
   return frameAt + serverTimeOffset;
+}
+
+function getRemoteInterpolationBackTimeMs() {
+  const halfRtt = latestLatencyMs > 0 ? latestLatencyMs * 0.5 : NETWORK_RENDER.interpolationBackTimeMs;
+  return clamp(
+    Math.round(halfRtt + 8),
+    NETWORK_RENDER.minInterpolationBackTimeMs,
+    NETWORK_RENDER.interpolationBackTimeMs
+  );
 }
 
 function syncServerClock(serverTime, frameAt = performance.now()) {
@@ -2336,6 +2347,7 @@ function connect(options = {}) {
     lastStatePacketAt = 0;
     serverTimeOffset = 0;
     lastStallWarningAt = 0;
+    latestLatencyMs = 0;
     lastRenderFrameAt = performance.now();
     camera.x = 0;
     camera.y = 0;
@@ -2350,6 +2362,7 @@ function connect(options = {}) {
     currentRoomId = null;
     updateSessionChrome();
     setReadyButton(false);
+    latestLatencyMs = 0;
     latencyElement.textContent = "--";
     matchStatusElement.textContent = "Waiting for server";
     refreshLobbyUi();
@@ -2460,7 +2473,8 @@ function connect(options = {}) {
     }
 
     if (payload.type === MESSAGE_TYPES.PONG) {
-      latencyElement.textContent = `${Date.now() - Number(payload.sentAt)} ms`;
+      latestLatencyMs = Math.max(0, Date.now() - Number(payload.sentAt));
+      latencyElement.textContent = `${latestLatencyMs} ms`;
       return;
     }
 
@@ -2639,7 +2653,7 @@ function updateVisualAnimationState(player, fallbackMoveBlend = 0) {
 
 function updateRenderState(deltaSeconds, frameAt) {
   const smoothing = players.size > 1 ? 0.22 : 0.35;
-  const renderServerTime = estimateServerTime(frameAt) - NETWORK_RENDER.interpolationBackTimeMs;
+  const renderServerTime = estimateServerTime(frameAt) - getRemoteInterpolationBackTimeMs();
 
   for (const player of players.values()) {
     const previousDisplayX = getPlayerVisualX(player);
