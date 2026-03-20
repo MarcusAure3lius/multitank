@@ -25,15 +25,17 @@ body {
 }
 
 .shell {
-  max-width: 1400px;
+  max-width: 780px;
   margin: 0 auto;
   padding: 28px;
   display: grid;
   gap: 20px;
 }
 
+body.joining-session .shell,
 body.in-session .shell {
-  max-width: min(1800px, 100vw);
+  max-width: none;
+  padding: 0;
 }
 
 .panel,
@@ -51,10 +53,11 @@ body.in-session .shell {
 }
 
 body.in-session .panel {
-  position: sticky;
-  top: 18px;
-  max-height: calc(100vh - 36px);
-  overflow: auto;
+  display: none;
+}
+
+body.joining-session .panel {
+  display: none;
 }
 
 .eyebrow,
@@ -216,24 +219,39 @@ button {
 }
 
 .play-area {
-  display: grid;
-  gap: 18px;
-  padding: 18px;
+  display: none;
+  position: relative;
+  overflow: hidden;
 }
 
+body.joining-session .play-area,
 body.in-session .play-area {
-  min-height: calc(100vh - 36px);
+  display: block;
+  position: fixed;
+  inset: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: #0d1b2a;
+  box-shadow: none;
+  min-height: 100vh;
 }
 
 canvas {
   width: 100%;
-  height: auto;
+  height: 100%;
   display: block;
-  border-radius: 18px;
+  border-radius: inherit;
   background: #0d1b2a;
 }
 
 .hud {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  width: min(340px, calc(100vw - 36px));
+  max-height: calc(100vh - 36px);
+  overflow: auto;
   padding: 16px 18px;
   display: grid;
   gap: 12px;
@@ -280,13 +298,20 @@ canvas {
 
 @media (min-width: 980px) {
   .shell {
-    grid-template-columns: minmax(320px, 380px) 1fr;
-    align-items: start;
+    grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 640px) {
   .room-browser-actions {
     flex-direction: column;
+  }
+
+  .hud {
+    top: auto;
+    right: 12px;
+    bottom: 12px;
+    width: calc(100vw - 24px);
+    max-height: min(42vh, 320px);
   }
 }

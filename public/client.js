@@ -118,6 +118,7 @@ let lastPointerWorldPosition = {
 let lastRenderFrameAt = performance.now();
 let cameraNeedsSnap = true;
 let hasSeenLocalPlayerSnapshot = false;
+let joinInProgress = false;
 let nextInputSeq = 1;
 let nextReliableMessageId = 1;
 let roomBrowserRefreshInFlight = false;
@@ -131,6 +132,7 @@ profileLabelElement.textContent = profileId.slice(0, 8);
 
 populateLobbySelects();
 refreshLobbyUi();
+updateSessionChrome();
 
 function getOrCreateProfileId() {
   const stored = localStorage.getItem(STORAGE_KEYS.profileId);
@@ -149,6 +151,7 @@ function setStatus(text) {
 
 function updateSessionChrome() {
   document.body.classList.toggle("in-session", Boolean(currentRoomId));
+  document.body.classList.toggle("joining-session", Boolean(joinInProgress && !currentRoomId));
 }
 
 function setReadyButton(isReady, options = {}) {
@@ -657,6 +660,19 @@ function getPointerWorldPosition(event) {
 
 function getLocalPlayer() {
   return players.get(localPlayerId) ?? null;
+}
+
+function resizeCanvas() {
+  const nextWidth = Math.max(640, Math.round(window.innerWidth));
+  const nextHeight = Math.max(360, Math.round(window.innerHeight));
+
+  if (canvas.width === nextWidth && canvas.height === nextHeight) {
+    return;
+  }
+
+  canvas.width = nextWidth;
+  canvas.height = nextHeight;
+  cameraNeedsSnap = true;
 }
 
 function clampCameraPosition(x, y) {
@@ -1718,6 +1734,8 @@ function buildMatchStatusText() {
 function connect(options = {}) {
   const { isReconnect = false } = options;
 
+  joinInProgress = true;
+  updateSessionChrome();
   cancelReconnect();
   pendingReliableMessages.clear();
   stateChunks.clear();
@@ -1806,6 +1824,7 @@ function connect(options = {}) {
     if (!parsed.ok) {
       setStatus(parsed.error.message);
       if (parsed.error.code === "unsupported_version" || parsed.error.code === "invalid_version") {
+        joinInProgress = false;
         nextSocket.skipReconnect = true;
         currentRoomId = null;
         updateSessionChrome();
@@ -1820,6 +1839,7 @@ function connect(options = {}) {
       clearPendingReliableMessages(MESSAGE_TYPES.JOIN);
       if (payload.gameVersion && payload.gameVersion !== GAME_BUILD_VERSION) {
         setStatus(`Game version mismatch. Refresh required (${payload.gameVersion} available).`);
+        joinInProgress = false;
         nextSocket.skipReconnect = true;
         currentRoomId = null;
         updateSessionChrome();
@@ -1828,6 +1848,7 @@ function connect(options = {}) {
       }
       if (payload.assetVersion && payload.assetVersion !== ASSET_BUNDLE_VERSION) {
         setStatus(`Asset mismatch. Refresh required (${payload.assetVersion} available).`);
+        joinInProgress = false;
         nextSocket.skipReconnect = true;
         currentRoomId = null;
         updateSessionChrome();
@@ -1838,6 +1859,7 @@ function connect(options = {}) {
       profileId = payload.profileId;
       localStorage.setItem(STORAGE_KEYS.profileId, profileId);
       currentRoomId = payload.roomId;
+      joinInProgress = false;
       lastStatePacketAt = Date.now();
       lastResyncRequestAt = 0;
       latestYou = {
@@ -1882,7 +1904,13 @@ function connect(options = {}) {
     if (payload.type === MESSAGE_TYPES.ERROR) {
       setStatus(payload.message);
 
+      if (!currentRoomId) {
+        joinInProgress = false;
+        updateSessionChrome();
+      }
+
       if (payload.code === "game_version_mismatch") {
+        joinInProgress = false;
         nextSocket.skipReconnect = true;
         currentRoomId = null;
         updateSessionChrome();
@@ -1891,12 +1919,14 @@ function connect(options = {}) {
       if (payload.code === "invalid_auth_token") {
         authToken = null;
         localStorage.removeItem(STORAGE_KEYS.authToken);
+        joinInProgress = false;
         nextSocket.skipReconnect = true;
         currentRoomId = null;
         updateSessionChrome();
       }
 
       if (payload.code === "asset_version_mismatch" || payload.code === "unsupported_version") {
+        joinInProgress = false;
         nextSocket.skipReconnect = true;
         currentRoomId = null;
         updateSessionChrome();
@@ -1910,6 +1940,7 @@ function connect(options = {}) {
     }
 
     socket = null;
+    joinInProgress = false;
 
     if (nextSocket.skipReconnect) {
       updateSessionChrome();
@@ -2603,6 +2634,8 @@ window.addEventListener("keyup", (event) => {
   keys.delete(event.code);
 });
 
+window.addEventListener("resize", resizeCanvas);
+
 canvas.addEventListener("mousemove", (event) => {
   lastPointerWorldPosition = getPointerWorldPosition(event);
 });
@@ -2711,5 +2744,6 @@ setInterval(() => {
   refreshRoomBrowser();
 }, 8000);
 
+resizeCanvas();
 render();
 refreshRoomBrowser();
