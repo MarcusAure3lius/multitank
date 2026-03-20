@@ -265,7 +265,7 @@ body.in-session .play-area {
   padding: 0;
   border: none;
   border-radius: 0;
-  background: #f4f4f4;
+  background-color: #dbe7ff;
   box-shadow: none;
   min-height: 100vh;
 }
@@ -275,7 +275,9 @@ canvas {
   height: 100%;
   display: block;
   border-radius: inherit;
-  background: #f4f4f4;
+  background: transparent;
+  position: relative;
+  z-index: 2;
 }
 
 .diagnostic-banner {
@@ -294,6 +296,72 @@ canvas {
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
   white-space: pre-line;
   pointer-events: none;
+}
+
+.fallback-visual-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.fallback-center-marker,
+.fallback-player-marker {
+  position: absolute;
+  transform: translate(-50%, -50%);
+}
+
+.fallback-center-marker {
+  min-width: 180px;
+  padding: 8px 12px;
+  border: 4px solid rgba(255, 0, 110, 0.9);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  color: #111111;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-align: center;
+}
+
+.fallback-player-marker {
+  width: 0;
+  height: 0;
+}
+
+.fallback-player-ring,
+.fallback-player-dot {
+  position: absolute;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+}
+
+.fallback-player-ring {
+  width: 96px;
+  height: 96px;
+  border: 10px solid rgba(255, 0, 110, 0.82);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.fallback-player-dot {
+  width: 58px;
+  height: 58px;
+  border: 7px solid #111111;
+  background: #ff4d00;
+}
+
+.fallback-player-label {
+  position: absolute;
+  left: 50%;
+  top: -64px;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #111111;
+  font-size: 1.2rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
 }
 
 .hud {

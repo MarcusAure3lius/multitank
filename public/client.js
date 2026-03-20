@@ -19,6 +19,10 @@ const canvas = document.getElementById("game");
 const context = canvas.getContext("2d");
 const devBadgeElement = document.getElementById("dev-badge");
 const diagnosticBannerElement = document.getElementById("diagnostic-banner");
+const playAreaElement = document.querySelector(".play-area");
+const fallbackVisualLayerElement = document.getElementById("fallback-visual-layer");
+const fallbackCenterMarkerElement = document.getElementById("fallback-center-marker");
+const fallbackPlayerMarkerElement = document.getElementById("fallback-player-marker");
 const statusElement = document.getElementById("status");
 const latencyElement = document.getElementById("latency");
 const matchStatusElement = document.getElementById("match-status");
@@ -126,6 +130,8 @@ let nextInputSeq = 1;
 let nextReliableMessageId = 1;
 let roomBrowserRefreshInFlight = false;
 let audioContext = null;
+let renderFailure = null;
+let renderLoopStopped = false;
 const assetState = {
   manifest: null,
   images: new Map(),
@@ -332,7 +338,62 @@ function updateDiagnosticBanner() {
     `Status: ${statusElement.textContent}\n` +
     `Room: ${currentRoomId ?? "-"} | Snapshot: ${snapshotState} | Players: ${players.size}\n` +
     `Local Player: ${playerSummary}\n` +
-    `Playable: ${hasPlayableSession() ? "yes" : "no"} | Spectator: ${spectatorState ? "yes" : "no"} | Zoom: ${cameraZoom.toFixed(2)}`;
+    `Playable: ${hasPlayableSession() ? "yes" : "no"} | Spectator: ${spectatorState ? "yes" : "no"} | Zoom: ${cameraZoom.toFixed(2)}` +
+    (renderFailure ? `\nRender Error: ${renderFailure}` : "");
+}
+
+function positionFallbackMarker(element, worldX, worldY) {
+  if (!element) {
+    return;
+  }
+
+  const screenX = (worldX - camera.x) * cameraZoom;
+  const screenY = (worldY - camera.y) * cameraZoom;
+  element.style.left = `${screenX}px`;
+  element.style.top = `${screenY}px`;
+}
+
+function updateFallbackVisuals() {
+  if (!playAreaElement || !fallbackVisualLayerElement) {
+    requestAnimationFrame(updateFallbackVisuals);
+    return;
+  }
+
+  const minorSize = Math.max(20, 40 * cameraZoom);
+  const majorSize = Math.max(100, 200 * cameraZoom);
+  playAreaElement.style.backgroundImage = [
+    "linear-gradient(rgba(76, 118, 191, 0.36) 2px, transparent 2px)",
+    "linear-gradient(90deg, rgba(76, 118, 191, 0.36) 2px, transparent 2px)",
+    "linear-gradient(rgba(40, 78, 148, 0.62) 4px, transparent 4px)",
+    "linear-gradient(90deg, rgba(40, 78, 148, 0.62) 4px, transparent 4px)"
+  ].join(",");
+  playAreaElement.style.backgroundSize = `${minorSize}px ${minorSize}px, ${minorSize}px ${minorSize}px, ${majorSize}px ${majorSize}px, ${majorSize}px ${majorSize}px`;
+  playAreaElement.style.backgroundPosition =
+    `${-camera.x * cameraZoom}px ${-camera.y * cameraZoom}px, ` +
+    `${-camera.x * cameraZoom}px ${-camera.y * cameraZoom}px, ` +
+    `${-camera.x * cameraZoom}px ${-camera.y * cameraZoom}px, ` +
+    `${-camera.x * cameraZoom}px ${-camera.y * cameraZoom}px`;
+
+  positionFallbackMarker(
+    fallbackCenterMarkerElement,
+    GAME_CONFIG.world.width / 2,
+    GAME_CONFIG.world.height / 2
+  );
+
+  const localPlayer = getLocalPlayer();
+  if (fallbackPlayerMarkerElement) {
+    fallbackPlayerMarkerElement.hidden = !(localPlayer && !localPlayer.isSpectator);
+  }
+
+  if (localPlayer && !localPlayer.isSpectator) {
+    positionFallbackMarker(
+      fallbackPlayerMarkerElement,
+      getPlayerVisualX(localPlayer),
+      getPlayerVisualY(localPlayer)
+    );
+  }
+
+  requestAnimationFrame(updateFallbackVisuals);
 }
 
 function setReadyButton(isReady, options = {}) {
@@ -2700,41 +2761,50 @@ function drawOverlay() {
 }
 
 function render(frameAt = performance.now()) {
-  const deltaSeconds = Math.min(0.05, Math.max(0.001, (frameAt - lastRenderFrameAt) / 1000));
-  lastRenderFrameAt = frameAt;
+  try {
+    const deltaSeconds = Math.min(0.05, Math.max(0.001, (frameAt - lastRenderFrameAt) / 1000));
+    lastRenderFrameAt = frameAt;
 
-  updateRenderState(deltaSeconds, frameAt);
-  updateCamera();
-  drawBackground();
+    updateRenderState(deltaSeconds, frameAt);
+    updateCamera();
+    drawBackground();
 
-  context.save();
-  context.scale(cameraZoom, cameraZoom);
-  context.translate(-camera.x, -camera.y);
-  drawMapSquare();
-  drawGrid();
-  drawCenterProbe();
-  drawObstacles();
-  drawObjective();
+    context.save();
+    context.scale(cameraZoom, cameraZoom);
+    context.translate(-camera.x, -camera.y);
+    drawMapSquare();
+    drawGrid();
+    drawCenterProbe();
+    drawObstacles();
+    drawObjective();
 
-  for (const bullet of bullets.values()) {
-    drawBullet(bullet);
+    for (const bullet of bullets.values()) {
+      drawBullet(bullet);
+    }
+
+    for (const projectile of predictedProjectiles.values()) {
+      drawPredictedProjectile(projectile);
+    }
+
+    for (const player of players.values()) {
+      drawTank(player);
+    }
+
+    drawCombatEffects();
+    context.restore();
+    if (debugUiEnabled) {
+      drawOverlay();
+    }
+    renderFailure = null;
+  } catch (error) {
+    renderFailure = error?.message ?? String(error);
+    renderLoopStopped = true;
   }
 
-  for (const projectile of predictedProjectiles.values()) {
-    drawPredictedProjectile(projectile);
-  }
-
-  for (const player of players.values()) {
-    drawTank(player);
-  }
-
-  drawCombatEffects();
-  context.restore();
-  if (debugUiEnabled) {
-    drawOverlay();
-  }
   updateDiagnosticBanner();
-  requestAnimationFrame(render);
+  if (!renderLoopStopped) {
+    requestAnimationFrame(render);
+  }
 }
 
 joinForm.addEventListener("submit", (event) => {
@@ -2945,4 +3015,5 @@ setInterval(() => {
 
 resizeCanvas();
 render();
+updateFallbackVisuals();
 refreshRoomBrowser();

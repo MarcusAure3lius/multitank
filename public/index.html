@@ -52,6 +52,14 @@
 
       <section class="play-area">
         <div id="diagnostic-banner" class="diagnostic-banner" aria-live="polite"></div>
+        <div id="fallback-visual-layer" class="fallback-visual-layer" aria-hidden="true">
+          <div id="fallback-center-marker" class="fallback-center-marker">MAP CENTER</div>
+          <div id="fallback-player-marker" class="fallback-player-marker" hidden>
+            <div class="fallback-player-ring"></div>
+            <div class="fallback-player-dot"></div>
+            <div class="fallback-player-label">YOU</div>
+          </div>
+        </div>
         <canvas id="game" width="1600" height="900"></canvas>
         <aside class="hud">
           <div>
