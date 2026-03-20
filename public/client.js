@@ -2428,13 +2428,13 @@ function drawBackground() {
 }
 
 function drawMapSquare() {
-  context.fillStyle = "#fbfbfb";
+  context.fillStyle = "#efefef";
   context.fillRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
-  context.lineWidth = 12;
+  context.lineWidth = 14 / cameraZoom;
   context.strokeStyle = "#111111";
   context.strokeRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
 
-  context.fillStyle = "rgba(17, 17, 17, 0.08)";
+  context.fillStyle = "rgba(17, 17, 17, 0.12)";
   context.fillRect(
     GAME_CONFIG.world.width / 2 - 40,
     GAME_CONFIG.world.height / 2 - 40,
@@ -2444,7 +2444,34 @@ function drawMapSquare() {
 }
 
 function drawGrid() {
-  // Intentionally blank while we isolate spawn visibility.
+  const cellSize = 64;
+  const majorEvery = 5;
+  const minorLineWidth = Math.max(1 / cameraZoom, 0.75);
+  const majorLineWidth = Math.max(3 / cameraZoom, 1.5);
+
+  context.save();
+
+  for (let x = 0, index = 0; x <= GAME_CONFIG.world.width; x += cellSize, index += 1) {
+    const isMajor = index % majorEvery === 0;
+    context.beginPath();
+    context.moveTo(x, 0);
+    context.lineTo(x, GAME_CONFIG.world.height);
+    context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
+    context.strokeStyle = isMajor ? "rgba(17, 17, 17, 0.4)" : "rgba(17, 17, 17, 0.18)";
+    context.stroke();
+  }
+
+  for (let y = 0, index = 0; y <= GAME_CONFIG.world.height; y += cellSize, index += 1) {
+    const isMajor = index % majorEvery === 0;
+    context.beginPath();
+    context.moveTo(0, y);
+    context.lineTo(GAME_CONFIG.world.width, y);
+    context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
+    context.strokeStyle = isMajor ? "rgba(17, 17, 17, 0.4)" : "rgba(17, 17, 17, 0.18)";
+    context.stroke();
+  }
+
+  context.restore();
 }
 
 function drawObstacles() {
