@@ -96,6 +96,10 @@ const camera = {
   y: 0
 };
 let cameraZoom = 1;
+let cameraHasAnchor = false;
+let cameraFollowUnlocked = false;
+let cameraAnchorX = GAME_CONFIG.world.width / 2;
+let cameraAnchorY = GAME_CONFIG.world.height / 2;
 
 let socket = null;
 let localPlayerId = null;
@@ -308,6 +312,13 @@ function getResolvedTankImagePath(player, part) {
 
 function getLoadedTankImage(player, part) {
   return getLoadedImageByPath(getResolvedTankImagePath(player, part));
+}
+
+function resetCameraAnchor() {
+  cameraHasAnchor = false;
+  cameraFollowUnlocked = false;
+  cameraAnchorX = GAME_CONFIG.world.width / 2;
+  cameraAnchorY = GAME_CONFIG.world.height / 2;
 }
 
 function hasPlayableSession() {
@@ -1012,9 +1023,30 @@ function getCameraFocusTarget() {
   const localPlayer = getLocalPlayer();
 
   if (localPlayer && !localPlayer.isSpectator) {
+    const liveX = localPlayer.x ?? getPlayerVisualX(localPlayer);
+    const liveY = localPlayer.y ?? getPlayerVisualY(localPlayer);
+
+    if (!cameraHasAnchor) {
+      cameraAnchorX = liveX;
+      cameraAnchorY = liveY;
+      cameraHasAnchor = true;
+    }
+
+    if (cameraFollowUnlocked) {
+      cameraAnchorX = liveX;
+      cameraAnchorY = liveY;
+    }
+
     return {
-      x: localPlayer.x ?? getPlayerVisualX(localPlayer),
-      y: localPlayer.y ?? getPlayerVisualY(localPlayer)
+      x: cameraAnchorX,
+      y: cameraAnchorY
+    };
+  }
+
+  if (cameraHasAnchor) {
+    return {
+      x: cameraAnchorX,
+      y: cameraAnchorY
     };
   }
 
@@ -1035,20 +1067,9 @@ function updateCamera() {
   const focus = getCameraFocusTarget();
   const viewport = getVisibleViewportSize();
   const target = clampCameraPosition(focus.x - viewport.width / 2, focus.y - viewport.height / 2);
-  const localPlayer = getLocalPlayer();
-
-  if (cameraNeedsSnap || (localPlayer && !localPlayer.isSpectator)) {
-    camera.x = target.x;
-    camera.y = target.y;
-    cameraNeedsSnap = false;
-    return;
-  }
-
-  camera.x = lerp(camera.x, target.x, WORLD_RENDER.cameraFollow);
-  camera.y = lerp(camera.y, target.y, WORLD_RENDER.cameraFollow);
-  const clamped = clampCameraPosition(camera.x, camera.y);
-  camera.x = clamped.x;
-  camera.y = clamped.y;
+  camera.x = target.x;
+  camera.y = target.y;
+  cameraNeedsSnap = false;
 }
 
 function getPlayerVisualX(player) {
@@ -2107,6 +2128,7 @@ function connect(options = {}) {
     camera.x = 0;
     camera.y = 0;
     cameraNeedsSnap = true;
+    resetCameraAnchor();
     hasSeenLocalPlayerSnapshot = false;
     processedEventIds.clear();
     processedEventOrder.length = 0;
@@ -2338,6 +2360,7 @@ function connect(options = {}) {
     camera.x = 0;
     camera.y = 0;
     cameraNeedsSnap = true;
+    resetCameraAnchor();
     hasSeenLocalPlayerSnapshot = false;
     updateSessionChrome();
     refreshLobbyUi();
@@ -2855,6 +2878,12 @@ classSelect.addEventListener("change", () => {
 
 window.addEventListener("keydown", (event) => {
   unlockAudio();
+  if (
+    ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.code)
+  ) {
+    cameraFollowUnlocked = true;
+  }
+
   if (
     ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(
       event.code
