@@ -1011,6 +1011,9 @@ function normalizeJoinPacket(packet, version) {
     profileId: sanitizeProfileId(packet.profileId ?? packet.p),
     authToken: sanitizeAuthToken(packet.authToken ?? packet.at),
     spectate: readBoolean(packet.spectate ?? packet.sp, false),
+    mapId: sanitizeText(packet.mapId ?? packet.mid, "", 24) || null,
+    teamId: sanitizeText(packet.teamId ?? packet.tid, "", 24) || null,
+    classId: sanitizeText(packet.classId ?? packet.cid, "", 24) || null,
     gameVersion: sanitizeText(packet.gameVersion ?? packet.g, "", 32) || null,
     assetVersion: sanitizeText(packet.assetVersion ?? packet.av, "", 32) || null,
     messageId: sanitizeMessageId(packet.messageId ?? packet.m)
@@ -1245,6 +1248,9 @@ function encodePacketObject(packet) {
         p: sanitizeProfileId(packet.profileId),
         at: sanitizeAuthToken(packet.authToken),
         sp: readBoolean(packet.spectate, false),
+        mid: sanitizeText(packet.mapId ?? "", "", 24) || null,
+        tid: sanitizeText(packet.teamId ?? "", "", 24) || null,
+        cid: sanitizeText(packet.classId ?? "", "", 24) || null,
         g: sanitizeText(packet.gameVersion ?? "", "", 32) || null,
         av: sanitizeText(packet.assetVersion ?? "", "", 32) || null,
         m: sanitizeMessageId(packet.messageId)

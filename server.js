@@ -116,8 +116,11 @@ const mimeTypes = new Map([
   [".css", "text/css; charset=utf-8"],
   [".js", "application/javascript; charset=utf-8"],
   [".json", "application/json; charset=utf-8"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
   [".png", "image/png"],
-  [".svg", "image/svg+xml"]
+  [".svg", "image/svg+xml"],
+  [".webp", "image/webp"]
 ]);
 
 const rooms = new Map();
@@ -187,6 +190,78 @@ function buildAllowedOrigins(rawValue, fallbackOrigin) {
   }
 
   return origins;
+}
+
+const discoverableAssetExtensions = Object.freeze([".png", ".webp", ".jpg", ".jpeg", ".svg"]);
+
+async function findPublicAssetVariant(relativePathWithoutExtension) {
+  for (const extension of discoverableAssetExtensions) {
+    const filePath = path.join(publicDir, `${relativePathWithoutExtension}${extension}`);
+
+    try {
+      await fs.access(filePath);
+      return `/${relativePathWithoutExtension.replace(/\\/g, "/")}${extension}`;
+    } catch (error) {
+      // Optional asset slot is empty.
+    }
+  }
+
+  return null;
+}
+
+async function buildTankSpriteManifest(partDirectory) {
+  const manifest = {
+    default: await findPublicAssetVariant(`assets/sprites/tanks/${partDirectory}/default`)
+  };
+  const teamIds = [...GAME_CONFIG.lobby.teams.map((team) => team.id), "neutral"];
+
+  await Promise.all(
+    GAME_CONFIG.lobby.classes.map(async (entry) => {
+      const classId = entry.id;
+      const classManifest = {
+        default: await findPublicAssetVariant(`assets/sprites/tanks/${partDirectory}/${classId}-default`)
+      };
+
+      await Promise.all(
+        teamIds.map(async (teamId) => {
+          classManifest[teamId] = await findPublicAssetVariant(
+            `assets/sprites/tanks/${partDirectory}/${classId}-${teamId}`
+          );
+        })
+      );
+
+      manifest[classId] = classManifest;
+    })
+  );
+
+  return manifest;
+}
+
+async function buildPublicAssetManifest() {
+  const [arenaFloor, arenaGrid, obstacleBlock, objectiveRing, tankHulls, tankTurrets] = await Promise.all([
+    findPublicAssetVariant("assets/backgrounds/arena-floor"),
+    findPublicAssetVariant("assets/backgrounds/arena-grid"),
+    findPublicAssetVariant("assets/world/obstacle-block"),
+    findPublicAssetVariant("assets/world/objective-ring"),
+    buildTankSpriteManifest("hulls"),
+    buildTankSpriteManifest("turrets")
+  ]);
+
+  return {
+    version: ASSET_BUNDLE_VERSION,
+    images: {
+      world: {
+        arenaFloor,
+        arenaGrid,
+        obstacleBlock,
+        objectiveRing
+      },
+      tanks: {
+        hulls: tankHulls,
+        turrets: tankTurrets
+      }
+    }
+  };
 }
 
 function isSupportedGameVersion(clientGameVersion) {
@@ -1045,7 +1120,7 @@ function validatePlayerSimulationState(room, player, previousState, deltaSeconds
   const maxAllowedDistance =
     Math.max(GAME_CONFIG.tank.speed, GAME_CONFIG.tank.reverseSpeed) * deltaSeconds +
     GAME_CONFIG.antiCheat.maxPositionCorrectionDistance / 16;
-  const maxAllowedTurn = GAME_CONFIG.tank.turnSpeed * deltaSeconds + 0.3;
+  const maxAllowedTurn = movedDistance > 0.01 ? Math.PI * 2 : GAME_CONFIG.tank.turnSpeed * deltaSeconds + 0.3;
   const turnDelta = Math.abs(normalizeAngle(player.angle - previousState.angle));
 
   if (!positionIsFinite || !angleIsFinite || outOfBounds || insideObstacle) {
@@ -1183,6 +1258,7 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     isBot = false,
     isSpectator = false,
     queuedForSlot = false,
+    autoReady = false,
     room = null,
     teamId = GAME_CONFIG.lobby.teams[0].id,
     classId = GAME_CONFIG.lobby.classes[0].id,
@@ -1212,7 +1288,7 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
       slots: [{ slot: "weapon", itemId: "shell-cannon", amount: 1 }]
     },
     alive: !isSpectator,
-    ready: isBot,
+    ready: isBot || autoReady,
     connected: true,
     isBot,
     isSpectator,
@@ -4670,6 +4746,7 @@ function promoteSpectatorToActivePlayer(room, player, now) {
   resetPlayerForRound(room, player);
   queueSpawnStateEvent(room, player, now);
   queueInventoryStateEvent(room, player, now);
+  autoReadyPlayerForImmediateMatch(room, player, now);
 }
 
 function promoteQueuedSpectators(room, now) {
@@ -6367,6 +6444,11 @@ async function serveStatic(request, response) {
     return;
   }
 
+  if (url.pathname === "/assets/manifest.json") {
+    writeJson(response, 200, await buildPublicAssetManifest());
+    return;
+  }
+
   const isShared = url.pathname.startsWith("/shared/");
   const baseDir = isShared ? sharedDir : publicDir;
 
@@ -6616,7 +6698,7 @@ function setRoomPhase(room, phase, now, winner = null, options = {}) {
 
   if (phase === MATCH_PHASES.WAITING) {
     nextPhaseEndsAt = null;
-    nextMessage ??= "Waiting for ready players";
+    nextMessage ??= "Waiting for players";
   }
 
   if (phase === MATCH_PHASES.WARMUP) {
@@ -6715,6 +6797,26 @@ function maybeStartCountdown(room, now) {
   ) {
     setRoomPhase(room, MATCH_PHASES.WARMUP, now);
   }
+}
+
+function shouldAutoReadyPlayer(room, player) {
+  return Boolean(
+    room &&
+    player &&
+    !player.isSpectator &&
+    (room.match.phase === MATCH_PHASES.WAITING || isWarmupPhase(room.match.phase))
+  );
+}
+
+function autoReadyPlayerForImmediateMatch(room, player, now) {
+  if (!shouldAutoReadyPlayer(room, player)) {
+    return false;
+  }
+
+  player.ready = true;
+  markPlayerActive(player, now);
+  maybeStartCountdown(room, now);
+  return true;
 }
 
 function maybeStartRematch(room, now) {
@@ -7006,6 +7108,16 @@ function joinRoom(socket, payload) {
 
   const room = getRoom(roomId);
   markRoomActive(room, now);
+  const requestedMapId = getLobbyMap(payload.mapId).id;
+  const requestedTeamId = isValidLobbyOptionId(payload.teamId, GAME_CONFIG.lobby.teams)
+    ? payload.teamId
+    : null;
+  const requestedClassId = isValidLobbyOptionId(payload.classId, GAME_CONFIG.lobby.classes)
+    ? payload.classId
+    : null;
+  if (!roomExists) {
+    room.lobby.mapId = requestedMapId;
+  }
   const resolvedProfileId = authenticatedAccount?.profileId ?? requestedProfileId;
   const existingPlayer = Array.from(room.players.values()).find(
     (candidate) => candidate.profileId === resolvedProfileId
@@ -7050,6 +7162,13 @@ function joinRoom(socket, payload) {
     player.disconnectedAt = null;
     player.reconnectDeadlineAt = null;
     player.slotReserved = false;
+    if (requestedTeamId) {
+      player.teamId = requestedTeamId;
+    }
+    if (requestedClassId) {
+      player.classId = requestedClassId;
+      syncPlayerCombatProfile(player, now);
+    }
     if (player.isSpectator) {
       player.queuedForSlot = !requestedSpectator;
       if (
@@ -7086,9 +7205,10 @@ function joinRoom(socket, payload) {
     player = createPlayerState(socket.data.playerId, profile.profileId, playerName, profile.stats, {
       isSpectator: joinAsSpectator,
       queuedForSlot: joinAsSpectator && !requestedSpectator,
+      autoReady: !joinAsSpectator && (room.match.phase === MATCH_PHASES.WAITING || isWarmupPhase(room.match.phase)),
       room,
-      teamId: getBalancedTeamId(room),
-      classId: GAME_CONFIG.lobby.classes[0].id,
+      teamId: requestedTeamId ?? getBalancedTeamId(room),
+      classId: requestedClassId ?? GAME_CONFIG.lobby.classes[0].id,
       joinedRoomAt: now
     });
     markPlayerActive(player, now);
@@ -7105,6 +7225,7 @@ function joinRoom(socket, payload) {
   syncRoomOwner(room);
   syncRoomBots(room, now);
   promoteQueuedSpectators(room, now);
+  autoReadyPlayerForImmediateMatch(room, player, now);
 
   sendJson(socket, {
     type: MESSAGE_TYPES.JOINED,
@@ -7287,6 +7408,7 @@ function handleInput(socket, payload, now) {
   }
 
   markRoomActive(room, now);
+  autoReadyPlayerForImmediateMatch(room, player, now);
 
   const bucket = socket.data.inputBucket;
   if (!consumeRateBucket(bucket, now, GAME_CONFIG.antiCheat.maxInputsPerSecond)) {
@@ -7625,24 +7747,20 @@ function updateBotInputs(room, player, now) {
   const navigationTarget = moveTarget ?? decision.goal ?? { x: player.x, y: player.y };
   const targetDx = navigationTarget.x - player.x;
   const targetDy = navigationTarget.y - player.y;
-  const desiredHullAngle = Math.atan2(targetDy, targetDx);
-  const hullDelta = normalizeAngle(desiredHullAngle - player.angle);
   const moveDistance = Math.hypot(targetDx, targetDy);
+  const moveThreshold = Math.max(8, GAME_CONFIG.ai.waypointReachDistance * 0.35);
 
   player.input.seq = player.lastProcessedInputSeq;
   player.input.clientSentAt = now;
   player.input.receivedAt = now;
-  player.input.left = hullDelta < -0.14;
-  player.input.right = hullDelta > 0.14;
+  player.input.left = targetDx < -moveThreshold;
+  player.input.right = targetDx > moveThreshold;
   player.input.forward = false;
   player.input.back = false;
 
   if (moveDistance > GAME_CONFIG.ai.waypointReachDistance) {
-    if (ai.intent === BOT_AI_INTENTS.RETREAT && Math.abs(hullDelta) > Math.PI * 0.72) {
-      player.input.back = true;
-    } else {
-      player.input.forward = Math.abs(hullDelta) < Math.PI * 0.72;
-    }
+    player.input.forward = targetDy < -moveThreshold;
+    player.input.back = targetDy > moveThreshold;
   }
 
   const turretTarget = target ?? { x: GAME_CONFIG.objective.x, y: GAME_CONFIG.objective.y };
@@ -7665,8 +7783,8 @@ function clampTankPosition(x, y) {
 }
 
 function movePlayerWithCollision(player, distance) {
-  const nextX = player.x + Math.cos(player.angle) * distance;
-  const nextY = player.y + Math.sin(player.angle) * distance;
+  const nextX = player.x + distance.x;
+  const nextY = player.y + distance.y;
   const clampedX = clampTankPosition(nextX, player.y).x;
   const clampedY = clampTankPosition(player.x, nextY).y;
 
@@ -8094,25 +8212,23 @@ function updatePlayer(room, player, deltaSeconds, now) {
   };
   const stunned = getRemainingStunMs(player, now) > 0;
 
-  if (!stunned && player.input.left) {
-    player.angle = normalizeAngle(player.angle - GAME_CONFIG.tank.turnSpeed * deltaSeconds);
-  }
-
-  if (!stunned && player.input.right) {
-    player.angle = normalizeAngle(player.angle + GAME_CONFIG.tank.turnSpeed * deltaSeconds);
-  }
-
   player.turretAngle = player.input.turretAngle;
 
-  let distance = 0;
-  if (!stunned && player.input.forward) {
-    distance += GAME_CONFIG.tank.speed * deltaSeconds;
-  }
-  if (!stunned && player.input.back) {
-    distance -= GAME_CONFIG.tank.reverseSpeed * deltaSeconds;
+  const moveX = !stunned ? (player.input.right ? 1 : 0) - (player.input.left ? 1 : 0) : 0;
+  const moveY = !stunned ? (player.input.back ? 1 : 0) - (player.input.forward ? 1 : 0) : 0;
+  const moveMagnitude = Math.hypot(moveX, moveY);
+  const normalizedMoveX = moveMagnitude > 0 ? moveX / moveMagnitude : 0;
+  const normalizedMoveY = moveMagnitude > 0 ? moveY / moveMagnitude : 0;
+  const moveSpeed = moveMagnitude > 0 ? GAME_CONFIG.tank.speed : 0;
+
+  if (moveMagnitude > 0) {
+    player.angle = Math.atan2(normalizedMoveY, normalizedMoveX);
   }
 
-  movePlayerWithCollision(player, distance);
+  movePlayerWithCollision(player, {
+    x: normalizedMoveX * moveSpeed * deltaSeconds,
+    y: normalizedMoveY * moveSpeed * deltaSeconds
+  });
 
   if (!stunned && isCombatPhase(room.match.phase) && player.input.shoot) {
     const fireContext = getLagCompensatedFireContext(player, now);

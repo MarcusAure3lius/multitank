@@ -17,6 +17,7 @@ import {
 
 const canvas = document.getElementById("game");
 const context = canvas.getContext("2d");
+const devBadgeElement = document.getElementById("dev-badge");
 const statusElement = document.getElementById("status");
 const latencyElement = document.getElementById("latency");
 const matchStatusElement = document.getElementById("match-status");
@@ -122,6 +123,12 @@ let nextInputSeq = 1;
 let nextReliableMessageId = 1;
 let roomBrowserRefreshInFlight = false;
 let audioContext = null;
+const assetState = {
+  manifest: null,
+  images: new Map(),
+  failedImages: new Set(),
+  loadingImages: new Map()
+};
 
 const initialRoomFromUrl = new URL(window.location.href).searchParams.get("room");
 nameInput.value = localStorage.getItem(STORAGE_KEYS.name) ?? nameInput.value;
@@ -132,6 +139,8 @@ profileLabelElement.textContent = profileId.slice(0, 8);
 populateLobbySelects();
 refreshLobbyUi();
 updateSessionChrome();
+updateLocalDevBadge();
+void refreshDiscoveredAssets();
 
 function getOrCreateProfileId() {
   const stored = localStorage.getItem(STORAGE_KEYS.profileId);
@@ -146,6 +155,146 @@ function getOrCreateProfileId() {
 
 function setStatus(text) {
   statusElement.textContent = text;
+}
+
+function updateLocalDevBadge() {
+  if (!devBadgeElement) {
+    return;
+  }
+
+  const hostname = window.location.hostname;
+  const isLocalHost =
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]";
+
+  devBadgeElement.hidden = !isLocalHost;
+  if (isLocalHost) {
+    devBadgeElement.textContent = `LOCAL DEV ${window.location.port ? `:${window.location.port}` : ""}`;
+  }
+}
+
+function collectManifestImagePaths(node, bucket = []) {
+  if (typeof node === "string" && node) {
+    bucket.push(node);
+    return bucket;
+  }
+
+  if (!node || typeof node !== "object") {
+    return bucket;
+  }
+
+  if (Array.isArray(node)) {
+    for (const entry of node) {
+      collectManifestImagePaths(entry, bucket);
+    }
+    return bucket;
+  }
+
+  for (const value of Object.values(node)) {
+    collectManifestImagePaths(value, bucket);
+  }
+
+  return bucket;
+}
+
+function loadDiscoveredImage(src) {
+  if (!src || assetState.images.has(src) || assetState.failedImages.has(src)) {
+    return null;
+  }
+
+  const existing = assetState.loadingImages.get(src);
+  if (existing) {
+    return existing;
+  }
+
+  const image = new Image();
+  image.decoding = "async";
+
+  const promise = new Promise((resolve) => {
+    image.addEventListener("load", () => {
+      assetState.images.set(src, image);
+      assetState.loadingImages.delete(src);
+      resolve(image);
+    });
+
+    image.addEventListener("error", () => {
+      assetState.failedImages.add(src);
+      assetState.loadingImages.delete(src);
+      resolve(null);
+    });
+  });
+
+  assetState.loadingImages.set(src, promise);
+  image.src = src;
+  return promise;
+}
+
+function preloadManifestImages(manifest) {
+  const imagePaths = Array.from(new Set(collectManifestImagePaths(manifest?.images ?? {})));
+  for (const src of imagePaths) {
+    loadDiscoveredImage(src);
+  }
+}
+
+async function refreshDiscoveredAssets() {
+  try {
+    const response = await fetch("/assets/manifest.json", {
+      cache: "no-store"
+    });
+
+    if (!response.ok) {
+      return;
+    }
+
+    const manifest = await response.json();
+    assetState.manifest = manifest;
+    preloadManifestImages(manifest);
+  } catch (error) {
+    // Asset discovery is optional. The canvas renderer has full procedural fallbacks.
+  }
+}
+
+function getManifestImagePath(...segments) {
+  let current = assetState.manifest?.images ?? null;
+
+  for (const segment of segments) {
+    current = current?.[segment];
+  }
+
+  return typeof current === "string" && current ? current : null;
+}
+
+function getLoadedImageByPath(src) {
+  return src ? assetState.images.get(src) ?? null : null;
+}
+
+function getLoadedWorldImage(slot) {
+  return getLoadedImageByPath(getManifestImagePath("world", slot));
+}
+
+function getResolvedTankImagePath(player, part) {
+  const partKey = part === "turret" ? "turrets" : "hulls";
+  const manifest = assetState.manifest?.images?.tanks?.[partKey];
+  if (!manifest) {
+    return null;
+  }
+
+  const classId = typeof player?.classId === "string" && manifest[player.classId] ? player.classId : null;
+  const classManifest = classId ? manifest[classId] : null;
+  const teamId = typeof player?.teamId === "string" ? player.teamId : "neutral";
+
+  return (
+    classManifest?.[teamId] ??
+    classManifest?.default ??
+    manifest.default ??
+    null
+  );
+}
+
+function getLoadedTankImage(player, part) {
+  return getLoadedImageByPath(getResolvedTankImagePath(player, part));
 }
 
 function updateSessionChrome() {
@@ -807,7 +956,7 @@ function refreshLobbyUi(localPlayer = getLocalPlayer(), you = latestYou) {
   if (!currentRoomId && !latestLobby) {
     roomLabelElement.textContent = roomInput.value || "-";
     lobbyRoomCodeElement.textContent = `Room code: ${roomInput.value || "-"}`;
-    lobbySummaryElement.textContent = "Connect to a room to manage map, team, class, and rematch settings.";
+    lobbySummaryElement.textContent = "Connect deploys you straight into the arena using these room and loadout defaults.";
     mapSelect.value = GAME_CONFIG.lobby.maps[0].id;
     teamSelect.value = GAME_CONFIG.lobby.teams[0].id;
     classSelect.value = GAME_CONFIG.lobby.classes[0].id;
@@ -1114,29 +1263,20 @@ function getCapturedInputState() {
 }
 
 function simulateTankMovement(state, input, deltaSeconds) {
-  let nextAngle = state.angle;
-  if (input.left) {
-    nextAngle -= GAME_CONFIG.tank.turnSpeed * deltaSeconds;
-  }
-  if (input.right) {
-    nextAngle += GAME_CONFIG.tank.turnSpeed * deltaSeconds;
-  }
-
-  let distance = 0;
-  if (input.forward) {
-    distance += GAME_CONFIG.tank.speed * deltaSeconds;
-  }
-  if (input.back) {
-    distance -= GAME_CONFIG.tank.reverseSpeed * deltaSeconds;
-  }
-
+  const moveX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  const moveY = (input.back ? 1 : 0) - (input.forward ? 1 : 0);
+  const moveMagnitude = Math.hypot(moveX, moveY);
+  const normalizedMoveX = moveMagnitude > 0 ? moveX / moveMagnitude : 0;
+  const normalizedMoveY = moveMagnitude > 0 ? moveY / moveMagnitude : 0;
+  const nextAngle = moveMagnitude > 0 ? Math.atan2(normalizedMoveY, normalizedMoveX) : state.angle;
+  const moveSpeed = moveMagnitude > 0 ? GAME_CONFIG.tank.speed : 0;
   const nextX = Math.max(
     GAME_CONFIG.world.padding,
-    Math.min(GAME_CONFIG.world.width - GAME_CONFIG.world.padding, state.x + Math.cos(nextAngle) * distance)
+    Math.min(GAME_CONFIG.world.width - GAME_CONFIG.world.padding, state.x + normalizedMoveX * moveSpeed * deltaSeconds)
   );
   const nextY = Math.max(
     GAME_CONFIG.world.padding,
-    Math.min(GAME_CONFIG.world.height - GAME_CONFIG.world.padding, state.y + Math.sin(nextAngle) * distance)
+    Math.min(GAME_CONFIG.world.height - GAME_CONFIG.world.padding, state.y + normalizedMoveY * moveSpeed * deltaSeconds)
   );
   let resolvedX = state.x;
   let resolvedY = state.y;
@@ -1813,6 +1953,9 @@ function connect(options = {}) {
       profileId,
       authToken,
       spectate: spectateInput.checked,
+      mapId: mapSelect.value,
+      teamId: teamSelect.value,
+      classId: classSelect.value,
       gameVersion: GAME_BUILD_VERSION,
       assetVersion: ASSET_BUNDLE_VERSION
     });
@@ -2188,11 +2331,27 @@ function updateRenderState(deltaSeconds, frameAt) {
 }
 
 function drawBackground() {
+  const arenaFloor = getLoadedWorldImage("arenaFloor");
   context.fillStyle = "#14324c";
   context.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (arenaFloor) {
+    drawRepeatedImage(arenaFloor, {
+      opacity: 0.9
+    });
+  }
 }
 
 function drawGrid() {
+  const gridOverlay = getLoadedWorldImage("arenaGrid");
+  if (gridOverlay) {
+    drawRepeatedImage(gridOverlay, {
+      opacity: 0.75
+    });
+    drawWorldBounds();
+    return;
+  }
+
   const gridSize = WORLD_RENDER.gridSize;
   const phaseX = ((camera.x % gridSize) + gridSize) % gridSize;
   const phaseY = ((camera.y % gridSize) + gridSize) % gridSize;
@@ -2209,22 +2368,20 @@ function drawGrid() {
     context.fillRect(0, Math.round(y), canvas.width, 1);
   }
 
-  const worldLeft = Math.round(-camera.x);
-  const worldTop = Math.round(-camera.y);
-  const worldRight = Math.round(GAME_CONFIG.world.width - camera.x);
-  const worldBottom = Math.round(GAME_CONFIG.world.height - camera.y);
-
-  context.fillStyle = "rgba(255, 255, 255, 0.35)";
-  context.fillRect(worldLeft, worldTop, Math.max(1, worldRight - worldLeft), 2);
-  context.fillRect(worldLeft, worldBottom - 2, Math.max(1, worldRight - worldLeft), 2);
-  context.fillRect(worldLeft, worldTop, 2, Math.max(1, worldBottom - worldTop));
-  context.fillRect(worldRight - 2, worldTop, 2, Math.max(1, worldBottom - worldTop));
+  drawWorldBounds();
 }
 
 function drawObstacles() {
+  const obstacleTexture = getLoadedWorldImage("obstacleBlock");
+
   for (const obstacle of GAME_CONFIG.world.obstacles) {
-    context.fillStyle = "#30475e";
-    context.fillRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height);
+    if (obstacleTexture) {
+      context.drawImage(obstacleTexture, obstacle.x, obstacle.y, obstacle.width, obstacle.height);
+    } else {
+      context.fillStyle = "#30475e";
+      context.fillRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height);
+    }
+
     context.strokeStyle = "rgba(255,255,255,0.18)";
     context.lineWidth = 2;
     context.strokeRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height);
@@ -2236,6 +2393,8 @@ function drawObjective() {
     return;
   }
 
+  const objectiveRing = getLoadedWorldImage("objectiveRing");
+
   const fill =
     latestObjective.contested
       ? "rgba(239, 71, 111, 0.18)"
@@ -2246,13 +2405,25 @@ function drawObjective() {
     latestObjective.contested ? "#ef476f" : latestObjective.ownerId ? "#ffd166" : "#94d2bd";
 
   context.save();
-  context.beginPath();
-  context.arc(latestObjective.x, latestObjective.y, latestObjective.radius, 0, Math.PI * 2);
-  context.fillStyle = fill;
-  context.fill();
-  context.strokeStyle = stroke;
-  context.lineWidth = 3;
-  context.stroke();
+  if (objectiveRing) {
+    context.globalAlpha = latestObjective.ownerId ? 0.8 : 0.6;
+    context.drawImage(
+      objectiveRing,
+      latestObjective.x - latestObjective.radius,
+      latestObjective.y - latestObjective.radius,
+      latestObjective.radius * 2,
+      latestObjective.radius * 2
+    );
+    context.globalAlpha = 1;
+  } else {
+    context.beginPath();
+    context.arc(latestObjective.x, latestObjective.y, latestObjective.radius, 0, Math.PI * 2);
+    context.fillStyle = fill;
+    context.fill();
+    context.strokeStyle = stroke;
+    context.lineWidth = 3;
+    context.stroke();
+  }
 
   if (latestObjective.captureTargetName && latestObjective.captureProgress > 0) {
     context.beginPath();
@@ -2283,6 +2454,52 @@ function drawObjective() {
   context.restore();
 }
 
+function drawRepeatedImage(image, options = {}) {
+  const { opacity = 1 } = options;
+  const tileWidth = Math.max(1, image.naturalWidth || image.width || 1);
+  const tileHeight = Math.max(1, image.naturalHeight || image.height || 1);
+  const phaseX = ((camera.x % tileWidth) + tileWidth) % tileWidth;
+  const phaseY = ((camera.y % tileHeight) + tileHeight) % tileHeight;
+  const startX = -Math.round(phaseX);
+  const startY = -Math.round(phaseY);
+
+  context.save();
+  context.globalAlpha = opacity;
+
+  for (let x = startX; x <= canvas.width; x += tileWidth) {
+    for (let y = startY; y <= canvas.height; y += tileHeight) {
+      context.drawImage(image, Math.round(x), Math.round(y), tileWidth, tileHeight);
+    }
+  }
+
+  context.restore();
+}
+
+function drawWorldBounds() {
+  const worldLeft = Math.round(-camera.x);
+  const worldTop = Math.round(-camera.y);
+  const worldRight = Math.round(GAME_CONFIG.world.width - camera.x);
+  const worldBottom = Math.round(GAME_CONFIG.world.height - camera.y);
+
+  context.fillStyle = "rgba(255, 255, 255, 0.35)";
+  context.fillRect(worldLeft, worldTop, Math.max(1, worldRight - worldLeft), 2);
+  context.fillRect(worldLeft, worldBottom - 2, Math.max(1, worldRight - worldLeft), 2);
+  context.fillRect(worldLeft, worldTop, 2, Math.max(1, worldBottom - worldTop));
+  context.fillRect(worldRight - 2, worldTop, 2, Math.max(1, worldBottom - worldTop));
+}
+
+function drawRotatedSprite(image, x, y, angle, width, height, options = {}) {
+  const { alpha = 1, offsetX = 0, offsetY = 0 } = options;
+
+  context.save();
+  context.translate(x, y);
+  context.rotate(angle);
+  context.translate(offsetX, offsetY);
+  context.globalAlpha = alpha;
+  context.drawImage(image, -width / 2, -height / 2, width, height);
+  context.restore();
+}
+
 function drawTank(player) {
   if (player.isSpectator) {
     return;
@@ -2307,6 +2524,10 @@ function drawTank(player) {
   const killBurst = Math.max(0, ((player.killBurstUntil ?? 0) - now) / 500);
   const overlayAction = animation?.overlayAction ?? ANIMATION_ACTIONS.NONE;
   const stunned = Boolean(combat?.stunned) || (animation?.stunRemainingMs ?? 0) > 0 || (player.stunWaveUntil ?? 0) > now;
+  const hullSprite = getLoadedTankImage(player, "hull");
+  const turretSprite = getLoadedTankImage(player, "turret");
+  const hullSpriteAlpha = player.alive ? 1 : 0.35 + deathPulse * 0.25;
+  const turretSpriteAlpha = player.alive ? 1 : 0.4 + deathPulse * 0.22;
 
   if (spawnPulse > 0.01) {
     context.save();
@@ -2339,37 +2560,68 @@ function drawTank(player) {
     context.restore();
   }
 
-  context.save();
-  context.translate(x, y);
-  context.rotate(hullAngle);
-
-  context.fillStyle =
-    hitFlash > 0.01
-      ? `rgba(239, 71, 111, ${0.45 + hitFlash * 0.35})`
-      : player.alive
-        ? player.color
-        : `rgba(255,255,255,${0.18 + deathPulse * 0.18})`;
-  context.fillRect(-22, -18, 44, 36);
-  context.fillStyle = "rgba(0,0,0,0.24)";
-  context.fillRect(-16, -24, 32, 6);
-  context.fillRect(-16, 18, 32, 6);
-  context.fillStyle = `rgba(255,255,255,${0.08 + motionBlend * 0.16})`;
-  for (let stripeX = -18 - treadOffset; stripeX <= 18; stripeX += 10) {
-    context.fillRect(stripeX, -24, 4, 6);
-    context.fillRect(stripeX, 18, 4, 6);
+  if (hullSprite) {
+    drawRotatedSprite(
+      hullSprite,
+      x,
+      y,
+      hullAngle,
+      GAME_CONFIG.tank.radius * 3.6,
+      GAME_CONFIG.tank.radius * 3,
+      {
+        alpha: hullSpriteAlpha
+      }
+    );
+  } else {
+    context.save();
+    context.beginPath();
+    context.arc(x, y, GAME_CONFIG.tank.radius, 0, Math.PI * 2);
+    context.fillStyle =
+      hitFlash > 0.01
+        ? `rgba(239, 71, 111, ${0.55 + hitFlash * 0.25})`
+        : player.alive
+          ? player.color
+          : `rgba(255,255,255,${0.18 + deathPulse * 0.18})`;
+    context.fill();
+    context.lineWidth = 3;
+    context.strokeStyle = "rgba(255,255,255,0.2)";
+    context.stroke();
+    context.restore();
   }
-  context.restore();
 
-  context.save();
-  context.translate(x, y);
-  context.rotate(turretAngle);
-  context.translate(-recoil * 4, 0);
-  context.fillStyle = overlayAction === ANIMATION_ACTIONS.HIT ? "#ffd6d6" : "#f1f5f9";
-  context.fillRect(-8, -10, 30, 20);
-  context.fillStyle = "#d90429";
-  context.fillRect(16, -4, 26, 8);
+  if (turretSprite) {
+    drawRotatedSprite(
+      turretSprite,
+      x,
+      y,
+      turretAngle,
+      GAME_CONFIG.tank.radius * 3.4,
+      GAME_CONFIG.tank.radius * 2.4,
+      {
+        alpha: turretSpriteAlpha,
+        offsetX: -recoil * 4
+      }
+    );
+  } else {
+    context.save();
+    context.translate(x, y);
+    context.rotate(turretAngle);
+    context.translate(-recoil * 4, 0);
+    context.fillStyle = overlayAction === ANIMATION_ACTIONS.HIT ? "#ffd6d6" : "#f1f5f9";
+    context.fillRect(-10, -10, 20, 20);
+    context.fillStyle = "#d90429";
+    context.fillRect(10, -4, 26, 8);
+    context.strokeStyle = "rgba(8, 15, 28, 0.35)";
+    context.lineWidth = 2;
+    context.strokeRect(-10, -10, 20, 20);
+    context.restore();
+  }
 
   if (player.id === localPlayerId && player.muzzleFlashUntil && performance.now() < player.muzzleFlashUntil) {
+    context.save();
+    context.translate(x, y);
+    context.rotate(turretAngle);
+    context.translate(-recoil * 4, 0);
     context.fillStyle = "rgba(255, 209, 102, 0.85)";
     context.beginPath();
     context.moveTo(42, 0);
@@ -2378,8 +2630,8 @@ function drawTank(player) {
     context.lineTo(58, 7);
     context.closePath();
     context.fill();
+    context.restore();
   }
-  context.restore();
 
   context.save();
   context.translate(x, y);
@@ -2591,7 +2843,7 @@ window.addEventListener("keydown", (event) => {
     event.preventDefault();
   }
 
-  if (event.code === "KeyR" && !event.repeat) {
+  if (event.code === "KeyR" && !event.repeat && isResultsPhase(latestMatch?.phase)) {
     const localPlayer = getLocalPlayer();
     if (localPlayer?.isSpectator ?? latestYou?.isSpectator) {
       return;

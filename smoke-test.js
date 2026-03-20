@@ -207,6 +207,9 @@ function joinRoom(socket, name, profileId, messageId, options = {}) {
       profileId,
       authToken: options.authToken ?? null,
       spectate: Boolean(options.spectate),
+      mapId: options.mapId ?? null,
+      teamId: options.teamId ?? null,
+      classId: options.classId ?? null,
       gameVersion: options.gameVersion ?? GAME_BUILD_VERSION,
       assetVersion: options.assetVersion ?? ASSET_BUNDLE_VERSION,
       messageId
@@ -336,6 +339,21 @@ function segmentIntersectsRect(startX, startY, endX, endY, rect, padding = 0) {
 }
 
 function getPlayerState(payload, playerId) {
+  return (
+    payload.players?.find((player) => player.id === playerId) ??
+    payload.replication?.spawns
+      ?.filter((record) => record.kind === REPLICATION_KINDS.PLAYER)
+      .map((record) => ({ id: record.id, ...record.state }))
+      .find((player) => player.id === playerId) ??
+    payload.replication?.updates
+      ?.filter((record) => record.kind === REPLICATION_KINDS.PLAYER)
+      .map((record) => ({ id: record.id, ...record.state }))
+      .find((player) => player.id === playerId) ??
+    null
+  );
+}
+
+function getFullPlayerState(payload, playerId) {
   return (
     payload.players?.find((player) => player.id === playerId) ??
     payload.replication?.spawns
@@ -824,13 +842,6 @@ try {
   joinRoom(botProbe, "BotProbe", "bot-probe-smoke", "join-bot-probe", { roomId: "bot-smoke" });
   await Promise.all([botProbeJoinedPromise, botProbeJoinAckPromise]);
 
-  const botProbeReadyAckPromise = waitForMessage(
-    botProbe,
-    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "ready-bot-probe"
-  );
-  setReady(botProbe, true, "ready-bot-probe");
-  await botProbeReadyAckPromise;
-
   const botProbeState = await waitForState(
     botProbe,
     (payload) =>
@@ -891,8 +902,15 @@ try {
     bravo,
     (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "join-bravo"
   );
-  joinRoom(alpha, "Alpha", alphaProfileId, "join-alpha");
-  joinRoom(bravo, "Bravo", bravoProfileId, "join-bravo");
+  joinRoom(alpha, "Alpha", alphaProfileId, "join-alpha", {
+    mapId: "switchyard",
+    teamId: "bravo",
+    classId: "vanguard"
+  });
+  joinRoom(bravo, "Bravo", bravoProfileId, "join-bravo", {
+    teamId: "alpha",
+    classId: "scout"
+  });
   const [alphaJoined, bravoJoined] = await Promise.all([
     alphaJoinedPromise,
     bravoJoinedPromise,
@@ -902,39 +920,6 @@ try {
   const alphaPlayerId = alphaJoined.playerId;
   const bravoPlayerId = bravoJoined.playerId;
   let alphaInputSeq = 1;
-
-  const alphaMapAckPromise = waitForMessage(
-    alpha,
-    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "lobby-map"
-  );
-  const alphaTeamAckPromise = waitForMessage(
-    alpha,
-    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "lobby-team-alpha"
-  );
-  const alphaClassAckPromise = waitForMessage(
-    alpha,
-    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "lobby-class-alpha"
-  );
-  const bravoTeamAckPromise = waitForMessage(
-    bravo,
-    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "lobby-team-bravo"
-  );
-  const bravoClassAckPromise = waitForMessage(
-    bravo,
-    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "lobby-class-bravo"
-  );
-  sendLobbyUpdate(alpha, "map", { mapId: "switchyard" }, "lobby-map");
-  sendLobbyUpdate(alpha, "team", { teamId: "bravo" }, "lobby-team-alpha");
-  sendLobbyUpdate(alpha, "class", { classId: "vanguard" }, "lobby-class-alpha");
-  sendLobbyUpdate(bravo, "team", { teamId: "alpha" }, "lobby-team-bravo");
-  sendLobbyUpdate(bravo, "class", { classId: "scout" }, "lobby-class-bravo");
-  await Promise.all([
-    alphaMapAckPromise,
-    alphaTeamAckPromise,
-    alphaClassAckPromise,
-    bravoTeamAckPromise,
-    bravoClassAckPromise
-  ]);
 
   const lobbyState = await waitForState(
     alpha,
@@ -976,7 +961,11 @@ try {
   const stagingMoveState = await waitForState(
     alpha,
     (payload) => {
-      if (payload.match?.phase !== MATCH_PHASES.WAITING) {
+      if (
+        payload.match?.phase !== MATCH_PHASES.WAITING &&
+        payload.match?.phase !== MATCH_PHASES.WARMUP &&
+        payload.match?.phase !== MATCH_PHASES.IN_PROGRESS
+      ) {
         return false;
       }
 
@@ -986,7 +975,7 @@ try {
         Math.hypot(player.x - stagingAlphaPlayer.x, player.y - stagingAlphaPlayer.y) >= 12
       );
     },
-    "staging movement before ready"
+    "movement immediately after connect"
   );
 
   sendInput(alpha, {
@@ -1015,28 +1004,34 @@ try {
     throw new Error("Expected /rooms to expose the synced room browser summary");
   }
 
-  const alphaReadyAckPromise = waitForMessage(
-    alpha,
-    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "ready-alpha"
-  );
-  const bravoReadyAckPromise = waitForMessage(
-    bravo,
-    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "ready-bravo"
-  );
-  setReady(alpha, true, "ready-alpha");
-  setReady(bravo, true, "ready-bravo");
-  await Promise.all([alphaReadyAckPromise, bravoReadyAckPromise]);
-
   const [warmupStateA, warmupStateB] = await Promise.all([
-    waitForState(alpha, (payload) => payload.match?.phase === MATCH_PHASES.WARMUP, "alpha warmup"),
-    waitForState(bravo, (payload) => payload.match?.phase === MATCH_PHASES.WARMUP, "bravo warmup")
+    waitForState(
+      alpha,
+      (payload) =>
+        payload.match?.phase === MATCH_PHASES.WARMUP ||
+        payload.match?.phase === MATCH_PHASES.IN_PROGRESS,
+      "alpha auto-start"
+    ),
+    waitForState(
+      bravo,
+      (payload) =>
+        payload.match?.phase === MATCH_PHASES.WARMUP ||
+        payload.match?.phase === MATCH_PHASES.IN_PROGRESS,
+      "bravo auto-start"
+    )
   ]);
 
   if (
-    warmupStateA.match?.phase !== MATCH_PHASES.WARMUP ||
-    warmupStateB.match?.phase !== MATCH_PHASES.WARMUP
+    (
+      warmupStateA.match?.phase !== MATCH_PHASES.WARMUP &&
+      warmupStateA.match?.phase !== MATCH_PHASES.IN_PROGRESS
+    ) ||
+    (
+      warmupStateB.match?.phase !== MATCH_PHASES.WARMUP &&
+      warmupStateB.match?.phase !== MATCH_PHASES.IN_PROGRESS
+    )
   ) {
-    throw new Error("Expected both clients to observe the authoritative warmup phase before the round goes live");
+    throw new Error("Expected both clients to auto-start into warmup or live play after connecting");
   }
 
   const [stateA, stateB] = await Promise.all([
@@ -1116,7 +1111,16 @@ try {
     throw new Error("Expected private inventory events to be filtered from other players");
   }
 
-  const localAnimatedPlayer = getPlayerState(stateA, stateA.you?.playerId);
+  const fullStateA = getFullPlayerState(stateA, stateA.you?.playerId)
+    ? stateA
+    : await waitForState(
+        alpha,
+        (payload) =>
+          payload.match?.phase === MATCH_PHASES.IN_PROGRESS &&
+          Boolean(getFullPlayerState(payload, alphaPlayerId)),
+        "alpha full local player snapshot"
+      );
+  const localAnimatedPlayer = getFullPlayerState(fullStateA, stateA.you?.playerId);
   if (
     !localAnimatedPlayer?.animation ||
     !localAnimatedPlayer?.combat ||
@@ -1168,7 +1172,7 @@ try {
     throw new Error("Expected spectator interest management to include all active player entities");
   }
 
-  const alphaPlayer = getPlayerState(stateA, alphaPlayerId);
+  const alphaPlayer = getFullPlayerState(fullStateA, alphaPlayerId) ?? getPlayerState(stateA, alphaPlayerId);
   const lagCompShotAngle = alphaPlayer ? findClearShotAngle(alphaPlayer) : null;
 
   if (!alphaPlayerId || !alphaPlayer || lagCompShotAngle === null) {
