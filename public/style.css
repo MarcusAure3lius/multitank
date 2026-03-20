@@ -306,8 +306,7 @@ canvas {
   overflow: hidden;
 }
 
-.fallback-center-marker,
-.fallback-player-marker {
+.fallback-center-marker {
   position: absolute;
   transform: translate(-50%, -50%);
 }
@@ -330,8 +329,11 @@ canvas {
 }
 
 .fallback-player-marker {
+  position: absolute;
   width: 0;
   height: 0;
+  transform: translate(-50%, -50%) scale(var(--world-scale, 1));
+  transform-origin: center center;
 }
 
 .fallback-player-ring,
@@ -373,7 +375,8 @@ canvas {
   position: absolute;
   width: 0;
   height: 0;
-  transform: translate(-50%, -50%);
+  transform: translate(-50%, -50%) scale(var(--world-scale, 1));
+  transform-origin: center center;
 }
 
 .fallback-remote-ring,

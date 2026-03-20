@@ -400,6 +400,14 @@ function positionFallbackMarker(element, worldX, worldY) {
   element.style.top = `${screenY}px`;
 }
 
+function setFallbackMarkerScale(element) {
+  if (!element) {
+    return;
+  }
+
+  element.style.setProperty("--world-scale", String(cameraZoom));
+}
+
 function syncFallbackRemoteMarkers() {
   if (!fallbackRemoteMarkersElement) {
     return;
@@ -435,6 +443,7 @@ function syncFallbackRemoteMarkers() {
     if (label) {
       label.textContent = player.isBot ? `${player.name} [BOT]` : player.name;
     }
+    setFallbackMarkerScale(marker);
     positionFallbackMarker(marker, getPlayerVisualX(player), getPlayerVisualY(player));
   }
 }
@@ -473,13 +482,14 @@ function updateFallbackVisuals() {
   }
 
   const localPlayer = getLocalPlayer();
+  const localVisualState = ensureLocalVisualState(localPlayer);
   if (fallbackPlayerMarkerElement) {
     fallbackPlayerMarkerElement.hidden = !(localPlayer && !localPlayer.isSpectator);
   }
 
-  if (localPlayer && !localPlayer.isSpectator) {
-    fallbackPlayerMarkerElement.style.left = `${playAreaElement.clientWidth / 2}px`;
-    fallbackPlayerMarkerElement.style.top = `${playAreaElement.clientHeight / 2}px`;
+  if (localPlayer && !localPlayer.isSpectator && localVisualState) {
+    setFallbackMarkerScale(fallbackPlayerMarkerElement);
+    positionFallbackMarker(fallbackPlayerMarkerElement, localVisualState.x, localVisualState.y);
   }
 
   syncFallbackRemoteMarkers();
