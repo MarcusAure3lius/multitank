@@ -1284,6 +1284,7 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     queuedForSlot = false,
     autoReady = false,
     room = null,
+    color = null,
     teamId = GAME_CONFIG.lobby.teams[0].id,
     classId = GAME_CONFIG.lobby.classes[0].id,
     joinedRoomAt = Date.now()
@@ -1297,7 +1298,7 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     id,
     profileId,
     name,
-    color: randomChoice(palette, room),
+    color: typeof color === "string" && color ? color : randomChoice(palette, room),
     x: spawn.x,
     y: spawn.y,
     angle: 0,
@@ -1373,15 +1374,60 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
   };
 }
 
-function createBotState(room) {
+function getPreferredBotAnchorPlayer(room) {
+  return Array.from(room?.players.values() ?? [])
+    .filter((player) => !player.isBot && !player.isSpectator)
+    .sort((left, right) => left.joinedRoomAt - right.joinedRoomAt || left.name.localeCompare(right.name))[0] ?? null;
+}
+
+function getOpposingTeamId(teamId) {
+  const fallbackTeamId = GAME_CONFIG.lobby.teams[0]?.id ?? "alpha";
+  if (!isValidLobbyOptionId(teamId, GAME_CONFIG.lobby.teams)) {
+    return fallbackTeamId;
+  }
+
+  return GAME_CONFIG.lobby.teams.find((team) => team.id !== teamId)?.id ?? fallbackTeamId;
+}
+
+function syncBotLoadout(bot, anchorPlayer, now) {
+  if (!bot || !bot.isBot) {
+    return;
+  }
+
+  if (anchorPlayer) {
+    bot.teamId = getOpposingTeamId(anchorPlayer.teamId);
+    bot.classId = isValidLobbyOptionId(anchorPlayer.classId, GAME_CONFIG.lobby.classes)
+      ? anchorPlayer.classId
+      : GAME_CONFIG.lobby.classes[0].id;
+  } else {
+    bot.teamId = getOpposingTeamId(bot.teamId);
+    bot.classId = GAME_CONFIG.lobby.classes[0].id;
+  }
+
+  bot.color = "#dc2626";
+  bot.hp = clamp(
+    Number.isFinite(Number(bot.hp)) ? Number(bot.hp) : GAME_CONFIG.tank.hitPoints,
+    0,
+    GAME_CONFIG.tank.hitPoints
+  );
+  syncPlayerCombatProfile(bot, now);
+}
+
+function createBotState(room, anchorPlayer = null, now = Date.now()) {
   const botNumber = room.nextBotId++;
   const profileId = `bot-${room.id}-${botNumber}`;
-  const name = `${botNames[(botNumber - 1) % botNames.length]} ${botNumber}`;
+  const name = botNumber === 1 ? "Enemy Bot" : `Enemy Bot ${botNumber}`;
+  const botTeamId = getOpposingTeamId(anchorPlayer?.teamId ?? GAME_CONFIG.lobby.teams[0]?.id);
+  const botClassId = isValidLobbyOptionId(anchorPlayer?.classId, GAME_CONFIG.lobby.classes)
+    ? anchorPlayer.classId
+    : GAME_CONFIG.lobby.classes[0].id;
   return createPlayerState(`bot-${room.id}-${botNumber}`, profileId, name, sanitizeStats(), {
     isBot: true,
     room,
-    teamId: getBalancedTeamId(room),
-    classId: GAME_CONFIG.lobby.classes[(botNumber - 1) % GAME_CONFIG.lobby.classes.length].id
+    color: "#dc2626",
+    teamId: botTeamId,
+    classId: botClassId,
+    joinedRoomAt: now
   });
 }
 
@@ -6872,8 +6918,7 @@ function maybeStartRematch(room, now) {
 function syncRoomBots(room, now) {
   const humanPlayerCount = getRestorableHumanMatchPlayerCount(room, now);
   const bots = getBotPlayers(room);
-  const shouldAutoFillBots =
-    GAME_CONFIG.ai.fillToMinPlayers || /^bot-/i.test(room.id ?? "");
+  const anchorPlayer = getPreferredBotAnchorPlayer(room);
 
   if (humanPlayerCount === 0) {
     for (const bot of bots) {
@@ -6887,19 +6932,14 @@ function syncRoomBots(room, now) {
     bot.connected = true;
     bot.disconnectedAt = null;
     bot.reconnectDeadlineAt = null;
+    syncBotLoadout(bot, anchorPlayer, now);
   }
 
-  if (
-    !shouldAutoFillBots ||
-    (room.match.phase !== MATCH_PHASES.WAITING && !isWarmupPhase(room.match.phase))
-  ) {
+  if (room.match.phase !== MATCH_PHASES.WAITING && !isWarmupPhase(room.match.phase)) {
     return;
   }
 
-  const desiredBotCount = Math.min(
-    GAME_CONFIG.ai.maxBotsPerRoom,
-    Math.max(0, GAME_CONFIG.match.minPlayers - getConnectedMatchPlayers(room).length)
-  );
+  const desiredBotCount = Math.min(GAME_CONFIG.ai.maxBotsPerRoom, humanPlayerCount > 0 ? 1 : 0);
 
   if (bots.length > desiredBotCount) {
     for (const bot of bots.slice(desiredBotCount)) {
@@ -6909,7 +6949,7 @@ function syncRoomBots(room, now) {
   }
 
   while (getBotPlayers(room).length < desiredBotCount) {
-    const bot = createBotState(room);
+    const bot = createBotState(room, anchorPlayer, now);
     room.players.set(bot.id, bot);
   }
 }
@@ -7506,7 +7546,7 @@ function isEnemyBotTarget(player, candidate) {
     candidate.connected &&
     candidate.alive &&
     isActiveParticipant(candidate) &&
-    candidate.teamId !== player.teamId
+    (!player.isBot ? candidate.teamId !== player.teamId : !candidate.isBot)
   );
 }
 

@@ -2161,7 +2161,7 @@ function applySnapshot(payload) {
     }
 
     playerLabelElement.textContent =
-      `${localPlayer.name}${localPlayer.isSpectator ? " [SPEC]" : ""} (${localPlayer.teamId}/${localPlayer.classId} | ${localPlayer.score}/${localPlayer.assists ?? 0}/${localPlayer.deaths} | ${localPlayer.credits} cr)`;
+      `${localPlayer.name}${localPlayer.isSpectator ? " [SPEC]" : ""} (HP ${localPlayer.hp}/${GAME_CONFIG.tank.hitPoints} | ${localPlayer.teamId}/${localPlayer.classId} | ${localPlayer.score}/${localPlayer.assists ?? 0}/${localPlayer.deaths} | ${localPlayer.credits} cr)`;
 
     if (payload.you) {
       refreshSessionUi(localPlayer, payload.you);
@@ -2957,6 +2957,20 @@ function drawTank(player) {
   context.beginPath();
   context.arc(0, 0, turretBaseRadius, 0, Math.PI * 2);
   context.fill();
+  context.restore();
+
+  const hpRatio = clamp((Number(player.hp) || 0) / GAME_CONFIG.tank.hitPoints, 0, 1);
+  const healthBarWidth = 52;
+  const healthBarHeight = 7;
+  const healthBarY = y - bodyRadius - 18;
+  const healthBarX = x - healthBarWidth / 2;
+
+  context.save();
+  context.globalAlpha = alpha;
+  context.fillStyle = "rgba(17, 17, 17, 0.88)";
+  context.fillRect(healthBarX, healthBarY, healthBarWidth, healthBarHeight);
+  context.fillStyle = hpRatio > 0.5 ? "#22c55e" : hpRatio > 0.25 ? "#f59e0b" : "#ef4444";
+  context.fillRect(healthBarX + 1, healthBarY + 1, Math.max(0, (healthBarWidth - 2) * hpRatio), healthBarHeight - 2);
   context.restore();
 }
 
