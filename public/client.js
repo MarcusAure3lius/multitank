@@ -68,8 +68,7 @@ const CLIENT_TICK = Object.freeze({
 });
 
 const WORLD_RENDER = Object.freeze({
-  minorGridSize: 80,
-  majorGridSize: 320,
+  gridSize: 64,
   cameraFollow: 0.14
 });
 
@@ -2189,63 +2188,37 @@ function updateRenderState(deltaSeconds, frameAt) {
 }
 
 function drawBackground() {
-  const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
-  gradient.addColorStop(0, "#15314c");
-  gradient.addColorStop(0.55, "#0e2237");
-  gradient.addColorStop(1, "#081523");
-  context.fillStyle = gradient;
+  context.fillStyle = "#14324c";
   context.fillRect(0, 0, canvas.width, canvas.height);
 }
 
 function drawGrid() {
-  const visibleLeft = Math.max(0, Math.floor(camera.x / WORLD_RENDER.minorGridSize) * WORLD_RENDER.minorGridSize);
-  const visibleTop = Math.max(0, Math.floor(camera.y / WORLD_RENDER.minorGridSize) * WORLD_RENDER.minorGridSize);
-  const visibleRight = Math.min(
-    GAME_CONFIG.world.width,
-    Math.ceil((camera.x + canvas.width) / WORLD_RENDER.minorGridSize) * WORLD_RENDER.minorGridSize
-  );
-  const visibleBottom = Math.min(
-    GAME_CONFIG.world.height,
-    Math.ceil((camera.y + canvas.height) / WORLD_RENDER.minorGridSize) * WORLD_RENDER.minorGridSize
-  );
+  const gridSize = WORLD_RENDER.gridSize;
+  const phaseX = ((camera.x % gridSize) + gridSize) % gridSize;
+  const phaseY = ((camera.y % gridSize) + gridSize) % gridSize;
+  const startX = -Math.round(phaseX);
+  const startY = -Math.round(phaseY);
 
-  context.strokeStyle = "rgba(132, 186, 255, 0.1)";
-  context.lineWidth = 1;
+  context.fillStyle = "rgba(255, 255, 255, 0.22)";
 
-  for (let x = visibleLeft; x <= visibleRight; x += WORLD_RENDER.minorGridSize) {
-    context.beginPath();
-    context.moveTo(x, visibleTop);
-    context.lineTo(x, visibleBottom);
-    context.stroke();
+  for (let x = startX; x <= canvas.width; x += gridSize) {
+    context.fillRect(Math.round(x), 0, 1, canvas.height);
   }
 
-  for (let y = visibleTop; y <= visibleBottom; y += WORLD_RENDER.minorGridSize) {
-    context.beginPath();
-    context.moveTo(visibleLeft, y);
-    context.lineTo(visibleRight, y);
-    context.stroke();
+  for (let y = startY; y <= canvas.height; y += gridSize) {
+    context.fillRect(0, Math.round(y), canvas.width, 1);
   }
 
-  context.strokeStyle = "rgba(162, 214, 249, 0.18)";
-  context.lineWidth = 1.5;
+  const worldLeft = Math.round(-camera.x);
+  const worldTop = Math.round(-camera.y);
+  const worldRight = Math.round(GAME_CONFIG.world.width - camera.x);
+  const worldBottom = Math.round(GAME_CONFIG.world.height - camera.y);
 
-  for (let x = visibleLeft; x <= visibleRight; x += WORLD_RENDER.majorGridSize) {
-    context.beginPath();
-    context.moveTo(x, visibleTop);
-    context.lineTo(x, visibleBottom);
-    context.stroke();
-  }
-
-  for (let y = visibleTop; y <= visibleBottom; y += WORLD_RENDER.majorGridSize) {
-    context.beginPath();
-    context.moveTo(visibleLeft, y);
-    context.lineTo(visibleRight, y);
-    context.stroke();
-  }
-
-  context.strokeStyle = "rgba(206, 236, 255, 0.24)";
-  context.lineWidth = 3;
-  context.strokeRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
+  context.fillStyle = "rgba(255, 255, 255, 0.35)";
+  context.fillRect(worldLeft, worldTop, Math.max(1, worldRight - worldLeft), 2);
+  context.fillRect(worldLeft, worldBottom - 2, Math.max(1, worldRight - worldLeft), 2);
+  context.fillRect(worldLeft, worldTop, 2, Math.max(1, worldBottom - worldTop));
+  context.fillRect(worldRight - 2, worldTop, 2, Math.max(1, worldBottom - worldTop));
 }
 
 function drawObstacles() {
@@ -2536,10 +2509,10 @@ function render(frameAt = performance.now()) {
   updateRenderState(deltaSeconds, frameAt);
   updateCamera();
   drawBackground();
+  drawGrid();
 
   context.save();
   context.translate(-camera.x, -camera.y);
-  drawGrid();
   drawObstacles();
   drawObjective();
 

@@ -257,6 +257,12 @@ canvas {
   gap: 12px;
 }
 
+/* Keep the in-game HUD code available, but hide it in the current clean arena view. */
+body.joining-session .hud,
+body.in-session .hud {
+  display: none;
+}
+
 .hud p {
   margin: 4px 0;
 }
