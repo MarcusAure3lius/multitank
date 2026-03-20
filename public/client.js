@@ -28,6 +28,7 @@ const roundLabelElement = document.getElementById("round-label");
 const scoreboardElement = document.getElementById("scoreboard");
 const killFeedElement = document.getElementById("kill-feed");
 const joinForm = document.getElementById("join-form");
+const joinMatchButton = document.getElementById("join-match-button");
 const readyButton = document.getElementById("ready-button");
 const createRoomButton = document.getElementById("create-room-button");
 const nameInput = document.getElementById("name-input");
@@ -130,7 +131,9 @@ const assetState = {
   loadingImages: new Map()
 };
 
-const initialRoomFromUrl = new URL(window.location.href).searchParams.get("room");
+const currentUrl = new URL(window.location.href);
+const initialRoomFromUrl = currentUrl.searchParams.get("room");
+const debugUiEnabled = currentUrl.searchParams.get("debug") === "1";
 nameInput.value = localStorage.getItem(STORAGE_KEYS.name) ?? nameInput.value;
 roomInput.value = initialRoomFromUrl ?? localStorage.getItem(STORAGE_KEYS.room) ?? roomInput.value;
 spectateInput.checked = localStorage.getItem(STORAGE_KEYS.spectate) === "1";
@@ -169,8 +172,8 @@ function updateLocalDevBadge() {
     hostname === "::1" ||
     hostname === "[::1]";
 
-  devBadgeElement.hidden = !isLocalHost;
-  if (isLocalHost) {
+  devBadgeElement.hidden = !isLocalHost || !debugUiEnabled;
+  if (isLocalHost && debugUiEnabled) {
     devBadgeElement.textContent = `LOCAL DEV ${window.location.port ? `:${window.location.port}` : ""}`;
   }
 }
@@ -300,6 +303,7 @@ function getLoadedTankImage(player, part) {
 function updateSessionChrome() {
   document.body.classList.toggle("in-session", Boolean(currentRoomId));
   document.body.classList.toggle("joining-session", Boolean(joinInProgress && !currentRoomId));
+  syncJoinMatchButton();
 }
 
 function setReadyButton(isReady, options = {}) {
@@ -327,6 +331,79 @@ function populateLobbySelects() {
 
 function createRoomCode() {
   return crypto.randomUUID().slice(0, 8).toLowerCase();
+}
+
+function createCommanderName() {
+  return `Cmdr-${profileId.slice(0, 4).toUpperCase()}`;
+}
+
+function syncJoinMatchButton() {
+  if (!joinMatchButton) {
+    return;
+  }
+
+  joinMatchButton.disabled = joinInProgress || Boolean(currentRoomId);
+  joinMatchButton.textContent = joinInProgress ? "Joining..." : "Join Match";
+}
+
+function ensureQuickJoinDefaults() {
+  if (!nameInput.value.trim()) {
+    nameInput.value = createCommanderName();
+  }
+
+  spectateInput.checked = false;
+  mapSelect.value = GAME_CONFIG.lobby.maps[0].id;
+  teamSelect.value = GAME_CONFIG.lobby.teams[0].id;
+  classSelect.value = GAME_CONFIG.lobby.classes[0].id;
+}
+
+function compareRoomsForQuickJoin(left, right) {
+  return (
+    (right.activePlayers ?? 0) - (left.activePlayers ?? 0) ||
+    Number(Boolean(right.canJoinAsPlayer)) - Number(Boolean(left.canJoinAsPlayer)) ||
+    String(right.lastActivityAt ?? "").localeCompare(String(left.lastActivityAt ?? "")) ||
+    String(left.roomCode ?? "").localeCompare(String(right.roomCode ?? ""))
+  );
+}
+
+async function resolveQuickJoinRoomCode() {
+  const response = await fetch("/rooms", {
+    headers: {
+      Accept: "application/json"
+    },
+    cache: "no-store"
+  });
+
+  if (!response.ok) {
+    throw new Error(`Room lookup failed with ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const joinableRooms = (payload.rooms ?? [])
+    .filter((room) => room?.canJoinAsPlayer)
+    .sort(compareRoomsForQuickJoin);
+
+  return joinableRooms[0]?.roomCode ?? createRoomCode();
+}
+
+async function startQuickJoin() {
+  if (joinInProgress || currentRoomId) {
+    return;
+  }
+
+  ensureQuickJoinDefaults();
+  setStatus("Finding match...");
+  matchStatusElement.textContent = "Finding an open arena";
+
+  try {
+    roomInput.value = await resolveQuickJoinRoomCode();
+  } catch (error) {
+    roomInput.value = createRoomCode();
+  }
+
+  setStatus("Joining match...");
+  matchStatusElement.textContent = "Joining arena";
+  connect();
 }
 
 function escapeHtml(value) {
@@ -2782,13 +2859,16 @@ function render(frameAt = performance.now()) {
 
   drawCombatEffects();
   context.restore();
-  drawOverlay();
+  if (debugUiEnabled) {
+    drawOverlay();
+  }
   requestAnimationFrame(render);
 }
 
 joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  connect();
+  unlockAudio();
+  void startQuickJoin();
 });
 
 roomInput.addEventListener("input", () => {

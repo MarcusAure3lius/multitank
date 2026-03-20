@@ -10,83 +10,44 @@
     <div id="dev-badge" class="dev-badge" hidden>LOCAL DEV</div>
     <main class="shell">
       <section class="panel">
-        <div class="brand">
-          <p class="eyebrow">Authoritative Multiplayer Prototype</p>
+        <div class="brand start-brand">
+          <p class="eyebrow">Authoritative Multiplayer Arena</p>
           <h1>Multitank</h1>
           <p class="lede">
-            Press Connect to deploy into a shared staging arena with server-side movement, live snapshots, and round-based combat.
+            Press Join Match to drop straight into the map with a controllable unit. Match placement happens automatically in the background.
           </p>
         </div>
 
-        <form id="join-form" class="join-form">
-          <label>
-            <span>Player Name</span>
+        <form id="join-form" class="quick-join-form">
+          <button id="join-match-button" type="submit">Join Match</button>
+          <p class="quick-join-status"><span id="status">Ready to deploy</span></p>
+          <p class="quick-join-copy">WASD to move, mouse to aim, Space to fire.</p>
+
+          <div class="join-hidden" hidden>
             <input id="name-input" name="name" type="text" maxlength="16" value="Commander">
-          </label>
-          <label>
-            <span>Room</span>
             <input id="room-input" name="room" type="text" maxlength="24" value="default">
-          </label>
-          <label>
-            <span>Join Mode</span>
-            <span><input id="spectate-input" name="spectate" type="checkbox"> Spectator</span>
-          </label>
-          <div class="join-actions">
-            <button type="submit">Connect</button>
+            <input id="spectate-input" name="spectate" type="checkbox">
             <button id="create-room-button" type="button" class="secondary">Create Room</button>
+            <button id="ready-button" type="button" class="secondary" hidden>Ready Up</button>
+
+            <p id="lobby-room-code" class="section-note">Room code: -</p>
+            <select id="map-select"></select>
+            <select id="team-select"></select>
+            <select id="class-select"></select>
+            <p id="lobby-summary" class="section-copy">Matchmaking is preparing your room.</p>
+
+            <button id="refresh-rooms-button" type="button" class="secondary compact-button">Refresh</button>
+            <ul id="room-browser" class="room-browser"></ul>
+
+            <section id="results-card" class="stack-card" hidden>
+              <p id="results-summary" class="section-note">Round complete</p>
+              <ul id="results-list" class="results-list"></ul>
+            </section>
+
+            <span id="latency">--</span>
+            <span id="match-status">Waiting for players</span>
           </div>
         </form>
-
-        <div class="actions">
-          <button id="ready-button" type="button" class="secondary" hidden>Ready Up</button>
-        </div>
-
-        <section class="stack-card">
-          <div class="section-head">
-            <p class="eyebrow">Lobby</p>
-            <p id="lobby-room-code" class="section-note">Room code: -</p>
-          </div>
-          <div class="lobby-grid">
-            <label>
-              <span>Map</span>
-              <select id="map-select"></select>
-            </label>
-            <label>
-              <span>Team</span>
-              <select id="team-select"></select>
-            </label>
-            <label>
-              <span>Class</span>
-              <select id="class-select"></select>
-            </label>
-          </div>
-          <p id="lobby-summary" class="section-copy">Connect to a room to manage lobby settings.</p>
-        </section>
-
-        <section class="stack-card">
-          <div class="section-head">
-            <p class="eyebrow">Room Browser</p>
-            <button id="refresh-rooms-button" type="button" class="secondary compact-button">Refresh</button>
-          </div>
-          <ul id="room-browser" class="room-browser"></ul>
-        </section>
-
-        <section id="results-card" class="stack-card" hidden>
-          <div class="section-head">
-            <p class="eyebrow">Post Game</p>
-            <p id="results-summary" class="section-note">Round complete</p>
-          </div>
-          <ul id="results-list" class="results-list"></ul>
-        </section>
-
-        <div class="meta">
-          <p><strong>Status:</strong> <span id="status">Disconnected</span></p>
-          <p><strong>Latency:</strong> <span id="latency">--</span></p>
-          <p><strong>Match:</strong> <span id="match-status">Waiting for players</span></p>
-          <p><strong>Controls:</strong> WASD move, mouse aim, Space shoot</p>
-          <p><strong>Deploy:</strong> Connect immediately drops you into a controllable match-ready unit</p>
-          <p><strong>Spectators:</strong> Can watch live matches and queue for the next open player slot</p>
-        </div>
       </section>
 
       <section class="play-area">

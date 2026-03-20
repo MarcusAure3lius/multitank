@@ -6469,7 +6469,12 @@ async function serveStatic(request, response) {
   try {
     const file = await fs.readFile(filePath);
     const contentType = mimeTypes.get(path.extname(filePath)) ?? "application/octet-stream";
-    response.writeHead(200, { "Content-Type": contentType });
+    response.writeHead(200, {
+      "Content-Type": contentType,
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      Pragma: "no-cache",
+      Expires: "0"
+    });
     response.end(file);
   } catch (error) {
     response.writeHead(404);

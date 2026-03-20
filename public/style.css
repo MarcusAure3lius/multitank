@@ -43,11 +43,13 @@ body {
 }
 
 .shell {
-  max-width: 780px;
+  max-width: 560px;
   margin: 0 auto;
   padding: 28px;
   display: grid;
   gap: 20px;
+  min-height: 100vh;
+  align-content: center;
 }
 
 body.joining-session .shell,
@@ -67,7 +69,7 @@ body.in-session .shell {
 }
 
 .panel {
-  padding: 24px;
+  padding: 34px 28px;
 }
 
 body.in-session .panel {
@@ -97,17 +99,14 @@ h1 {
   color: var(--muted);
 }
 
-.join-form {
-  margin-top: 24px;
-  display: grid;
-  gap: 14px;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  align-items: end;
+.start-brand {
+  text-align: center;
 }
 
-.join-form label {
+.quick-join-form {
+  margin-top: 28px;
   display: grid;
-  gap: 8px;
+  gap: 14px;
 }
 
 input,
@@ -137,13 +136,29 @@ button {
   font-weight: 700;
 }
 
-.join-actions {
-  display: grid;
-  gap: 12px;
+.quick-join-form button {
+  min-height: 64px;
+  font-size: 1.08rem;
 }
 
-.actions {
-  margin-top: 16px;
+.quick-join-form button[disabled] {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.quick-join-status,
+.quick-join-copy {
+  margin: 0;
+  text-align: center;
+}
+
+.quick-join-status {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.quick-join-copy {
+  color: var(--muted);
 }
 
 .secondary {
