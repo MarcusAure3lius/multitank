@@ -426,16 +426,22 @@ function updateLocalRenderState(deltaSeconds) {
       },
       deltaSeconds
     );
-    const correctionStrength = hasMovementInputActive() ? 0.1 : 0.24;
+    const correctionStrength = hasMovementInputActive() ? 0.04 : 0.18;
+    const correctionDeadzone = hasMovementInputActive() ? 1.5 : 0.5;
+    const driftX = visualState.x - simulated.x;
+    const driftY = visualState.y - simulated.y;
+    const driftAngle = normalizeAngle(visualState.angle - simulated.angle);
+    const driftTurretAngle = normalizeAngle(visualState.turretAngle - simulated.turretAngle);
 
-    renderState.x = lerp(simulated.x, visualState.x, correctionStrength);
-    renderState.y = lerp(simulated.y, visualState.y, correctionStrength);
-    renderState.angle = lerpAngle(simulated.angle, visualState.angle, correctionStrength);
-    renderState.turretAngle = lerpAngle(
-      simulated.turretAngle,
-      visualState.turretAngle,
-      correctionStrength
-    );
+    renderState.x =
+      simulated.x + (Math.abs(driftX) <= correctionDeadzone ? 0 : driftX * correctionStrength);
+    renderState.y =
+      simulated.y + (Math.abs(driftY) <= correctionDeadzone ? 0 : driftY * correctionStrength);
+    renderState.angle =
+      simulated.angle + (Math.abs(driftAngle) <= 0.01 ? 0 : driftAngle * correctionStrength);
+    renderState.turretAngle =
+      simulated.turretAngle +
+      (Math.abs(driftTurretAngle) <= 0.01 ? 0 : driftTurretAngle * correctionStrength);
     return renderState;
   }
 
@@ -539,7 +545,6 @@ function syncFallbackRemoteMarkers() {
 
 function updateFallbackVisuals() {
   if (!playAreaElement || !fallbackVisualLayerElement) {
-    requestAnimationFrame(updateFallbackVisuals);
     return;
   }
 
@@ -582,8 +587,6 @@ function updateFallbackVisuals() {
   }
 
   syncFallbackRemoteMarkers();
-
-  requestAnimationFrame(updateFallbackVisuals);
 }
 
 function setReadyButton(isReady, options = {}) {
@@ -1240,7 +1243,6 @@ function updateCamera() {
   const focus = getCameraFocusTarget();
   const viewport = getVisibleViewportSize();
   const target = clampCameraPosition(focus.x - viewport.width / 2, focus.y - viewport.height / 2);
-  const follow = localRenderState ? 0.32 : 0.18;
 
   if (cameraNeedsSnap) {
     camera.x = target.x;
@@ -1249,8 +1251,14 @@ function updateCamera() {
     return;
   }
 
-  camera.x = lerp(camera.x, target.x, follow);
-  camera.y = lerp(camera.y, target.y, follow);
+  if (localRenderState) {
+    camera.x = target.x;
+    camera.y = target.y;
+    return;
+  }
+
+  camera.x = lerp(camera.x, target.x, 0.18);
+  camera.y = lerp(camera.y, target.y, 0.18);
   const clamped = clampCameraPosition(camera.x, camera.y);
   camera.x = clamped.x;
   camera.y = clamped.y;
@@ -2939,6 +2947,7 @@ function render(frameAt = performance.now()) {
     updateRenderState(deltaSeconds, frameAt);
     updateLocalRenderState(deltaSeconds);
     updateCamera();
+    updateFallbackVisuals();
     drawBackground();
 
     context.save();
@@ -3195,5 +3204,4 @@ setInterval(() => {
 
 resizeCanvas();
 render();
-updateFallbackVisuals();
 refreshRoomBrowser();
