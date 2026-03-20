@@ -976,8 +976,9 @@ function updateCamera() {
   const focus = getCameraFocusTarget();
   const viewport = getVisibleViewportSize();
   const target = clampCameraPosition(focus.x - viewport.width / 2, focus.y - viewport.height / 2);
+  const localPlayer = getLocalPlayer();
 
-  if (cameraNeedsSnap) {
+  if (cameraNeedsSnap || (localPlayer && !localPlayer.isSpectator)) {
     camera.x = target.x;
     camera.y = target.y;
     cameraNeedsSnap = false;
@@ -2458,15 +2459,15 @@ function updateRenderState(deltaSeconds, frameAt) {
 }
 
 function drawBackground() {
-  context.fillStyle = "#8c8c8c";
+  context.fillStyle = "#dbe7ff";
   context.fillRect(0, 0, canvas.width, canvas.height);
 }
 
 function drawMapSquare() {
-  context.fillStyle = "#ffffff";
+  context.fillStyle = "#f3f7ff";
   context.fillRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
   context.lineWidth = 18 / cameraZoom;
-  context.strokeStyle = "#111111";
+  context.strokeStyle = "#1f3f7a";
   context.strokeRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
 }
 
@@ -2496,10 +2497,10 @@ function drawCenterProbe() {
 }
 
 function drawGrid() {
-  const cellSize = 48;
-  const majorEvery = 4;
-  const minorLineWidth = Math.max(1.5 / cameraZoom, 1.2);
-  const majorLineWidth = Math.max(4.5 / cameraZoom, 3);
+  const cellSize = 40;
+  const majorEvery = 5;
+  const minorLineWidth = Math.max(1.8 / cameraZoom, 1.4);
+  const majorLineWidth = Math.max(5 / cameraZoom, 3.4);
 
   context.save();
 
@@ -2509,7 +2510,7 @@ function drawGrid() {
     context.moveTo(x, 0);
     context.lineTo(x, GAME_CONFIG.world.height);
     context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
-    context.strokeStyle = isMajor ? "rgba(17, 17, 17, 0.68)" : "rgba(17, 17, 17, 0.34)";
+    context.strokeStyle = isMajor ? "rgba(40, 78, 148, 0.72)" : "rgba(76, 118, 191, 0.36)";
     context.stroke();
   }
 
@@ -2519,7 +2520,7 @@ function drawGrid() {
     context.moveTo(0, y);
     context.lineTo(GAME_CONFIG.world.width, y);
     context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
-    context.strokeStyle = isMajor ? "rgba(17, 17, 17, 0.68)" : "rgba(17, 17, 17, 0.34)";
+    context.strokeStyle = isMajor ? "rgba(40, 78, 148, 0.72)" : "rgba(76, 118, 191, 0.36)";
     context.stroke();
   }
 
@@ -2590,22 +2591,30 @@ function drawTank(player) {
   const isLocalPlayer = player.id === localPlayerId;
 
   context.save();
+  if (isLocalPlayer) {
+    context.beginPath();
+    context.arc(x, y, GAME_CONFIG.tank.radius + 34, 0, Math.PI * 2);
+    context.lineWidth = 10;
+    context.strokeStyle = "rgba(255, 0, 110, 0.78)";
+    context.stroke();
+  }
+
   context.beginPath();
-  context.arc(x, y, GAME_CONFIG.tank.radius + (isLocalPlayer ? 18 : 8), 0, Math.PI * 2);
+  context.arc(x, y, GAME_CONFIG.tank.radius + (isLocalPlayer ? 24 : 8), 0, Math.PI * 2);
   context.fillStyle = player.alive
     ? (isLocalPlayer ? "#ff4d00" : "#5f6f86")
     : "rgba(255, 122, 0, 0.35)";
   context.fill();
-  context.lineWidth = isLocalPlayer ? 8 : 5;
+  context.lineWidth = isLocalPlayer ? 9 : 5;
   context.strokeStyle = isLocalPlayer ? "#111111" : "#2f3742";
   context.stroke();
   context.restore();
 
   context.save();
   context.fillStyle = "#111111";
-  context.font = isLocalPlayer ? "bold 16px Segoe UI" : "14px Segoe UI";
+  context.font = isLocalPlayer ? "bold 26px Segoe UI" : "14px Segoe UI";
   context.textAlign = "center";
-  context.fillText(isLocalPlayer ? "YOU" : player.name, x, y - (GAME_CONFIG.tank.radius + 18));
+  context.fillText(isLocalPlayer ? "YOU" : player.name, x, y - (GAME_CONFIG.tank.radius + 42));
   context.restore();
 }
 
