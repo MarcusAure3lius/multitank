@@ -89,6 +89,7 @@ const camera = {
   x: 0,
   y: 0
 };
+let cameraZoom = 1;
 
 let socket = null;
 let localPlayerId = null;
@@ -869,14 +870,19 @@ function consumeServerEvents(events) {
 
 function getPointerWorldPosition(event) {
   const bounds = canvas.getBoundingClientRect();
+  const normalizedX = (event.clientX - bounds.left) / bounds.width;
+  const normalizedY = (event.clientY - bounds.top) / bounds.height;
+  const visibleWidth = canvas.width / cameraZoom;
+  const visibleHeight = canvas.height / cameraZoom;
+
   return {
     x: clamp(
-      camera.x + ((event.clientX - bounds.left) / bounds.width) * canvas.width,
+      camera.x + normalizedX * visibleWidth,
       0,
       GAME_CONFIG.world.width
     ),
     y: clamp(
-      camera.y + ((event.clientY - bounds.top) / bounds.height) * canvas.height,
+      camera.y + normalizedY * visibleHeight,
       0,
       GAME_CONFIG.world.height
     )
@@ -900,10 +906,18 @@ function resizeCanvas() {
   cameraNeedsSnap = true;
 }
 
-function clampCameraPosition(x, y) {
+function getVisibleViewportSize() {
   return {
-    x: clamp(x, 0, Math.max(0, GAME_CONFIG.world.width - canvas.width)),
-    y: clamp(y, 0, Math.max(0, GAME_CONFIG.world.height - canvas.height))
+    width: canvas.width / cameraZoom,
+    height: canvas.height / cameraZoom
+  };
+}
+
+function clampCameraPosition(x, y) {
+  const viewport = getVisibleViewportSize();
+  return {
+    x: clamp(x, 0, Math.max(0, GAME_CONFIG.world.width - viewport.width)),
+    y: clamp(y, 0, Math.max(0, GAME_CONFIG.world.height - viewport.height))
   };
 }
 
@@ -932,7 +946,8 @@ function getCameraFocusTarget() {
 
 function updateCamera() {
   const focus = getCameraFocusTarget();
-  const target = clampCameraPosition(focus.x - canvas.width / 2, focus.y - canvas.height / 2);
+  const viewport = getVisibleViewportSize();
+  const target = clampCameraPosition(focus.x - viewport.width / 2, focus.y - viewport.height / 2);
 
   if (cameraNeedsSnap) {
     camera.x = target.x;
@@ -2412,6 +2427,22 @@ function drawBackground() {
   context.fillRect(0, 0, canvas.width, canvas.height);
 }
 
+function drawMapSquare() {
+  context.fillStyle = "#fbfbfb";
+  context.fillRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
+  context.lineWidth = 12;
+  context.strokeStyle = "#111111";
+  context.strokeRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
+
+  context.fillStyle = "rgba(17, 17, 17, 0.08)";
+  context.fillRect(
+    GAME_CONFIG.world.width / 2 - 40,
+    GAME_CONFIG.world.height / 2 - 40,
+    80,
+    80
+  );
+}
+
 function drawGrid() {
   // Intentionally blank while we isolate spawn visibility.
 }
@@ -2475,20 +2506,27 @@ function drawTank(player) {
     return;
   }
 
-  if (player.id !== localPlayerId) {
-    return;
-  }
-
   const x = getPlayerVisualX(player);
   const y = getPlayerVisualY(player);
+  const isLocalPlayer = player.id === localPlayerId;
+
   context.save();
   context.beginPath();
   context.arc(x, y, GAME_CONFIG.tank.radius + 8, 0, Math.PI * 2);
-  context.fillStyle = player.alive ? "#ff7a00" : "rgba(255, 122, 0, 0.35)";
+  context.fillStyle = player.alive
+    ? (isLocalPlayer ? "#ff7a00" : "#5f6f86")
+    : "rgba(255, 122, 0, 0.35)";
   context.fill();
   context.lineWidth = 5;
-  context.strokeStyle = "#111111";
+  context.strokeStyle = isLocalPlayer ? "#111111" : "#2f3742";
   context.stroke();
+  context.restore();
+
+  context.save();
+  context.fillStyle = "#111111";
+  context.font = isLocalPlayer ? "bold 16px Segoe UI" : "14px Segoe UI";
+  context.textAlign = "center";
+  context.fillText(isLocalPlayer ? "YOU" : player.name, x, y - (GAME_CONFIG.tank.radius + 18));
   context.restore();
 }
 
@@ -2580,10 +2618,12 @@ function render(frameAt = performance.now()) {
   updateRenderState(deltaSeconds, frameAt);
   updateCamera();
   drawBackground();
-  drawGrid();
 
   context.save();
+  context.scale(cameraZoom, cameraZoom);
   context.translate(-camera.x, -camera.y);
+  drawMapSquare();
+  drawGrid();
   drawObstacles();
   drawObjective();
 
@@ -2688,6 +2728,28 @@ canvas.addEventListener("mousemove", (event) => {
 });
 
 canvas.addEventListener("pointerdown", unlockAudio);
+canvas.addEventListener("wheel", (event) => {
+  event.preventDefault();
+
+  const bounds = canvas.getBoundingClientRect();
+  const normalizedX = (event.clientX - bounds.left) / bounds.width;
+  const normalizedY = (event.clientY - bounds.top) / bounds.height;
+  const previousViewport = getVisibleViewportSize();
+  const anchorWorldX = camera.x + normalizedX * previousViewport.width;
+  const anchorWorldY = camera.y + normalizedY * previousViewport.height;
+  const zoomFactor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+
+  cameraZoom = clamp(cameraZoom * zoomFactor, 0.05, 12);
+
+  const nextViewport = getVisibleViewportSize();
+  const clamped = clampCameraPosition(
+    anchorWorldX - normalizedX * nextViewport.width,
+    anchorWorldY - normalizedY * nextViewport.height
+  );
+  camera.x = clamped.x;
+  camera.y = clamped.y;
+  cameraNeedsSnap = false;
+}, { passive: false });
 
 setInterval(() => {
   clientSimulationTick += 1;
