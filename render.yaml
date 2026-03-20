@@ -1,0 +1,32 @@
+services:
+  - type: web
+    runtime: node
+    name: multitank
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    disk:
+      name: multitank-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: 10000
+      - key: DATA_DIR
+        value: /var/data
+      - key: GAME_VERSION
+        value: 0.1.0
+      - key: DEPLOY_REGION
+        value: render
+      - key: INSTANCE_GROUP
+        value: public
+      - key: MAX_ROOMS_PER_INSTANCE
+        value: 64
+      - key: MAX_CLIENTS_PER_INSTANCE
+        value: 256

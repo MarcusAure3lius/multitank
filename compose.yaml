@@ -1,0 +1,26 @@
+services:
+  multitank:
+    build: .
+    container_name: multitank
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      DEPLOY_REGION: ${DEPLOY_REGION:-local}
+      INSTANCE_GROUP: ${INSTANCE_GROUP:-public}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-multitank-dev-admin}
+      ALLOCATOR_API_KEY: ${ALLOCATOR_API_KEY:-multitank-dev-admin}
+      MAX_ROOMS_PER_INSTANCE: ${MAX_ROOMS_PER_INSTANCE:-64}
+      MAX_CLIENTS_PER_INSTANCE: ${MAX_CLIENTS_PER_INSTANCE:-256}
+      START_IN_MAINTENANCE: ${START_IN_MAINTENANCE:-false}
+      START_IN_DRAIN_MODE: ${START_IN_DRAIN_MODE:-false}
+      MAINTENANCE_REASON: ${MAINTENANCE_REASON:-}
+    ports:
+      - "3000:3000"
+    volumes:
+      - multitank-data:/app/data
+    restart: unless-stopped
+    stop_grace_period: 20s
+
+volumes:
+  multitank-data:

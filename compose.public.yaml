@@ -1,0 +1,44 @@
+services:
+  multitank:
+    build: .
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      GAME_VERSION: ${GAME_VERSION:-0.1.0}
+      PUBLIC_ORIGIN: https://${CADDY_DOMAIN}
+      ALLOWED_ORIGINS: https://${CADDY_DOMAIN}
+      DEPLOY_REGION: ${DEPLOY_REGION:-public}
+      INSTANCE_GROUP: ${INSTANCE_GROUP:-public}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-multitank-dev-admin}
+      ALLOCATOR_API_KEY: ${ALLOCATOR_API_KEY:-multitank-dev-admin}
+      MAX_ROOMS_PER_INSTANCE: ${MAX_ROOMS_PER_INSTANCE:-64}
+      MAX_CLIENTS_PER_INSTANCE: ${MAX_CLIENTS_PER_INSTANCE:-256}
+      START_IN_MAINTENANCE: ${START_IN_MAINTENANCE:-false}
+      START_IN_DRAIN_MODE: ${START_IN_DRAIN_MODE:-false}
+      MAINTENANCE_REASON: ${MAINTENANCE_REASON:-}
+    volumes:
+      - multitank-data:/app/data
+    restart: unless-stopped
+    stop_grace_period: 20s
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - multitank
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  multitank-data:
+  caddy-data:
+  caddy-config:

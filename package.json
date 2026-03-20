@@ -1,0 +1,19 @@
+{
+  "name": "multitank",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal authoritative multiplayer tank prototype",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "smoke": "node smoke-test.js",
+    "render:local": "node scripts/render-local.mjs up",
+    "render:local:down": "node scripts/render-local.mjs down",
+    "render:local:logs": "node scripts/render-local.mjs logs",
+    "render:local:smoke": "node scripts/render-local.mjs smoke"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}
