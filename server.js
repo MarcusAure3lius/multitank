@@ -4653,6 +4653,10 @@ function isMovementPhase(phase) {
   return phase === MATCH_PHASES.WAITING || isWarmupPhase(phase) || isCombatPhase(phase);
 }
 
+function canShootPhase(phase) {
+  return isMovementPhase(phase);
+}
+
 function isResultsPhase(phase) {
   return phase === MATCH_PHASES.RESULTS;
 }
@@ -8134,7 +8138,7 @@ function simulateBulletToTime(room, bullet, targetTime, currentTime = targetTime
 }
 
 function resolvePendingShots(room, now) {
-  if (!isCombatPhase(room.match.phase)) {
+  if (!canShootPhase(room.match.phase)) {
     room.pendingShots.length = 0;
     return;
   }
@@ -8254,7 +8258,7 @@ function updatePlayer(room, player, deltaSeconds, now) {
     y: normalizedMoveY * moveSpeed * deltaSeconds
   });
 
-  if (!stunned && isCombatPhase(room.match.phase) && player.input.shoot) {
+  if (!stunned && canShootPhase(room.match.phase) && player.input.shoot) {
     const fireContext = getLagCompensatedFireContext(player, now);
 
     if (fireContext.fireTime - player.lastShotAt >= GAME_CONFIG.tank.shootCooldownMs) {
@@ -8280,7 +8284,7 @@ function updatePlayer(room, player, deltaSeconds, now) {
 }
 
 function updateBullets(room, deltaSeconds, now) {
-  if (!isCombatPhase(room.match.phase)) {
+  if (!canShootPhase(room.match.phase)) {
     room.bullets.clear();
     room.pendingShots.length = 0;
     return;

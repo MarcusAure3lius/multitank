@@ -1308,6 +1308,10 @@ function isMovementPhase(phase) {
   return phase === MATCH_PHASES.WAITING || phase === MATCH_PHASES.WARMUP || isCombatPhase(phase);
 }
 
+function canShootPhase(phase) {
+  return isMovementPhase(phase);
+}
+
 function isResultsPhase(phase) {
   return phase === MATCH_PHASES.RESULTS;
 }
@@ -1323,7 +1327,7 @@ function canSimulateLocalPlayer() {
 
 function canPredictLocalShots() {
   const localPlayer = getLocalPlayer();
-  return isCombatPhase(latestMatch?.phase) && localPlayer && !localPlayer.isSpectator && !localPlayer.afk;
+  return canShootPhase(latestMatch?.phase) && localPlayer && !localPlayer.isSpectator && !localPlayer.afk;
 }
 
 function refreshSessionUi(localPlayer = getLocalPlayer(), you = null) {
@@ -1713,8 +1717,12 @@ function simulateTankMovement(state, input, deltaSeconds) {
 function spawnPredictedProjectile(localPlayer, inputFrame) {
   const now = performance.now();
   const barrelDistance = GAME_CONFIG.tank.radius + 10;
-  const muzzleX = getPlayerVisualX(localPlayer) + Math.cos(inputFrame.turretAngle) * barrelDistance;
-  const muzzleY = getPlayerVisualY(localPlayer) + Math.sin(inputFrame.turretAngle) * barrelDistance;
+  const origin = localRenderState ?? {
+    x: getPlayerVisualX(localPlayer),
+    y: getPlayerVisualY(localPlayer)
+  };
+  const muzzleX = origin.x + Math.cos(inputFrame.turretAngle) * barrelDistance;
+  const muzzleY = origin.y + Math.sin(inputFrame.turretAngle) * barrelDistance;
 
   predictedProjectiles.set(`predicted:${inputFrame.seq}`, {
     id: `predicted:${inputFrame.seq}`,
@@ -1759,11 +1767,13 @@ function reconcilePredictedProjectile(authoritativeBullet) {
 function createInputFrame() {
   const localPlayer = getLocalPlayer();
   const visualState = ensureLocalVisualState(localPlayer);
+  const renderState = ensureLocalRenderState();
   const target = lastPointerWorldPosition;
   const seq = nextInputSeq++;
   const capturedInputState = getCapturedInputState();
-  const turretAngle = visualState
-    ? Math.atan2(target.y - visualState.y, target.x - visualState.x)
+  const aimOrigin = renderState ?? visualState;
+  const turretAngle = aimOrigin
+    ? Math.atan2(target.y - aimOrigin.y, target.x - aimOrigin.x)
     : 0;
 
   return {
@@ -2881,18 +2891,39 @@ function drawRotatedSprite(image, x, y, angle, width, height, options = {}) {
   context.restore();
 }
 
+function getTankRenderPose(player) {
+  if (player?.id === localPlayerId && localRenderState) {
+    return {
+      x: localRenderState.x,
+      y: localRenderState.y,
+      angle: localRenderState.angle,
+      turretAngle: localRenderState.turretAngle
+    };
+  }
+
+  return {
+    x: getPlayerVisualX(player),
+    y: getPlayerVisualY(player),
+    angle: getPlayerVisualAngle(player),
+    turretAngle: getPlayerVisualTurretAngle(player)
+  };
+}
+
 function drawTank(player) {
   if (!player || player.isSpectator || !player.alive) {
     return;
   }
 
   const now = performance.now();
-  const x = getPlayerVisualX(player);
-  const y = getPlayerVisualY(player);
-  const bodyAngle = getPlayerVisualAngle(player);
-  const turretAngle = getPlayerVisualTurretAngle(player);
+  const pose = getTankRenderPose(player);
+  const x = pose.x;
+  const y = pose.y;
+  const bodyAngle = pose.angle;
+  const turretAngle = pose.turretAngle;
   const bodyRadius = GAME_CONFIG.tank.radius;
-  const barrelLength = bodyRadius + 18 - Math.min(6, (player.predictedRecoil ?? 0) * 6);
+  const turretBaseRadius = 10;
+  const barrelHalfWidth = 6;
+  const barrelLength = bodyRadius + 28 - Math.min(8, (player.predictedRecoil ?? 0) * 8);
   const bodyColor = player.id === localPlayerId ? "#2563eb" : (player.color ?? "#ff4d00");
   const alpha = player.connected === false ? 0.42 : 1;
 
@@ -2901,7 +2932,7 @@ function drawTank(player) {
   context.translate(x, y);
   context.rotate(turretAngle);
   context.fillStyle = "#111111";
-  context.fillRect(0, -4, barrelLength, 8);
+  context.fillRect(-2, -barrelHalfWidth, barrelLength + 2, barrelHalfWidth * 2);
 
   if ((player.muzzleFlashUntil ?? 0) > now) {
     context.beginPath();
@@ -2924,7 +2955,7 @@ function drawTank(player) {
   context.stroke();
   context.fillStyle = "#111111";
   context.beginPath();
-  context.arc(0, 0, 6, 0, Math.PI * 2);
+  context.arc(0, 0, turretBaseRadius, 0, Math.PI * 2);
   context.fill();
   context.restore();
 }
