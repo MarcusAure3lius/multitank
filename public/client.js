@@ -72,6 +72,13 @@ const NETWORK_RENDER = Object.freeze({
   clockSmoothing: 0.12
 });
 
+const NETWORK_RECOVERY = Object.freeze({
+  staleStateWarningMs: 2000,
+  staleStateStatusCooldownMs: 1500,
+  transportSilenceReconnectMs: GAME_CONFIG.network.heartbeatTimeoutMs,
+  staleStateReconnectMs: Math.max(20000, GAME_CONFIG.network.heartbeatTimeoutMs + 5000)
+});
+
 const CLIENT_TICK = Object.freeze({
   rate: GAME_CONFIG.serverTickRate,
   fixedDeltaSeconds: 1 / GAME_CONFIG.serverTickRate
@@ -129,6 +136,7 @@ let serverTimeOffset = 0;
 let lastResyncRequestAt = 0;
 let lastStallWarningAt = 0;
 let latestLatencyMs = 0;
+let lastServerMessageAt = 0;
 let lastPointerWorldPosition = {
   x: GAME_CONFIG.world.width / 2,
   y: GAME_CONFIG.world.height / 2
@@ -2348,6 +2356,7 @@ function connect(options = {}) {
     serverTimeOffset = 0;
     lastStallWarningAt = 0;
     latestLatencyMs = 0;
+    lastServerMessageAt = 0;
     lastRenderFrameAt = performance.now();
     camera.x = 0;
     camera.y = 0;
@@ -2377,6 +2386,7 @@ function connect(options = {}) {
 
   nextSocket.addEventListener("open", () => {
     cancelReconnect();
+    lastServerMessageAt = Date.now();
     setStatus("Connected to server. Requesting match...");
     sendReliable({
       type: MESSAGE_TYPES.JOIN,
@@ -2394,6 +2404,7 @@ function connect(options = {}) {
   });
 
   nextSocket.addEventListener("message", (event) => {
+    lastServerMessageAt = Date.now();
     const parsed = deserializePacket(String(event.data));
     if (!parsed.ok) {
       setStatus(parsed.error.message);
@@ -2573,6 +2584,7 @@ function connect(options = {}) {
     lastSnapshotTick = 0;
     clientSimulationTick = 0;
     lastStatePacketAt = 0;
+    lastServerMessageAt = 0;
     serverTimeOffset = 0;
     stateChunks.clear();
     processedEventIds.clear();
@@ -3197,17 +3209,25 @@ setInterval(() => {
     socket?.readyState === WebSocket.OPEN &&
     currentRoomId &&
     lastStatePacketAt > 0 &&
-    now - lastStatePacketAt >= 2000
+    now - lastStatePacketAt >= NETWORK_RECOVERY.staleStateWarningMs
   ) {
-    if (now - lastStallWarningAt >= 1500) {
+    const staleStateMs = now - lastStatePacketAt;
+    const silentTransportMs = lastServerMessageAt > 0 ? now - lastServerMessageAt : staleStateMs;
+
+    if (now - lastStallWarningAt >= NETWORK_RECOVERY.staleStateStatusCooldownMs) {
       lastStallWarningAt = now;
       setStatus("Connection unstable, trying to recover state...");
       requestLifecycleResync("snapshot_stall");
     }
 
-    if (now - lastStatePacketAt >= 5000) {
-      setStatus("Connection stalled, reconnecting...");
-      socket.close(4008, "State stream stalled");
+    if (
+      silentTransportMs >= NETWORK_RECOVERY.transportSilenceReconnectMs ||
+      staleStateMs >= NETWORK_RECOVERY.staleStateReconnectMs
+    ) {
+      const transportTimedOut =
+        silentTransportMs >= NETWORK_RECOVERY.transportSilenceReconnectMs;
+      setStatus(transportTimedOut ? "Connection lost, reconnecting..." : "State recovery timed out, reconnecting...");
+      socket.close(4008, transportTimedOut ? "Server transport stalled" : "State recovery timed out");
     }
   }
 }, 250);
