@@ -387,38 +387,31 @@ canvas {
 }
 
 .fallback-remote-ring {
-  width: 62px;
-  height: 62px;
-  border: 6px solid rgba(37, 99, 235, 0.42);
-  background: rgba(255, 255, 255, 0.04);
+  width: 96px;
+  height: 96px;
+  border: 10px solid rgba(255, 0, 110, 0.82);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .fallback-remote-dot {
-  width: 34px;
-  height: 34px;
-  border: 4px solid rgba(17, 24, 39, 0.82);
-  background: #2563eb;
-}
-
-.fallback-remote-marker[data-bot="true"] .fallback-remote-ring {
-  border-color: rgba(71, 85, 105, 0.5);
-}
-
-.fallback-remote-marker[data-bot="true"] .fallback-remote-dot {
-  background: #64748b;
+  width: 58px;
+  height: 58px;
+  border: 7px solid #111111;
+  background: #ff4d00;
 }
 
 .fallback-remote-label {
   position: absolute;
   left: 50%;
-  top: -42px;
+  top: -64px;
   transform: translateX(-50%);
-  padding: 2px 8px;
+  padding: 4px 10px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.92);
   color: #111111;
-  font-size: 0.8rem;
-  font-weight: 700;
+  font-size: 1rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
   white-space: nowrap;
 }
 

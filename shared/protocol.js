@@ -283,7 +283,7 @@ export const GAME_CONFIG = Object.freeze({
     respawnCredits: 10
   }),
   ai: Object.freeze({
-    fillToMinPlayers: true,
+    fillToMinPlayers: false,
     maxBotsPerRoom: 1,
     thinkRate: 10,
     preferredRange: 300,

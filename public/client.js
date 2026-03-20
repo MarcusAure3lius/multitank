@@ -103,6 +103,7 @@ let cameraAnchorY = GAME_CONFIG.world.height / 2;
 let fallbackCameraX = 0;
 let fallbackCameraY = 0;
 let localVisualState = null;
+let localRenderState = null;
 
 let socket = null;
 let localPlayerId = null;
@@ -324,6 +325,7 @@ function resetCameraAnchor() {
   fallbackCameraX = camera.x;
   fallbackCameraY = camera.y;
   localVisualState = null;
+  localRenderState = null;
 }
 
 function hasMovementInputActive() {
@@ -341,19 +343,60 @@ function hasMovementInputActive() {
 
 function ensureLocalVisualState(localPlayer = getLocalPlayer()) {
   if (!localPlayer || localPlayer.isSpectator) {
+    localVisualState = null;
     return null;
   }
 
   if (!localVisualState) {
     localVisualState = {
-      x: GAME_CONFIG.world.width / 2,
-      y: GAME_CONFIG.world.height / 2,
-      angle: localPlayer.angle ?? getPlayerVisualAngle(localPlayer),
-      turretAngle: localPlayer.turretAngle ?? getPlayerVisualTurretAngle(localPlayer)
+      x: getPlayerVisualX(localPlayer),
+      y: getPlayerVisualY(localPlayer),
+      angle: getPlayerVisualAngle(localPlayer),
+      turretAngle: getPlayerVisualTurretAngle(localPlayer)
     };
   }
 
   return localVisualState;
+}
+
+function syncLocalRenderState(force = false) {
+  const visualState = ensureLocalVisualState();
+
+  if (!visualState) {
+    localRenderState = null;
+    return null;
+  }
+
+  if (!localRenderState || force) {
+    localRenderState = {
+      x: visualState.x,
+      y: visualState.y,
+      angle: visualState.angle,
+      turretAngle: visualState.turretAngle
+    };
+    return localRenderState;
+  }
+
+  const dx = visualState.x - localRenderState.x;
+  const dy = visualState.y - localRenderState.y;
+  const needsSnap = dx * dx + dy * dy > 220 * 220;
+  const follow = hasMovementInputActive() ? 0.34 : 0.2;
+
+  if (needsSnap) {
+    localRenderState.x = visualState.x;
+    localRenderState.y = visualState.y;
+  } else {
+    localRenderState.x = lerp(localRenderState.x, visualState.x, follow);
+    localRenderState.y = lerp(localRenderState.y, visualState.y, follow);
+  }
+
+  localRenderState.angle = lerpAngle(localRenderState.angle, visualState.angle, 0.28);
+  localRenderState.turretAngle = lerpAngle(
+    localRenderState.turretAngle,
+    visualState.turretAngle,
+    0.28
+  );
+  return localRenderState;
 }
 
 function hasPlayableSession() {
@@ -414,7 +457,7 @@ function syncFallbackRemoteMarkers() {
   }
 
   const activeRemotePlayers = Array.from(players.values()).filter(
-    (player) => player.id !== localPlayerId && !player.isSpectator
+    (player) => player.id !== localPlayerId && !player.isSpectator && !player.isBot
   );
   const activeIds = new Set(activeRemotePlayers.map((player) => player.id));
 
@@ -438,10 +481,9 @@ function syncFallbackRemoteMarkers() {
       fallbackRemoteMarkersElement.append(marker);
     }
 
-    marker.dataset.bot = player.isBot ? "true" : "false";
     const label = marker.querySelector(".fallback-remote-label");
     if (label) {
-      label.textContent = player.isBot ? `${player.name} [BOT]` : player.name;
+      label.textContent = player.name;
     }
     setFallbackMarkerScale(marker);
     positionFallbackMarker(marker, getPlayerVisualX(player), getPlayerVisualY(player));
@@ -454,8 +496,8 @@ function updateFallbackVisuals() {
     return;
   }
 
-  fallbackCameraX = lerp(fallbackCameraX, camera.x, 0.24);
-  fallbackCameraY = lerp(fallbackCameraY, camera.y, 0.24);
+  fallbackCameraX = camera.x;
+  fallbackCameraY = camera.y;
 
   const minorSize = Math.max(20, 40 * cameraZoom);
   const majorSize = Math.max(100, 200 * cameraZoom);
@@ -482,14 +524,14 @@ function updateFallbackVisuals() {
   }
 
   const localPlayer = getLocalPlayer();
-  const localVisualState = ensureLocalVisualState(localPlayer);
+  const localDisplayState = syncLocalRenderState();
   if (fallbackPlayerMarkerElement) {
     fallbackPlayerMarkerElement.hidden = !(localPlayer && !localPlayer.isSpectator);
   }
 
-  if (localPlayer && !localPlayer.isSpectator && localVisualState) {
+  if (localPlayer && !localPlayer.isSpectator && localDisplayState) {
     setFallbackMarkerScale(fallbackPlayerMarkerElement);
-    positionFallbackMarker(fallbackPlayerMarkerElement, localVisualState.x, localVisualState.y);
+    positionFallbackMarker(fallbackPlayerMarkerElement, localDisplayState.x, localDisplayState.y);
   }
 
   syncFallbackRemoteMarkers();
@@ -1112,19 +1154,18 @@ function clampCameraPosition(x, y) {
 }
 
 function getCameraFocusTarget() {
-  const localPlayer = getLocalPlayer();
-  const visualState = ensureLocalVisualState(localPlayer);
+  const renderState = syncLocalRenderState();
 
-  if (visualState) {
+  if (renderState) {
     if (!cameraHasAnchor) {
-      cameraAnchorX = visualState.x;
-      cameraAnchorY = visualState.y;
+      cameraAnchorX = renderState.x;
+      cameraAnchorY = renderState.y;
       cameraHasAnchor = true;
     }
 
     return {
-      x: visualState.x,
-      y: visualState.y
+      x: renderState.x,
+      y: renderState.y
     };
   }
 
@@ -1945,6 +1986,23 @@ function applyPredictionCorrection(localPlayer, correctedState) {
   localPlayer.displayAngle = correctedState.angle + (localPlayer.correctionOffsetAngle ?? 0);
   localPlayer.displayTurretAngle =
     correctedState.turretAngle + (localPlayer.correctionOffsetTurretAngle ?? 0);
+
+  const visualState = ensureLocalVisualState(localPlayer);
+  if (visualState) {
+    visualState.x = correctedState.x;
+    visualState.y = correctedState.y;
+    visualState.angle = correctedState.angle;
+    visualState.turretAngle = correctedState.turretAngle;
+  }
+
+  if (!localRenderState || !hasMovementInputActive()) {
+    localRenderState = {
+      x: correctedState.x,
+      y: correctedState.y,
+      angle: correctedState.angle,
+      turretAngle: correctedState.turretAngle
+    };
+  }
 }
 
 function replayPendingInputs(localPlayer, lastProcessedInputSeq, lastProcessedInputClientSentAt) {
@@ -2011,6 +2069,7 @@ function applySnapshot(payload) {
     if (!hasSeenLocalPlayerSnapshot) {
       cameraNeedsSnap = true;
       hasSeenLocalPlayerSnapshot = true;
+      syncLocalRenderState(true);
       updateSessionChrome();
       setStatus("Connected");
     }

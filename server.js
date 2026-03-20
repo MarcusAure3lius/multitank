@@ -6868,6 +6868,8 @@ function maybeStartRematch(room, now) {
 function syncRoomBots(room, now) {
   const humanPlayerCount = getRestorableHumanMatchPlayerCount(room, now);
   const bots = getBotPlayers(room);
+  const shouldAutoFillBots =
+    GAME_CONFIG.ai.fillToMinPlayers || /^bot-/i.test(room.id ?? "");
 
   if (humanPlayerCount === 0) {
     for (const bot of bots) {
@@ -6884,7 +6886,7 @@ function syncRoomBots(room, now) {
   }
 
   if (
-    !GAME_CONFIG.ai.fillToMinPlayers ||
+    !shouldAutoFillBots ||
     (room.match.phase !== MATCH_PHASES.WAITING && !isWarmupPhase(room.match.phase))
   ) {
     return;
