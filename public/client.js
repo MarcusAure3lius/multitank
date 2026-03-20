@@ -101,6 +101,7 @@ let cameraAnchorX = GAME_CONFIG.world.width / 2;
 let cameraAnchorY = GAME_CONFIG.world.height / 2;
 let fallbackCameraX = 0;
 let fallbackCameraY = 0;
+let localVisualState = null;
 
 let socket = null;
 let localPlayerId = null;
@@ -321,6 +322,7 @@ function resetCameraAnchor() {
   cameraAnchorY = GAME_CONFIG.world.height / 2;
   fallbackCameraX = camera.x;
   fallbackCameraY = camera.y;
+  localVisualState = null;
 }
 
 function hasMovementInputActive() {
@@ -334,6 +336,23 @@ function hasMovementInputActive() {
     keys.has("ArrowDown") ||
     keys.has("ArrowRight")
   );
+}
+
+function ensureLocalVisualState(localPlayer = getLocalPlayer()) {
+  if (!localPlayer || localPlayer.isSpectator) {
+    return null;
+  }
+
+  if (!localVisualState) {
+    localVisualState = {
+      x: GAME_CONFIG.world.width / 2,
+      y: GAME_CONFIG.world.height / 2,
+      angle: localPlayer.angle ?? getPlayerVisualAngle(localPlayer),
+      turretAngle: localPlayer.turretAngle ?? getPlayerVisualTurretAngle(localPlayer)
+    };
+  }
+
+  return localVisualState;
 }
 
 function hasPlayableSession() {
@@ -386,13 +405,8 @@ function updateFallbackVisuals() {
     return;
   }
 
-  if (hasMovementInputActive()) {
-    fallbackCameraX = lerp(fallbackCameraX, camera.x, 0.22);
-    fallbackCameraY = lerp(fallbackCameraY, camera.y, 0.22);
-  } else {
-    fallbackCameraX = camera.x;
-    fallbackCameraY = camera.y;
-  }
+  fallbackCameraX = lerp(fallbackCameraX, camera.x, 0.24);
+  fallbackCameraY = lerp(fallbackCameraY, camera.y, 0.24);
 
   const minorSize = Math.max(20, 40 * cameraZoom);
   const majorSize = Math.max(100, 200 * cameraZoom);
@@ -414,6 +428,9 @@ function updateFallbackVisuals() {
     GAME_CONFIG.world.width / 2,
     GAME_CONFIG.world.height / 2
   );
+  if (fallbackCenterMarkerElement) {
+    fallbackCenterMarkerElement.hidden = true;
+  }
 
   const localPlayer = getLocalPlayer();
   if (fallbackPlayerMarkerElement) {
@@ -1044,27 +1061,18 @@ function clampCameraPosition(x, y) {
 
 function getCameraFocusTarget() {
   const localPlayer = getLocalPlayer();
+  const visualState = ensureLocalVisualState(localPlayer);
 
-  if (localPlayer && !localPlayer.isSpectator) {
-    const stableX = localPlayer.x ?? getPlayerVisualX(localPlayer);
-    const stableY = localPlayer.y ?? getPlayerVisualY(localPlayer);
-    const smoothX = getPlayerVisualX(localPlayer);
-    const smoothY = getPlayerVisualY(localPlayer);
-
+  if (visualState) {
     if (!cameraHasAnchor) {
-      cameraAnchorX = stableX;
-      cameraAnchorY = stableY;
+      cameraAnchorX = visualState.x;
+      cameraAnchorY = visualState.y;
       cameraHasAnchor = true;
     }
 
-    if (hasMovementInputActive()) {
-      cameraAnchorX = smoothX;
-      cameraAnchorY = smoothY;
-    }
-
     return {
-      x: cameraAnchorX,
-      y: cameraAnchorY
+      x: visualState.x,
+      y: visualState.y
     };
   }
 
@@ -1093,15 +1101,15 @@ function updateCamera() {
   const viewport = getVisibleViewportSize();
   const target = clampCameraPosition(focus.x - viewport.width / 2, focus.y - viewport.height / 2);
 
-  if (cameraNeedsSnap || !hasMovementInputActive()) {
+  if (cameraNeedsSnap) {
     camera.x = target.x;
     camera.y = target.y;
     cameraNeedsSnap = false;
     return;
   }
 
-  camera.x = lerp(camera.x, target.x, 0.22);
-  camera.y = lerp(camera.y, target.y, 0.22);
+  camera.x = lerp(camera.x, target.x, 0.18);
+  camera.y = lerp(camera.y, target.y, 0.18);
   const clamped = clampCameraPosition(camera.x, camera.y);
   camera.x = clamped.x;
   camera.y = clamped.y;
@@ -1581,11 +1589,12 @@ function reconcilePredictedProjectile(authoritativeBullet) {
 
 function createInputFrame() {
   const localPlayer = getLocalPlayer();
+  const visualState = ensureLocalVisualState(localPlayer);
   const target = lastPointerWorldPosition;
   const seq = nextInputSeq++;
   const capturedInputState = getCapturedInputState();
-  const turretAngle = localPlayer
-    ? Math.atan2(target.y - getPlayerVisualY(localPlayer), target.x - getPlayerVisualX(localPlayer))
+  const turretAngle = visualState
+    ? Math.atan2(target.y - visualState.y, target.x - visualState.x)
     : 0;
 
   return {
@@ -1946,6 +1955,7 @@ function applySnapshot(payload) {
 
   const localPlayer = getLocalPlayer();
   if (localPlayer) {
+    ensureLocalVisualState(localPlayer);
     if (!hasSeenLocalPlayerSnapshot) {
       cameraNeedsSnap = true;
       hasSeenLocalPlayerSnapshot = true;
@@ -2589,28 +2599,7 @@ function drawMapSquare() {
 }
 
 function drawCenterProbe() {
-  const centerX = GAME_CONFIG.world.width / 2;
-  const centerY = GAME_CONFIG.world.height / 2;
-
-  context.save();
-  context.strokeStyle = "#ff006e";
-  context.lineWidth = 10 / cameraZoom;
-  context.beginPath();
-  context.arc(centerX, centerY, 72, 0, Math.PI * 2);
-  context.stroke();
-
-  context.beginPath();
-  context.moveTo(centerX - 96, centerY);
-  context.lineTo(centerX + 96, centerY);
-  context.moveTo(centerX, centerY - 96);
-  context.lineTo(centerX, centerY + 96);
-  context.stroke();
-
-  context.fillStyle = "#111111";
-  context.font = `${Math.max(26 / cameraZoom, 12)}px Segoe UI`;
-  context.textAlign = "center";
-  context.fillText("MAP CENTER", centerX, centerY - 92);
-  context.restore();
+  // Hidden while we isolate the local player's movement view.
 }
 
 function drawGrid() {
@@ -2947,6 +2936,7 @@ setInterval(() => {
     return;
   }
 
+  const visualState = ensureLocalVisualState(localPlayer);
   const inputFrame = createInputFrame();
   send(serializeInputFrame(inputFrame));
 
@@ -2966,14 +2956,21 @@ setInterval(() => {
 
   const predicted = simulateTankMovement(
     {
-      x: localPlayer.renderX ?? localPlayer.x,
-      y: localPlayer.renderY ?? localPlayer.y,
-      angle: localPlayer.renderAngle ?? localPlayer.angle,
-      turretAngle: localPlayer.renderTurretAngle ?? localPlayer.turretAngle
+      x: visualState?.x ?? localPlayer.renderX ?? localPlayer.x,
+      y: visualState?.y ?? localPlayer.renderY ?? localPlayer.y,
+      angle: visualState?.angle ?? localPlayer.renderAngle ?? localPlayer.angle,
+      turretAngle: visualState?.turretAngle ?? localPlayer.renderTurretAngle ?? localPlayer.turretAngle
     },
     inputFrame,
     CLIENT_TICK.fixedDeltaSeconds
   );
+
+  if (visualState) {
+    visualState.x = predicted.x;
+    visualState.y = predicted.y;
+    visualState.angle = predicted.angle;
+    visualState.turretAngle = predicted.turretAngle;
+  }
 
   localPlayer.renderX = predicted.x;
   localPlayer.renderY = predicted.y;
