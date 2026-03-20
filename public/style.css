@@ -265,7 +265,7 @@ body.in-session .play-area {
   padding: 0;
   border: none;
   border-radius: 0;
-  background: #0d1b2a;
+  background: #f4f4f4;
   box-shadow: none;
   min-height: 100vh;
 }
@@ -275,7 +275,7 @@ canvas {
   height: 100%;
   display: block;
   border-radius: inherit;
-  background: #0d1b2a;
+  background: #f4f4f4;
 }
 
 .hud {

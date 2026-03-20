@@ -2408,127 +2408,20 @@ function updateRenderState(deltaSeconds, frameAt) {
 }
 
 function drawBackground() {
-  const arenaFloor = getLoadedWorldImage("arenaFloor");
-  context.fillStyle = "#14324c";
+  context.fillStyle = "#f4f4f4";
   context.fillRect(0, 0, canvas.width, canvas.height);
-
-  if (arenaFloor) {
-    drawRepeatedImage(arenaFloor, {
-      opacity: 0.9
-    });
-  }
 }
 
 function drawGrid() {
-  const gridOverlay = getLoadedWorldImage("arenaGrid");
-  if (gridOverlay) {
-    drawRepeatedImage(gridOverlay, {
-      opacity: 0.75
-    });
-    drawWorldBounds();
-    return;
-  }
-
-  const gridSize = WORLD_RENDER.gridSize;
-  const phaseX = ((camera.x % gridSize) + gridSize) % gridSize;
-  const phaseY = ((camera.y % gridSize) + gridSize) % gridSize;
-  const startX = -Math.round(phaseX);
-  const startY = -Math.round(phaseY);
-
-  context.fillStyle = "rgba(255, 255, 255, 0.22)";
-
-  for (let x = startX; x <= canvas.width; x += gridSize) {
-    context.fillRect(Math.round(x), 0, 1, canvas.height);
-  }
-
-  for (let y = startY; y <= canvas.height; y += gridSize) {
-    context.fillRect(0, Math.round(y), canvas.width, 1);
-  }
-
-  drawWorldBounds();
+  // Intentionally blank while we isolate spawn visibility.
 }
 
 function drawObstacles() {
-  const obstacleTexture = getLoadedWorldImage("obstacleBlock");
-
-  for (const obstacle of GAME_CONFIG.world.obstacles) {
-    if (obstacleTexture) {
-      context.drawImage(obstacleTexture, obstacle.x, obstacle.y, obstacle.width, obstacle.height);
-    } else {
-      context.fillStyle = "#30475e";
-      context.fillRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height);
-    }
-
-    context.strokeStyle = "rgba(255,255,255,0.18)";
-    context.lineWidth = 2;
-    context.strokeRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height);
-  }
+  // Intentionally blank while we isolate spawn visibility.
 }
 
 function drawObjective() {
-  if (!latestObjective) {
-    return;
-  }
-
-  const objectiveRing = getLoadedWorldImage("objectiveRing");
-
-  const fill =
-    latestObjective.contested
-      ? "rgba(239, 71, 111, 0.18)"
-      : latestObjective.ownerId
-        ? "rgba(255, 209, 102, 0.18)"
-        : "rgba(148, 210, 189, 0.12)";
-  const stroke =
-    latestObjective.contested ? "#ef476f" : latestObjective.ownerId ? "#ffd166" : "#94d2bd";
-
-  context.save();
-  if (objectiveRing) {
-    context.globalAlpha = latestObjective.ownerId ? 0.8 : 0.6;
-    context.drawImage(
-      objectiveRing,
-      latestObjective.x - latestObjective.radius,
-      latestObjective.y - latestObjective.radius,
-      latestObjective.radius * 2,
-      latestObjective.radius * 2
-    );
-    context.globalAlpha = 1;
-  } else {
-    context.beginPath();
-    context.arc(latestObjective.x, latestObjective.y, latestObjective.radius, 0, Math.PI * 2);
-    context.fillStyle = fill;
-    context.fill();
-    context.strokeStyle = stroke;
-    context.lineWidth = 3;
-    context.stroke();
-  }
-
-  if (latestObjective.captureTargetName && latestObjective.captureProgress > 0) {
-    context.beginPath();
-    context.arc(
-      latestObjective.x,
-      latestObjective.y,
-      latestObjective.radius - 12,
-      -Math.PI / 2,
-      -Math.PI / 2 + Math.PI * 2 * latestObjective.captureProgress
-    );
-    context.strokeStyle = stroke;
-    context.lineWidth = 6;
-    context.stroke();
-  }
-
-  context.fillStyle = "#f8fafc";
-  context.font = "14px Segoe UI";
-  context.textAlign = "center";
-  context.fillText(
-    latestObjective.contested
-      ? "Contested"
-      : latestObjective.ownerName
-        ? `Held by ${latestObjective.ownerName}`
-        : "Capture Point",
-    latestObjective.x,
-    latestObjective.y - latestObjective.radius - 12
-  );
-  context.restore();
+  // Intentionally blank while we isolate spawn visibility.
 }
 
 function drawRepeatedImage(image, options = {}) {
@@ -2582,172 +2475,21 @@ function drawTank(player) {
     return;
   }
 
-  const now = performance.now();
+  if (player.id !== localPlayerId) {
+    return;
+  }
+
   const x = getPlayerVisualX(player);
   const y = getPlayerVisualY(player);
-  const hullAngle = getPlayerVisualAngle(player);
-  const turretAngle = getPlayerVisualTurretAngle(player);
-  const recoil = player.predictedRecoil ?? 0;
-  const motionBlend = player.motionBlend ?? 0;
-  const treadOffset = ((player.trackPhase ?? 0) * 12) % 12;
-  const animation = player.animation ?? null;
-  const combat = player.combat ?? null;
-  const reloadFraction = player.visualReloadFraction ?? animation?.reloadFraction ?? 0;
-  const upperBodySync = player.visualUpperBodySync ?? animation?.upperBodySync ?? 0;
-  const aimOffset = player.visualAimOffset ?? animation?.aimOffset ?? 0;
-  const spawnPulse = Math.max(0, ((player.spawnPulseUntil ?? 0) - now) / 520);
-  const hitFlash = Math.max(0, ((player.hitFlashUntil ?? 0) - now) / 180);
-  const deathPulse = Math.max(0, ((player.deathPulseUntil ?? 0) - now) / 650);
-  const killBurst = Math.max(0, ((player.killBurstUntil ?? 0) - now) / 500);
-  const overlayAction = animation?.overlayAction ?? ANIMATION_ACTIONS.NONE;
-  const stunned = Boolean(combat?.stunned) || (animation?.stunRemainingMs ?? 0) > 0 || (player.stunWaveUntil ?? 0) > now;
-  const hullSprite = getLoadedTankImage(player, "hull");
-  const turretSprite = getLoadedTankImage(player, "turret");
-  const hullSpriteAlpha = player.alive ? 1 : 0.35 + deathPulse * 0.25;
-  const turretSpriteAlpha = player.alive ? 1 : 0.4 + deathPulse * 0.22;
-
-  if (spawnPulse > 0.01) {
-    context.save();
-    context.beginPath();
-    context.arc(x, y, GAME_CONFIG.tank.radius + 14 + spawnPulse * 10, 0, Math.PI * 2);
-    context.strokeStyle = `rgba(148, 210, 189, ${0.18 + spawnPulse * 0.35})`;
-    context.lineWidth = 4;
-    context.stroke();
-    context.restore();
-  }
-
-  if (stunned) {
-    context.save();
-    context.beginPath();
-    context.arc(x, y, GAME_CONFIG.tank.radius + 18, 0, Math.PI * 2);
-    context.strokeStyle = `rgba(142, 202, 230, ${0.26 + Math.min(0.5, (combat?.stunRemainingMs ?? 220) / 1200)})`;
-    context.lineWidth = 3;
-    context.setLineDash([6, 6]);
-    context.stroke();
-    context.restore();
-  }
-
-  if (killBurst > 0.01) {
-    context.save();
-    context.beginPath();
-    context.arc(x, y, GAME_CONFIG.tank.radius + 20 + (1 - killBurst) * 12, 0, Math.PI * 2);
-    context.strokeStyle = `rgba(239, 71, 111, ${0.1 + killBurst * 0.4})`;
-    context.lineWidth = 4;
-    context.stroke();
-    context.restore();
-  }
-
-  if (hullSprite) {
-    drawRotatedSprite(
-      hullSprite,
-      x,
-      y,
-      hullAngle,
-      GAME_CONFIG.tank.radius * 3.6,
-      GAME_CONFIG.tank.radius * 3,
-      {
-        alpha: hullSpriteAlpha
-      }
-    );
-  } else {
-    context.save();
-    context.beginPath();
-    context.arc(x, y, GAME_CONFIG.tank.radius, 0, Math.PI * 2);
-    context.fillStyle =
-      hitFlash > 0.01
-        ? `rgba(239, 71, 111, ${0.55 + hitFlash * 0.25})`
-        : player.alive
-          ? player.color
-          : `rgba(255,255,255,${0.18 + deathPulse * 0.18})`;
-    context.fill();
-    context.lineWidth = 3;
-    context.strokeStyle = "rgba(255,255,255,0.2)";
-    context.stroke();
-    context.restore();
-  }
-
-  if (turretSprite) {
-    drawRotatedSprite(
-      turretSprite,
-      x,
-      y,
-      turretAngle,
-      GAME_CONFIG.tank.radius * 3.4,
-      GAME_CONFIG.tank.radius * 2.4,
-      {
-        alpha: turretSpriteAlpha,
-        offsetX: -recoil * 4
-      }
-    );
-  } else {
-    context.save();
-    context.translate(x, y);
-    context.rotate(turretAngle);
-    context.translate(-recoil * 4, 0);
-    context.fillStyle = overlayAction === ANIMATION_ACTIONS.HIT ? "#ffd6d6" : "#f1f5f9";
-    context.fillRect(-10, -10, 20, 20);
-    context.fillStyle = "#d90429";
-    context.fillRect(10, -4, 26, 8);
-    context.strokeStyle = "rgba(8, 15, 28, 0.35)";
-    context.lineWidth = 2;
-    context.strokeRect(-10, -10, 20, 20);
-    context.restore();
-  }
-
-  if (player.id === localPlayerId && player.muzzleFlashUntil && performance.now() < player.muzzleFlashUntil) {
-    context.save();
-    context.translate(x, y);
-    context.rotate(turretAngle);
-    context.translate(-recoil * 4, 0);
-    context.fillStyle = "rgba(255, 209, 102, 0.85)";
-    context.beginPath();
-    context.moveTo(42, 0);
-    context.lineTo(58, -7);
-    context.lineTo(54, 0);
-    context.lineTo(58, 7);
-    context.closePath();
-    context.fill();
-    context.restore();
-  }
-
   context.save();
-  context.translate(x, y);
-  context.strokeStyle = `rgba(241, 245, 249, ${0.2 + upperBodySync * 0.45})`;
-  context.lineWidth = 3;
   context.beginPath();
-  context.arc(0, 0, 12, hullAngle + aimOffset * 0.12 - Math.PI / 2, hullAngle + aimOffset * 0.88 - Math.PI / 2);
+  context.arc(x, y, GAME_CONFIG.tank.radius + 8, 0, Math.PI * 2);
+  context.fillStyle = player.alive ? "#ff7a00" : "rgba(255, 122, 0, 0.35)";
+  context.fill();
+  context.lineWidth = 5;
+  context.strokeStyle = "#111111";
   context.stroke();
   context.restore();
-
-  if (reloadFraction > 0.01 && player.alive) {
-    context.save();
-    context.beginPath();
-    context.arc(x, y, GAME_CONFIG.tank.radius + 8, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - reloadFraction));
-    context.strokeStyle = "rgba(255, 209, 102, 0.85)";
-    context.lineWidth = 4;
-    context.stroke();
-    context.restore();
-  }
-
-  context.fillStyle = "#f8fafc";
-  context.font = "14px Segoe UI";
-  context.textAlign = "center";
-  context.fillText(
-    `${player.name}${player.isBot ? " [BOT]" : ""}${player.ready ? " [R]" : ""}${player.afk ? " [AFK]" : ""}${stunned ? " [STUN]" : ""}${player.connected ? "" : player.slotReserved ? " [RESERVED]" : " [DC]"}`,
-    x,
-    y - 34
-  );
-
-  context.fillStyle = "rgba(255,255,255,0.15)";
-  context.fillRect(x - 25, y + 32, 50, 6);
-  context.fillStyle = player.hp > 35 ? "#8ecae6" : "#ef476f";
-  context.fillRect(x - 25, y + 32, (50 * player.hp) / GAME_CONFIG.tank.hitPoints, 6);
-
-  if (player.emoteId && player.emoteUntil && now < player.emoteUntil) {
-    context.fillStyle = "#f8fafc";
-    context.font = "13px Segoe UI";
-    context.fillText(player.emoteId, x, y - 50);
-  }
 }
 
 function drawBullet(bullet) {
