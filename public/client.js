@@ -97,7 +97,6 @@ const camera = {
 };
 let cameraZoom = 1;
 let cameraHasAnchor = false;
-let cameraFollowUnlocked = false;
 let cameraAnchorX = GAME_CONFIG.world.width / 2;
 let cameraAnchorY = GAME_CONFIG.world.height / 2;
 
@@ -316,9 +315,21 @@ function getLoadedTankImage(player, part) {
 
 function resetCameraAnchor() {
   cameraHasAnchor = false;
-  cameraFollowUnlocked = false;
   cameraAnchorX = GAME_CONFIG.world.width / 2;
   cameraAnchorY = GAME_CONFIG.world.height / 2;
+}
+
+function hasMovementInputActive() {
+  return (
+    keys.has("KeyW") ||
+    keys.has("KeyA") ||
+    keys.has("KeyS") ||
+    keys.has("KeyD") ||
+    keys.has("ArrowUp") ||
+    keys.has("ArrowLeft") ||
+    keys.has("ArrowDown") ||
+    keys.has("ArrowRight")
+  );
 }
 
 function hasPlayableSession() {
@@ -1023,18 +1034,20 @@ function getCameraFocusTarget() {
   const localPlayer = getLocalPlayer();
 
   if (localPlayer && !localPlayer.isSpectator) {
-    const liveX = localPlayer.x ?? getPlayerVisualX(localPlayer);
-    const liveY = localPlayer.y ?? getPlayerVisualY(localPlayer);
+    const stableX = localPlayer.x ?? getPlayerVisualX(localPlayer);
+    const stableY = localPlayer.y ?? getPlayerVisualY(localPlayer);
+    const smoothX = getPlayerVisualX(localPlayer);
+    const smoothY = getPlayerVisualY(localPlayer);
 
     if (!cameraHasAnchor) {
-      cameraAnchorX = liveX;
-      cameraAnchorY = liveY;
+      cameraAnchorX = stableX;
+      cameraAnchorY = stableY;
       cameraHasAnchor = true;
     }
 
-    if (cameraFollowUnlocked) {
-      cameraAnchorX = liveX;
-      cameraAnchorY = liveY;
+    if (hasMovementInputActive()) {
+      cameraAnchorX = smoothX;
+      cameraAnchorY = smoothY;
     }
 
     return {
@@ -1067,9 +1080,19 @@ function updateCamera() {
   const focus = getCameraFocusTarget();
   const viewport = getVisibleViewportSize();
   const target = clampCameraPosition(focus.x - viewport.width / 2, focus.y - viewport.height / 2);
-  camera.x = target.x;
-  camera.y = target.y;
-  cameraNeedsSnap = false;
+
+  if (cameraNeedsSnap || !hasMovementInputActive()) {
+    camera.x = target.x;
+    camera.y = target.y;
+    cameraNeedsSnap = false;
+    return;
+  }
+
+  camera.x = lerp(camera.x, target.x, 0.22);
+  camera.y = lerp(camera.y, target.y, 0.22);
+  const clamped = clampCameraPosition(camera.x, camera.y);
+  camera.x = clamped.x;
+  camera.y = clamped.y;
 }
 
 function getPlayerVisualX(player) {
@@ -2668,35 +2691,31 @@ function drawTank(player) {
     return;
   }
 
-  const x = getPlayerVisualX(player);
-  const y = getPlayerVisualY(player);
   const isLocalPlayer = player.id === localPlayerId;
-
-  context.save();
   if (isLocalPlayer) {
-    context.beginPath();
-    context.arc(x, y, GAME_CONFIG.tank.radius + 34, 0, Math.PI * 2);
-    context.lineWidth = 10;
-    context.strokeStyle = "rgba(255, 0, 110, 0.78)";
-    context.stroke();
+    return;
   }
 
+  const x = getPlayerVisualX(player);
+  const y = getPlayerVisualY(player);
+
+  context.save();
   context.beginPath();
-  context.arc(x, y, GAME_CONFIG.tank.radius + (isLocalPlayer ? 24 : 8), 0, Math.PI * 2);
+  context.arc(x, y, GAME_CONFIG.tank.radius + 8, 0, Math.PI * 2);
   context.fillStyle = player.alive
-    ? (isLocalPlayer ? "#ff4d00" : "#5f6f86")
+    ? "#5f6f86"
     : "rgba(255, 122, 0, 0.35)";
   context.fill();
-  context.lineWidth = isLocalPlayer ? 9 : 5;
-  context.strokeStyle = isLocalPlayer ? "#111111" : "#2f3742";
+  context.lineWidth = 5;
+  context.strokeStyle = "#2f3742";
   context.stroke();
   context.restore();
 
   context.save();
   context.fillStyle = "#111111";
-  context.font = isLocalPlayer ? "bold 26px Segoe UI" : "14px Segoe UI";
+  context.font = "14px Segoe UI";
   context.textAlign = "center";
-  context.fillText(isLocalPlayer ? "YOU" : player.name, x, y - (GAME_CONFIG.tank.radius + 42));
+  context.fillText(player.name, x, y - (GAME_CONFIG.tank.radius + 18));
   context.restore();
 }
 
@@ -2878,12 +2897,6 @@ classSelect.addEventListener("change", () => {
 
 window.addEventListener("keydown", (event) => {
   unlockAudio();
-  if (
-    ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.code)
-  ) {
-    cameraFollowUnlocked = true;
-  }
-
   if (
     ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(
       event.code
