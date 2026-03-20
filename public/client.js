@@ -24,6 +24,7 @@ const playAreaElement = document.querySelector(".play-area");
 const fallbackVisualLayerElement = document.getElementById("fallback-visual-layer");
 const fallbackCenterMarkerElement = document.getElementById("fallback-center-marker");
 const fallbackPlayerMarkerElement = document.getElementById("fallback-player-marker");
+const fallbackRemoteMarkersElement = document.getElementById("fallback-remote-markers");
 const statusElement = document.getElementById("status");
 const latencyElement = document.getElementById("latency");
 const matchStatusElement = document.getElementById("match-status");
@@ -399,6 +400,45 @@ function positionFallbackMarker(element, worldX, worldY) {
   element.style.top = `${screenY}px`;
 }
 
+function syncFallbackRemoteMarkers() {
+  if (!fallbackRemoteMarkersElement) {
+    return;
+  }
+
+  const activeRemotePlayers = Array.from(players.values()).filter(
+    (player) => player.id !== localPlayerId && !player.isSpectator
+  );
+  const activeIds = new Set(activeRemotePlayers.map((player) => player.id));
+
+  for (const node of Array.from(fallbackRemoteMarkersElement.children)) {
+    if (!activeIds.has(node.dataset.playerId)) {
+      node.remove();
+    }
+  }
+
+  for (const player of activeRemotePlayers) {
+    let marker = fallbackRemoteMarkersElement.querySelector(`[data-player-id="${player.id}"]`);
+    if (!marker) {
+      marker = document.createElement("div");
+      marker.className = "fallback-remote-marker";
+      marker.dataset.playerId = player.id;
+      marker.innerHTML = `
+        <div class="fallback-remote-ring"></div>
+        <div class="fallback-remote-dot"></div>
+        <div class="fallback-remote-label"></div>
+      `;
+      fallbackRemoteMarkersElement.append(marker);
+    }
+
+    marker.dataset.bot = player.isBot ? "true" : "false";
+    const label = marker.querySelector(".fallback-remote-label");
+    if (label) {
+      label.textContent = player.isBot ? `${player.name} [BOT]` : player.name;
+    }
+    positionFallbackMarker(marker, getPlayerVisualX(player), getPlayerVisualY(player));
+  }
+}
+
 function updateFallbackVisuals() {
   if (!playAreaElement || !fallbackVisualLayerElement) {
     requestAnimationFrame(updateFallbackVisuals);
@@ -441,6 +481,8 @@ function updateFallbackVisuals() {
     fallbackPlayerMarkerElement.style.left = `${playAreaElement.clientWidth / 2}px`;
     fallbackPlayerMarkerElement.style.top = `${playAreaElement.clientHeight / 2}px`;
   }
+
+  syncFallbackRemoteMarkers();
 
   requestAnimationFrame(updateFallbackVisuals);
 }

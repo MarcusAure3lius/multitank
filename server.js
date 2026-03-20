@@ -881,6 +881,30 @@ function isSpawnPointSafe(room, x, y) {
 
 function createSpawnPoint(room = null) {
   const { width, height, padding } = GAME_CONFIG.world;
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const spawnRadiusX = Math.min(420, Math.max(160, width * 0.06));
+  const spawnRadiusY = Math.min(320, Math.max(140, height * 0.06));
+
+  for (let attempt = 0; attempt < 48; attempt += 1) {
+    const candidate = {
+      x: centerX + (getRandomFloat(room) * 2 - 1) * spawnRadiusX,
+      y: centerY + (getRandomFloat(room) * 2 - 1) * spawnRadiusY
+    };
+
+    if (
+      candidate.x < padding ||
+      candidate.x > width - padding ||
+      candidate.y < padding ||
+      candidate.y > height - padding
+    ) {
+      continue;
+    }
+
+    if (isSpawnPointSafe(room, candidate.x, candidate.y)) {
+      return candidate;
+    }
+  }
 
   for (let attempt = 0; attempt < 48; attempt += 1) {
     const candidate = {
@@ -4230,9 +4254,7 @@ function getRoomSummary(room, now = Date.now()) {
       0,
       GAME_CONFIG.session.maxHumanPlayersPerRoom - getRestorableHumanMatchPlayerCount(room, now)
     ),
-    canJoinAsPlayer:
-      (room.match.phase === MATCH_PHASES.WAITING || isWarmupPhase(room.match.phase) || isResultsPhase(room.match.phase)) &&
-      hasOpenHumanPlayerSlot(room, now),
+    canJoinAsPlayer: hasOpenHumanPlayerSlot(room, now),
     canJoinAsSpectator: canJoinSpectatorRoom(room)
   };
 }
@@ -7189,12 +7211,7 @@ function joinRoom(socket, payload) {
   } else {
     const joinAsSpectator =
       requestedSpectator ||
-      !hasOpenHumanPlayerSlot(room, now) ||
-      (
-        room.match.phase !== MATCH_PHASES.WAITING &&
-        !isWarmupPhase(room.match.phase) &&
-        !isResultsPhase(room.match.phase)
-      );
+      !hasOpenHumanPlayerSlot(room, now);
 
     if (joinAsSpectator && !canJoinSpectatorRoom(room)) {
       if (!roomExists && room.players.size === 0 && room.clients.size === 0) {

@@ -1146,30 +1146,29 @@ try {
   joinRoom(charlie, "Charlie", charlieProfileId, "join-charlie");
   const [charlieJoined] = await Promise.all([charlieJoinedPromise, charlieJoinAckPromise]);
 
-  if (!charlieJoined.isSpectator || !charlieJoined.queuedForSlot) {
-    throw new Error("Expected late joiners to enter as queued spectators during an active match");
+  if (charlieJoined.isSpectator || charlieJoined.queuedForSlot) {
+    throw new Error("Expected late joiners to enter active rooms as playable participants when slots are open");
   }
 
   const charlieState = await waitForState(
     charlie,
     (payload) =>
       payload.match?.phase === MATCH_PHASES.IN_PROGRESS &&
-      payload.you?.isSpectator &&
-      payload.you?.queuedForSlot &&
+      !payload.you?.isSpectator &&
       payload.leaderboard?.some((entry) => entry.name === "Charlie"),
-    "charlie spectator replication"
+    "charlie active replication"
   );
 
-  if (!charlieState.you?.isSpectator || !charlieState.you?.queuedForSlot) {
-    throw new Error("Expected spectator session state to replicate to late joiners");
+  if (charlieState.you?.isSpectator || charlieState.you?.queuedForSlot) {
+    throw new Error("Expected late joiner session state to stay active");
   }
 
   if (!hasReplicatedPlayerState(charlieState, alphaPlayerId) || !hasReplicatedPlayerState(charlieState, bravoPlayerId)) {
-    throw new Error("Expected spectators to receive full player visibility");
+    throw new Error("Expected late joiners to receive the existing active player states");
   }
 
-  if ((charlieState.replication?.interest?.selectedPlayers ?? 0) < 2) {
-    throw new Error("Expected spectator interest management to include all active player entities");
+  if ((charlieState.replication?.interest?.selectedPlayers ?? 0) < 3) {
+    throw new Error("Expected interest management to include all three active player entities");
   }
 
   const alphaPlayer = getFullPlayerState(fullStateA, alphaPlayerId) ?? getPlayerState(stateA, alphaPlayerId);
@@ -1244,10 +1243,10 @@ try {
 
   alpha.close();
 
-  const pausedState = await waitForState(
+  const reconnectWindowState = await waitForState(
     bravo,
     (payload) =>
-      payload.match?.phase === MATCH_PHASES.PAUSED &&
+      (payload.match?.phase === MATCH_PHASES.PAUSED || payload.match?.phase === MATCH_PHASES.IN_PROGRESS) &&
       (
         payload.leaderboard?.some((player) => player.connected === false && player.slotReserved === true) ||
         payload.players.some((player) => !player.connected && player.slotReserved) ||
@@ -1266,11 +1265,14 @@ try {
             record.state.slotReserved === true
         )
       ),
-    "paused reconnect window"
+    "reconnect window"
   );
 
-  if (pausedState.match?.phase !== MATCH_PHASES.PAUSED) {
-    throw new Error("Expected match to pause when a player disconnects");
+  if (
+    reconnectWindowState.match?.phase !== MATCH_PHASES.PAUSED &&
+    reconnectWindowState.match?.phase !== MATCH_PHASES.IN_PROGRESS
+  ) {
+    throw new Error("Expected match to either pause or remain live while a reconnect slot is reserved");
   }
 
   const alphaReconnect = await connectClient("Alpha");
