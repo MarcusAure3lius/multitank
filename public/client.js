@@ -137,6 +137,7 @@ let lastResyncRequestAt = 0;
 let lastStallWarningAt = 0;
 let latestLatencyMs = 0;
 let lastServerMessageAt = 0;
+let pointerPrimaryDown = false;
 let lastPointerWorldPosition = {
   x: GAME_CONFIG.world.width / 2,
   y: GAME_CONFIG.world.height / 2
@@ -1670,7 +1671,7 @@ function getCapturedInputState() {
     back: keys.has("KeyS") || keys.has("ArrowDown"),
     left: keys.has("KeyA") || keys.has("ArrowLeft"),
     right: keys.has("KeyD") || keys.has("ArrowRight"),
-    shoot: keys.has("Space")
+    shoot: keys.has("Space") || pointerPrimaryDown
   };
 }
 
@@ -2881,25 +2882,69 @@ function drawRotatedSprite(image, x, y, angle, width, height, options = {}) {
 }
 
 function drawTank(player) {
-  void player;
+  if (!player || player.isSpectator || !player.alive) {
+    return;
+  }
+
+  const now = performance.now();
+  const x = getPlayerVisualX(player);
+  const y = getPlayerVisualY(player);
+  const bodyAngle = getPlayerVisualAngle(player);
+  const turretAngle = getPlayerVisualTurretAngle(player);
+  const bodyRadius = GAME_CONFIG.tank.radius;
+  const barrelLength = bodyRadius + 18 - Math.min(6, (player.predictedRecoil ?? 0) * 6);
+  const bodyColor = player.color ?? "#ff4d00";
+  const alpha = player.connected === false ? 0.42 : 1;
+
+  context.save();
+  context.globalAlpha = alpha;
+  context.translate(x, y);
+  context.rotate(turretAngle);
+  context.fillStyle = "#111111";
+  context.fillRect(0, -4, barrelLength, 8);
+
+  if ((player.muzzleFlashUntil ?? 0) > now) {
+    context.beginPath();
+    context.arc(barrelLength + 5, 0, 5, 0, Math.PI * 2);
+    context.fillStyle = "#111111";
+    context.fill();
+  }
+  context.restore();
+
+  context.save();
+  context.globalAlpha = alpha;
+  context.translate(x, y);
+  context.rotate(bodyAngle);
+  context.fillStyle = bodyColor;
+  context.beginPath();
+  context.arc(0, 0, bodyRadius, 0, Math.PI * 2);
+  context.fill();
+  context.lineWidth = 4;
+  context.strokeStyle = "#111111";
+  context.stroke();
+  context.fillStyle = "#111111";
+  context.beginPath();
+  context.arc(0, 0, 6, 0, Math.PI * 2);
+  context.fill();
+  context.restore();
 }
 
 function drawBullet(bullet) {
   context.save();
-  context.translate(bullet.renderX, bullet.renderY);
-  context.rotate(bullet.renderAngle ?? bullet.angle);
-  context.fillStyle = "#ffd166";
-  context.fillRect(-6, -3, 12, 6);
+  context.fillStyle = "#111111";
+  context.beginPath();
+  context.arc(bullet.renderX, bullet.renderY, GAME_CONFIG.bullet.radius, 0, Math.PI * 2);
+  context.fill();
   context.restore();
 }
 
 function drawPredictedProjectile(projectile) {
   context.save();
-  context.translate(projectile.renderX, projectile.renderY);
-  context.rotate(projectile.angle);
   context.globalAlpha = 0.45;
-  context.fillStyle = "#ffd166";
-  context.fillRect(-6, -3, 12, 6);
+  context.fillStyle = "#111111";
+  context.beginPath();
+  context.arc(projectile.renderX, projectile.renderY, GAME_CONFIG.bullet.radius, 0, Math.PI * 2);
+  context.fill();
   context.restore();
 }
 
@@ -3090,11 +3135,29 @@ window.addEventListener("keyup", (event) => {
 
 window.addEventListener("resize", resizeCanvas);
 
-canvas.addEventListener("mousemove", (event) => {
+canvas.addEventListener("pointermove", (event) => {
   lastPointerWorldPosition = getPointerWorldPosition(event);
 });
 
-canvas.addEventListener("pointerdown", unlockAudio);
+canvas.addEventListener("pointerdown", (event) => {
+  unlockAudio();
+  lastPointerWorldPosition = getPointerWorldPosition(event);
+  if (event.button === 0) {
+    pointerPrimaryDown = true;
+  }
+});
+window.addEventListener("pointerup", (event) => {
+  if (event.button === 0) {
+    pointerPrimaryDown = false;
+  }
+});
+window.addEventListener("pointercancel", () => {
+  pointerPrimaryDown = false;
+});
+window.addEventListener("blur", () => {
+  keys.clear();
+  pointerPrimaryDown = false;
+});
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
 
