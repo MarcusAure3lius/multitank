@@ -1671,7 +1671,7 @@ function getCapturedInputState() {
     back: keys.has("KeyS") || keys.has("ArrowDown"),
     left: keys.has("KeyA") || keys.has("ArrowLeft"),
     right: keys.has("KeyD") || keys.has("ArrowRight"),
-    shoot: keys.has("Space") || pointerPrimaryDown
+    shoot: pointerPrimaryDown || keys.has("Space")
   };
 }
 
@@ -2893,7 +2893,7 @@ function drawTank(player) {
   const turretAngle = getPlayerVisualTurretAngle(player);
   const bodyRadius = GAME_CONFIG.tank.radius;
   const barrelLength = bodyRadius + 18 - Math.min(6, (player.predictedRecoil ?? 0) * 6);
-  const bodyColor = player.color ?? "#ff4d00";
+  const bodyColor = player.id === localPlayerId ? "#2563eb" : (player.color ?? "#ff4d00");
   const alpha = player.connected === false ? 0.42 : 1;
 
   context.save();
