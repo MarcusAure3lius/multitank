@@ -301,9 +301,14 @@ function getLoadedTankImage(player, part) {
   return getLoadedImageByPath(getResolvedTankImagePath(player, part));
 }
 
+function hasPlayableSession() {
+  const localPlayer = getLocalPlayer();
+  return Boolean(currentRoomId && hasSeenLocalPlayerSnapshot && localPlayer && !localPlayer.isSpectator);
+}
+
 function updateSessionChrome() {
-  document.body.classList.toggle("in-session", Boolean(currentRoomId));
-  document.body.classList.toggle("joining-session", Boolean(joinInProgress && !currentRoomId));
+  document.body.classList.toggle("in-session", hasPlayableSession());
+  document.body.classList.toggle("joining-session", false);
   syncJoinMatchButton();
 }
 
@@ -1805,6 +1810,8 @@ function applySnapshot(payload) {
     if (!hasSeenLocalPlayerSnapshot) {
       cameraNeedsSnap = true;
       hasSeenLocalPlayerSnapshot = true;
+      updateSessionChrome();
+      setStatus("Connected");
     }
 
     playerLabelElement.textContent =
@@ -1822,6 +1829,9 @@ function applySnapshot(payload) {
     }
   } else if (payload.you) {
     refreshSessionUi(null, payload.you);
+    if (!payload.you.isSpectator && currentRoomId) {
+      setStatus("Joined room. Waiting for local player state...");
+    }
   }
 
   refreshLobbyUi(localPlayer, payload.you ?? latestYou);
@@ -2028,7 +2038,7 @@ function connect(options = {}) {
     refreshLobbyUi();
   }
 
-  setStatus(isReconnect ? "Reconnecting..." : "Connecting...");
+  setStatus(isReconnect ? "Reconnecting to server..." : "Connecting to server...");
   roomLabelElement.textContent = roomInput.value || "default";
   playerLabelElement.textContent = nameInput.value || "Commander";
 
@@ -2037,7 +2047,7 @@ function connect(options = {}) {
 
   nextSocket.addEventListener("open", () => {
     cancelReconnect();
-    setStatus("Connected");
+    setStatus("Connected to server. Requesting match...");
     sendReliable({
       type: MESSAGE_TYPES.JOIN,
       name: nameInput.value,
@@ -2109,6 +2119,8 @@ function connect(options = {}) {
       refreshLobbyUi(null, latestYou);
       if (payload.isSpectator) {
         setStatus(payload.queuedForSlot ? "Connected as spectator, queued for a player slot" : "Connected as spectator");
+      } else {
+        setStatus("Match joined. Waiting for first player snapshot...");
       }
       refreshRoomBrowser();
       return;
@@ -2423,31 +2435,23 @@ function updateRenderState(deltaSeconds, frameAt) {
 }
 
 function drawBackground() {
-  context.fillStyle = "#f4f4f4";
+  context.fillStyle = "#cfcfcf";
   context.fillRect(0, 0, canvas.width, canvas.height);
 }
 
 function drawMapSquare() {
-  context.fillStyle = "#efefef";
+  context.fillStyle = "#ffffff";
   context.fillRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
-  context.lineWidth = 14 / cameraZoom;
+  context.lineWidth = 18 / cameraZoom;
   context.strokeStyle = "#111111";
   context.strokeRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
-
-  context.fillStyle = "rgba(17, 17, 17, 0.12)";
-  context.fillRect(
-    GAME_CONFIG.world.width / 2 - 40,
-    GAME_CONFIG.world.height / 2 - 40,
-    80,
-    80
-  );
 }
 
 function drawGrid() {
-  const cellSize = 64;
-  const majorEvery = 5;
-  const minorLineWidth = Math.max(1 / cameraZoom, 0.75);
-  const majorLineWidth = Math.max(3 / cameraZoom, 1.5);
+  const cellSize = 48;
+  const majorEvery = 4;
+  const minorLineWidth = Math.max(1.2 / cameraZoom, 1);
+  const majorLineWidth = Math.max(3.5 / cameraZoom, 2.25);
 
   context.save();
 
@@ -2457,7 +2461,7 @@ function drawGrid() {
     context.moveTo(x, 0);
     context.lineTo(x, GAME_CONFIG.world.height);
     context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
-    context.strokeStyle = isMajor ? "rgba(17, 17, 17, 0.4)" : "rgba(17, 17, 17, 0.18)";
+    context.strokeStyle = isMajor ? "rgba(17, 17, 17, 0.52)" : "rgba(17, 17, 17, 0.24)";
     context.stroke();
   }
 
@@ -2467,7 +2471,7 @@ function drawGrid() {
     context.moveTo(0, y);
     context.lineTo(GAME_CONFIG.world.width, y);
     context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
-    context.strokeStyle = isMajor ? "rgba(17, 17, 17, 0.4)" : "rgba(17, 17, 17, 0.18)";
+    context.strokeStyle = isMajor ? "rgba(17, 17, 17, 0.52)" : "rgba(17, 17, 17, 0.24)";
     context.stroke();
   }
 
