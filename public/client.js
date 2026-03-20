@@ -2687,36 +2687,7 @@ function drawRotatedSprite(image, x, y, angle, width, height, options = {}) {
 }
 
 function drawTank(player) {
-  if (player.isSpectator) {
-    return;
-  }
-
-  const isLocalPlayer = player.id === localPlayerId;
-  if (isLocalPlayer) {
-    return;
-  }
-
-  const x = getPlayerVisualX(player);
-  const y = getPlayerVisualY(player);
-
-  context.save();
-  context.beginPath();
-  context.arc(x, y, GAME_CONFIG.tank.radius + 8, 0, Math.PI * 2);
-  context.fillStyle = player.alive
-    ? "#5f6f86"
-    : "rgba(255, 122, 0, 0.35)";
-  context.fill();
-  context.lineWidth = 5;
-  context.strokeStyle = "#2f3742";
-  context.stroke();
-  context.restore();
-
-  context.save();
-  context.fillStyle = "#111111";
-  context.font = "14px Segoe UI";
-  context.textAlign = "center";
-  context.fillText(player.name, x, y - (GAME_CONFIG.tank.radius + 18));
-  context.restore();
+  void player;
 }
 
 function drawBullet(bullet) {
