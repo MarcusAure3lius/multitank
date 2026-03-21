@@ -235,7 +235,7 @@ export const GAME_CONFIG = Object.freeze({
   match: Object.freeze({
     minPlayers: 2,
     continuousMode: true,
-    survivalMode: true,
+    survivalMode: false,
     warmupMs: 3000,
     countdownMs: 3000,
     durationMs: 90000,

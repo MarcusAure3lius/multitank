@@ -7133,6 +7133,22 @@ function syncContinuousMatchState(room, now) {
     return;
   }
 
+  if (!GAME_CONFIG.match.survivalMode) {
+    if (
+      room.match.winnerId === null &&
+      room.match.winnerName === null &&
+      room.match.message === "Continuous battle"
+    ) {
+      return;
+    }
+
+    room.match.winnerId = null;
+    room.match.winnerName = null;
+    room.match.message = "Continuous battle";
+    queueRoundStateEvent(room, now);
+    return;
+  }
+
   const aliveParticipants = getAliveActiveParticipants(room);
   const nextWinner = aliveParticipants.length === 1 ? aliveParticipants[0] : null;
   const nextWinnerId = nextWinner?.id ?? null;
