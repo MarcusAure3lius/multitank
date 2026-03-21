@@ -2283,6 +2283,9 @@ function buildMatchStatusText() {
       : latestObjective?.captureTargetName
         ? ` | capturing: ${latestObjective.captureTargetName}`
         : "";
+    if (GAME_CONFIG.match.continuousMode) {
+      return `${latestMatch.message}${objectiveText}${spectatorSuffix}`;
+    }
     return `${latestMatch.message} | ${secondsLeft}s left | first to ${latestMatch.scoreToWin}${objectiveText}${spectatorSuffix}`;
   }
 

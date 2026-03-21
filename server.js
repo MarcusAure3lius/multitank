@@ -6789,8 +6789,13 @@ function setRoomPhase(room, phase, now, winner = null, options = {}) {
   }
 
   if (phase === MATCH_PHASES.LIVE_ROUND) {
-    nextPhaseEndsAt ??= now + GAME_CONFIG.match.durationMs;
-    nextMessage ??= "Live round";
+    if (GAME_CONFIG.match.continuousMode) {
+      nextPhaseEndsAt = null;
+      nextMessage ??= "Continuous battle";
+    } else {
+      nextPhaseEndsAt ??= now + GAME_CONFIG.match.durationMs;
+      nextMessage ??= "Live round";
+    }
   }
 
   if (phase === MATCH_PHASES.OVERTIME) {
@@ -6834,7 +6839,7 @@ function pauseMatchForReconnect(room, now) {
   }
 
   room.match.pausedRemainingMs =
-    room.match.phase === MATCH_PHASES.LIVE_ROUND
+    room.match.phase === MATCH_PHASES.LIVE_ROUND && !GAME_CONFIG.match.continuousMode
       ? Math.max(1000, (room.match.phaseEndsAt ?? now) - now)
       : null;
   setRoomPhase(room, MATCH_PHASES.PAUSE, now, getCurrentWinner(room), {
@@ -6851,11 +6856,16 @@ function resumePausedMatch(room, now) {
   room.match.phase = resumePhase;
   room.match.resumePhase = null;
   room.match.phaseEndsAt =
-    resumePhase === MATCH_PHASES.LIVE_ROUND
+    resumePhase === MATCH_PHASES.LIVE_ROUND && !GAME_CONFIG.match.continuousMode
       ? now + Math.max(1000, room.match.pausedRemainingMs ?? GAME_CONFIG.match.durationMs)
       : null;
   room.match.pausedRemainingMs = null;
-  room.match.message = resumePhase === MATCH_PHASES.OVERTIME ? "Overtime" : "Live round";
+  room.match.message =
+    resumePhase === MATCH_PHASES.OVERTIME
+      ? "Overtime"
+      : GAME_CONFIG.match.continuousMode
+        ? "Continuous battle"
+        : "Live round";
   queueRoundStateEvent(room, now);
 }
 
@@ -8401,6 +8411,10 @@ function updateRoomPhase(room, now) {
   }
 
   if (room.match.phase === MATCH_PHASES.LIVE_ROUND) {
+    if (GAME_CONFIG.match.continuousMode) {
+      return;
+    }
+
     const winner =
       getPlayersInSimulationOrder(room).find(
         (player) => isActiveParticipant(player) && player.score >= GAME_CONFIG.match.scoreToWin
