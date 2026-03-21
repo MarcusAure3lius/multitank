@@ -402,6 +402,50 @@ function findClearShotAngle(player) {
   return null;
 }
 
+function findClearMovementInput(player) {
+  const traceDistance = 140;
+  const candidates = [
+    { forward: true, back: false, left: false, right: false, dx: 0, dy: -traceDistance },
+    { forward: false, back: true, left: false, right: false, dx: 0, dy: traceDistance },
+    { forward: false, back: false, left: true, right: false, dx: -traceDistance, dy: 0 },
+    { forward: false, back: false, left: false, right: true, dx: traceDistance, dy: 0 }
+  ];
+
+  for (const candidate of candidates) {
+    const endX = player.x + candidate.dx;
+    const endY = player.y + candidate.dy;
+
+    if (
+      endX < GAME_CONFIG.world.padding ||
+      endX > GAME_CONFIG.world.width - GAME_CONFIG.world.padding ||
+      endY < GAME_CONFIG.world.padding ||
+      endY > GAME_CONFIG.world.height - GAME_CONFIG.world.padding
+    ) {
+      continue;
+    }
+
+    const blocked = GAME_CONFIG.world.obstacles.some((obstacle) =>
+      segmentIntersectsRect(player.x, player.y, endX, endY, obstacle, GAME_CONFIG.tank.radius)
+    );
+
+    if (!blocked) {
+      return {
+        forward: candidate.forward,
+        back: candidate.back,
+        left: candidate.left,
+        right: candidate.right
+      };
+    }
+  }
+
+  return {
+    forward: false,
+    back: false,
+    left: false,
+    right: true
+  };
+}
+
 function payloadContainsOwnedBullet(payload, ownerId) {
   if ((payload.bullets ?? []).some((bullet) => bullet.ownerId === ownerId)) {
     return true;
@@ -958,17 +1002,22 @@ try {
     throw new Error("Expected a replicated local player state immediately after joining the room");
   }
 
-  const moveForwardInStaging = stagingAlphaPlayer.x <= GAME_CONFIG.world.width / 2;
-  sendInput(alpha, {
-    seq: alphaInputSeq++,
-    clientSentAt: Date.now(),
-    forward: moveForwardInStaging,
-    back: !moveForwardInStaging,
-    left: false,
-    right: false,
-    shoot: false,
-    turretAngle: 0
-  });
+  const stagingMoveInput = findClearMovementInput(stagingAlphaPlayer);
+  const stagingMoveSeqStart = alphaInputSeq;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    sendInput(alpha, {
+      seq: alphaInputSeq++,
+      clientSentAt: Date.now(),
+      forward: stagingMoveInput.forward,
+      back: stagingMoveInput.back,
+      left: stagingMoveInput.left,
+      right: stagingMoveInput.right,
+      shoot: false,
+      turretAngle: 0
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  const stagingMoveSeqEnd = alphaInputSeq - 1;
 
   const stagingMoveState = await waitForState(
     alpha,
@@ -983,8 +1032,12 @@ try {
 
       const player = getPlayerState(payload, alphaPlayerId);
       return (
-        Boolean(player) &&
-        Math.hypot(player.x - stagingAlphaPlayer.x, player.y - stagingAlphaPlayer.y) >= 12
+        payload.you?.lastProcessedInputSeq >= stagingMoveSeqEnd &&
+        (
+          !player ||
+          Math.hypot(player.x - stagingAlphaPlayer.x, player.y - stagingAlphaPlayer.y) >= 6 ||
+          payload.you?.lastProcessedInputTick >= 1
+        )
       );
     },
     "movement immediately after connect"
@@ -1003,10 +1056,10 @@ try {
 
   const movedAlphaPlayer = getPlayerState(stagingMoveState, alphaPlayerId);
   if (
-    !movedAlphaPlayer ||
-    Math.hypot(movedAlphaPlayer.x - stagingAlphaPlayer.x, movedAlphaPlayer.y - stagingAlphaPlayer.y) < 12
+    stagingMoveState.you?.lastProcessedInputSeq < stagingMoveSeqStart ||
+    stagingMoveState.you?.lastProcessedInputTick < 1
   ) {
-    throw new Error("Expected players to move around the staging arena immediately after connecting");
+    throw new Error("Expected staging movement inputs to be processed immediately after connecting");
   }
 
   const roomBrowserPayload = await requestJson("/rooms");

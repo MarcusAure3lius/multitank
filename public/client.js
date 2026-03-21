@@ -73,10 +73,10 @@ const NETWORK_RENDER = Object.freeze({
 });
 
 const NETWORK_RECOVERY = Object.freeze({
-  staleStateWarningMs: 2000,
-  staleStateStatusCooldownMs: 1500,
-  transportSilenceReconnectMs: GAME_CONFIG.network.heartbeatTimeoutMs,
-  staleStateReconnectMs: Math.max(20000, GAME_CONFIG.network.heartbeatTimeoutMs + 5000)
+  staleStateWarningMs: 6000,
+  staleStateStatusCooldownMs: 5000,
+  transportSilenceReconnectMs: Math.max(60000, GAME_CONFIG.network.heartbeatTimeoutMs * 4),
+  staleStateReconnectMs: Number.MAX_SAFE_INTEGER
 });
 
 const CLIENT_TICK = Object.freeze({
@@ -3331,14 +3331,9 @@ setInterval(() => {
       requestLifecycleResync("snapshot_stall");
     }
 
-    if (
-      silentTransportMs >= NETWORK_RECOVERY.transportSilenceReconnectMs ||
-      staleStateMs >= NETWORK_RECOVERY.staleStateReconnectMs
-    ) {
-      const transportTimedOut =
-        silentTransportMs >= NETWORK_RECOVERY.transportSilenceReconnectMs;
-      setStatus(transportTimedOut ? "Connection lost, reconnecting..." : "State recovery timed out, reconnecting...");
-      socket.close(4008, transportTimedOut ? "Server transport stalled" : "State recovery timed out");
+    if (silentTransportMs >= NETWORK_RECOVERY.transportSilenceReconnectMs) {
+      setStatus("Connection lost, reconnecting...");
+      socket.close(4008, "Server transport stalled");
     }
   }
 }, 250);

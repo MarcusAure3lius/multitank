@@ -873,6 +873,40 @@ function getSpawnAnchorCandidates(teamId) {
   ];
 }
 
+function buildSpawnSlotCandidates(teamId, spawnKey = "") {
+  const anchors = getSpawnAnchorCandidates(teamId);
+  const slotOffsets = [
+    { x: 0, y: 0 },
+    { x: 0, y: -90 },
+    { x: 0, y: 90 },
+    { x: 90, y: 0 },
+    { x: -90, y: 0 },
+    { x: 70, y: -70 },
+    { x: 70, y: 70 },
+    { x: -70, y: -70 },
+    { x: -70, y: 70 }
+  ];
+  const orderedCandidates = [];
+
+  for (const anchor of anchors) {
+    for (const offset of slotOffsets) {
+      orderedCandidates.push({
+        x: anchor.x + offset.x,
+        y: anchor.y + offset.y
+      });
+    }
+  }
+
+  if (orderedCandidates.length <= 1) {
+    return orderedCandidates;
+  }
+
+  const startIndex = hashSeed(`${teamId}:${spawnKey}`) % orderedCandidates.length;
+  return orderedCandidates
+    .slice(startIndex)
+    .concat(orderedCandidates.slice(0, startIndex));
+}
+
 function hasSpawnProtection(player, now = Date.now()) {
   return Number(player?.spawnProtectedUntil ?? 0) > now;
 }
@@ -901,7 +935,10 @@ function clearSpawnProtectionOnAction(player, now = Date.now()) {
 }
 
 function isSpawnPointSafe(room, x, y, options = {}) {
-  const { teamId = null } = options;
+  const {
+    teamId = null,
+    enforceEnemyBuffer = true
+  } = options;
   if (collidesWithObstacle(x, y, GAME_CONFIG.tank.radius + 8)) {
     return false;
   }
@@ -925,7 +962,7 @@ function isSpawnPointSafe(room, x, y, options = {}) {
     const dx = x - player.x;
     const dy = y - player.y;
     const minDistance =
-      teamId && player.teamId !== teamId
+      enforceEnemyBuffer && teamId && player.teamId !== teamId
         ? GAME_CONFIG.spawn.safeEnemyDistance
         : GAME_CONFIG.tank.radius * 3;
     if (dx * dx + dy * dy < minDistance * minDistance) {
@@ -940,35 +977,32 @@ function createSpawnPoint(room = null, options = {}) {
   const teamId = isValidLobbyOptionId(options.teamId, GAME_CONFIG.lobby.teams)
     ? options.teamId
     : GAME_CONFIG.lobby.teams[0]?.id ?? "alpha";
+  const spawnKey = String(options.spawnKey ?? "");
+  const enforceEnemyBuffer = options.enforceEnemyBuffer !== false;
   const { width, height, padding } = GAME_CONFIG.world;
-  const spawnAnchors = getSpawnAnchorCandidates(teamId);
+  const spawnSlotCandidates = buildSpawnSlotCandidates(teamId, spawnKey);
 
-  for (const anchor of spawnAnchors) {
-    for (let attempt = 0; attempt < 24; attempt += 1) {
-      const candidate = {
-        x: anchor.x + (getRandomFloat(room) * 2 - 1) * anchor.radiusX,
-        y: anchor.y + (getRandomFloat(room) * 2 - 1) * anchor.radiusY
-      };
+  for (const candidate of spawnSlotCandidates) {
+    if (
+      candidate.x < padding ||
+      candidate.x > width - padding ||
+      candidate.y < padding ||
+      candidate.y > height - padding
+    ) {
+      continue;
+    }
 
-      if (
-        candidate.x < padding ||
-        candidate.x > width - padding ||
-        candidate.y < padding ||
-        candidate.y > height - padding
-      ) {
-        continue;
-      }
-
-      if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId })) {
-        return candidate;
-      }
+    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer })) {
+      return candidate;
     }
   }
 
+  const fallbackRng = createSeededRng(hashSeed(`${room?.id ?? "room"}:${teamId}:${spawnKey}:spawn`));
+
   for (let attempt = 0; attempt < 48; attempt += 1) {
     const candidate = {
-      x: GAME_CONFIG.objective.x + (getRandomFloat(room) * 2 - 1) * 1500,
-      y: GAME_CONFIG.objective.y + (getRandomFloat(room) * 2 - 1) * 1050
+      x: GAME_CONFIG.objective.x + (fallbackRng.nextFloat() * 2 - 1) * 1500,
+      y: GAME_CONFIG.objective.y + (fallbackRng.nextFloat() * 2 - 1) * 1050
     };
 
     if (
@@ -980,18 +1014,18 @@ function createSpawnPoint(room = null, options = {}) {
       continue;
     }
 
-    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId })) {
+    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer })) {
       return candidate;
     }
   }
 
   for (let attempt = 0; attempt < 48; attempt += 1) {
     const candidate = {
-      x: padding + getRandomFloat(room) * (width - padding * 2),
-      y: padding + getRandomFloat(room) * (height - padding * 2)
+      x: padding + fallbackRng.nextFloat() * (width - padding * 2),
+      y: padding + fallbackRng.nextFloat() * (height - padding * 2)
     };
 
-    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId })) {
+    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer })) {
       return candidate;
     }
   }
@@ -1004,7 +1038,7 @@ function createSpawnPoint(room = null, options = {}) {
   ];
 
   return (
-    fallbackPoints.find((candidate) => isSpawnPointSafe(room, candidate.x, candidate.y, { teamId })) ?? {
+    fallbackPoints.find((candidate) => isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer })) ?? {
       x: padding + 60,
       y: padding + 60
     }
@@ -1372,7 +1406,8 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     ? teamId
     : GAME_CONFIG.lobby.teams[0].id;
   const spawn = createSpawnPoint(room, {
-    teamId: normalizedTeamId
+    teamId: normalizedTeamId,
+    spawnKey: id
   });
   const palette = ["#f25f5c", "#247ba0", "#70c1b3", "#f7b267", "#ffe066", "#7f5af0"];
   const now = Date.now();
@@ -6715,7 +6750,8 @@ function resetPlayerForRound(room, player) {
 
   const now = Date.now();
   const spawn = createSpawnPoint(room, {
-    teamId: player.teamId
+    teamId: player.teamId,
+    spawnKey: player.id
   });
   player.x = spawn.x;
   player.y = spawn.y;
@@ -6783,7 +6819,8 @@ function clearRoomCombatState(room) {
 
     const now = Date.now();
     const spawn = createSpawnPoint(room, {
-      teamId: player.teamId
+      teamId: player.teamId,
+      spawnKey: player.id
     });
     player.x = spawn.x;
     player.y = spawn.y;
@@ -8402,7 +8439,9 @@ function updatePlayer(room, player, deltaSeconds, now) {
   if (!player.alive) {
     if (!GAME_CONFIG.match.survivalMode && now >= player.respawnAt) {
       const spawn = createSpawnPoint(room, {
-        teamId: player.teamId
+        teamId: player.teamId,
+        spawnKey: player.id,
+        enforceEnemyBuffer: false
       });
       player.x = spawn.x;
       player.y = spawn.y;
