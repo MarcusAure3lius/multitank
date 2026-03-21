@@ -4285,6 +4285,12 @@ function getRestorableMatchPlayerCount(room, now) {
   return getConnectedMatchPlayers(room).length + getRecoverableDisconnectedMatchPlayers(room, now).length;
 }
 
+function getAliveActiveParticipants(room) {
+  return getPlayersInSimulationOrder(room).filter(
+    (player) => isActiveParticipant(player) && player.connected && player.alive
+  );
+}
+
 function getBotPlayers(room) {
   return Array.from(room.players.values()).filter((player) => player.isBot);
 }
@@ -6884,7 +6890,10 @@ function setRoomPhase(room, phase, now, winner = null, options = {}) {
   if (phase === MATCH_PHASES.LIVE_ROUND) {
     if (GAME_CONFIG.match.continuousMode) {
       nextPhaseEndsAt = null;
-      nextMessage ??= "Continuous battle";
+      nextMessage ??=
+        GAME_CONFIG.match.survivalMode
+          ? "No respawns | last tank standing"
+          : "Continuous battle";
     } else {
       nextPhaseEndsAt ??= now + GAME_CONFIG.match.durationMs;
       nextMessage ??= "Live round";
@@ -7117,6 +7126,37 @@ function finishMatchDueToDisconnect(room, now) {
       ? `${winner.name} wins because the other player did not reconnect`
       : "Round ended because players did not reconnect"
   });
+}
+
+function syncContinuousMatchState(room, now) {
+  if (!GAME_CONFIG.match.continuousMode) {
+    return;
+  }
+
+  const aliveParticipants = getAliveActiveParticipants(room);
+  const nextWinner = aliveParticipants.length === 1 ? aliveParticipants[0] : null;
+  const nextWinnerId = nextWinner?.id ?? null;
+  const nextWinnerName = nextWinner?.name ?? null;
+  const nextMessage = GAME_CONFIG.match.survivalMode
+    ? aliveParticipants.length === 0
+      ? "Everyone is down"
+      : aliveParticipants.length === 1
+        ? `${nextWinnerName} is last alive`
+        : `No respawns | ${aliveParticipants.length} alive`
+    : "Continuous battle";
+
+  if (
+    room.match.winnerId === nextWinnerId &&
+    room.match.winnerName === nextWinnerName &&
+    room.match.message === nextMessage
+  ) {
+    return;
+  }
+
+  room.match.winnerId = nextWinnerId;
+  room.match.winnerName = nextWinnerName;
+  room.match.message = nextMessage;
+  queueRoundStateEvent(room, now);
 }
 
 function finalizeMapTransition(room, now) {
@@ -8153,7 +8193,7 @@ function applyBulletHit(room, bullet, player, impactTime) {
     const assistContributors = getAssistContributors(room, player, attacker?.id ?? "", impactTime);
     player.alive = false;
     player.deaths += 1;
-    player.respawnAt = impactTime + GAME_CONFIG.respawnDelayMs;
+    player.respawnAt = GAME_CONFIG.match.survivalMode ? null : impactTime + GAME_CONFIG.respawnDelayMs;
     player.credits += GAME_CONFIG.economy.deathCredits;
     player.combat.stunUntil = 0;
     player.combat.stunRemainingMs = 0;
@@ -8344,7 +8384,7 @@ function updatePlayer(room, player, deltaSeconds, now) {
   clearSpawnProtectionOnAction(player, now);
 
   if (!player.alive) {
-    if (now >= player.respawnAt) {
+    if (!GAME_CONFIG.match.survivalMode && now >= player.respawnAt) {
       const spawn = createSpawnPoint(room, {
         teamId: player.teamId
       });
@@ -8514,6 +8554,7 @@ function updateRoomPhase(room, now) {
 
   if (room.match.phase === MATCH_PHASES.LIVE_ROUND) {
     if (GAME_CONFIG.match.continuousMode) {
+      syncContinuousMatchState(room, now);
       return;
     }
 
