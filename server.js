@@ -847,7 +847,61 @@ function updateBotProgressState(player, now) {
   ai.stuck = now - ai.lastProgressAt >= GAME_CONFIG.ai.stuckTimeoutMs;
 }
 
-function isSpawnPointSafe(room, x, y) {
+function getSpawnAnchorCandidates(teamId) {
+  const primaryTeamId = GAME_CONFIG.lobby.teams[0]?.id ?? "alpha";
+  const direction = teamId === primaryTeamId ? -1 : 1;
+
+  return [
+    {
+      x: GAME_CONFIG.objective.x + direction * 1420,
+      y: GAME_CONFIG.objective.y,
+      radiusX: 120,
+      radiusY: 200
+    },
+    {
+      x: GAME_CONFIG.objective.x + direction * 1320,
+      y: GAME_CONFIG.objective.y - 340,
+      radiusX: 100,
+      radiusY: 130
+    },
+    {
+      x: GAME_CONFIG.objective.x + direction * 1320,
+      y: GAME_CONFIG.objective.y + 340,
+      radiusX: 100,
+      radiusY: 130
+    }
+  ];
+}
+
+function hasSpawnProtection(player, now = Date.now()) {
+  return Number(player?.spawnProtectedUntil ?? 0) > now;
+}
+
+function grantSpawnProtection(player, now = Date.now()) {
+  if (!player) {
+    return;
+  }
+
+  player.spawnProtectedUntil = now + GAME_CONFIG.spawn.protectionMs;
+}
+
+function clearSpawnProtectionOnAction(player, now = Date.now()) {
+  if (
+    !player ||
+    !hasSpawnProtection(player, now) ||
+    player.isSpectator ||
+    !player.alive
+  ) {
+    return;
+  }
+
+  if (player.input.forward || player.input.back || player.input.left || player.input.right || player.input.shoot) {
+    player.spawnProtectedUntil = now;
+  }
+}
+
+function isSpawnPointSafe(room, x, y, options = {}) {
+  const { teamId = null } = options;
   if (collidesWithObstacle(x, y, GAME_CONFIG.tank.radius + 8)) {
     return false;
   }
@@ -870,7 +924,10 @@ function isSpawnPointSafe(room, x, y) {
 
     const dx = x - player.x;
     const dy = y - player.y;
-    const minDistance = GAME_CONFIG.tank.radius * 3;
+    const minDistance =
+      teamId && player.teamId !== teamId
+        ? GAME_CONFIG.spawn.safeEnemyDistance
+        : GAME_CONFIG.tank.radius * 3;
     if (dx * dx + dy * dy < minDistance * minDistance) {
       return false;
     }
@@ -879,17 +936,39 @@ function isSpawnPointSafe(room, x, y) {
   return true;
 }
 
-function createSpawnPoint(room = null) {
+function createSpawnPoint(room = null, options = {}) {
+  const teamId = isValidLobbyOptionId(options.teamId, GAME_CONFIG.lobby.teams)
+    ? options.teamId
+    : GAME_CONFIG.lobby.teams[0]?.id ?? "alpha";
   const { width, height, padding } = GAME_CONFIG.world;
-  const centerX = width / 2;
-  const centerY = height / 2;
-  const spawnRadiusX = Math.min(420, Math.max(160, width * 0.06));
-  const spawnRadiusY = Math.min(320, Math.max(140, height * 0.06));
+  const spawnAnchors = getSpawnAnchorCandidates(teamId);
+
+  for (const anchor of spawnAnchors) {
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      const candidate = {
+        x: anchor.x + (getRandomFloat(room) * 2 - 1) * anchor.radiusX,
+        y: anchor.y + (getRandomFloat(room) * 2 - 1) * anchor.radiusY
+      };
+
+      if (
+        candidate.x < padding ||
+        candidate.x > width - padding ||
+        candidate.y < padding ||
+        candidate.y > height - padding
+      ) {
+        continue;
+      }
+
+      if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId })) {
+        return candidate;
+      }
+    }
+  }
 
   for (let attempt = 0; attempt < 48; attempt += 1) {
     const candidate = {
-      x: centerX + (getRandomFloat(room) * 2 - 1) * spawnRadiusX,
-      y: centerY + (getRandomFloat(room) * 2 - 1) * spawnRadiusY
+      x: GAME_CONFIG.objective.x + (getRandomFloat(room) * 2 - 1) * 1500,
+      y: GAME_CONFIG.objective.y + (getRandomFloat(room) * 2 - 1) * 1050
     };
 
     if (
@@ -901,7 +980,7 @@ function createSpawnPoint(room = null) {
       continue;
     }
 
-    if (isSpawnPointSafe(room, candidate.x, candidate.y)) {
+    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId })) {
       return candidate;
     }
   }
@@ -912,7 +991,7 @@ function createSpawnPoint(room = null) {
       y: padding + getRandomFloat(room) * (height - padding * 2)
     };
 
-    if (isSpawnPointSafe(room, candidate.x, candidate.y)) {
+    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId })) {
       return candidate;
     }
   }
@@ -925,7 +1004,7 @@ function createSpawnPoint(room = null) {
   ];
 
   return (
-    fallbackPoints.find((candidate) => isSpawnPointSafe(room, candidate.x, candidate.y)) ?? {
+    fallbackPoints.find((candidate) => isSpawnPointSafe(room, candidate.x, candidate.y, { teamId })) ?? {
       x: padding + 60,
       y: padding + 60
     }
@@ -1289,7 +1368,12 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     classId = GAME_CONFIG.lobby.classes[0].id,
     joinedRoomAt = Date.now()
   } = options;
-  const spawn = createSpawnPoint(room);
+  const normalizedTeamId = isValidLobbyOptionId(teamId, GAME_CONFIG.lobby.teams)
+    ? teamId
+    : GAME_CONFIG.lobby.teams[0].id;
+  const spawn = createSpawnPoint(room, {
+    teamId: normalizedTeamId
+  });
   const palette = ["#f25f5c", "#247ba0", "#70c1b3", "#f7b267", "#ffe066", "#7f5af0"];
   const now = Date.now();
   const botAiState = isBot ? createBotAiState(id, now) : null;
@@ -1317,7 +1401,7 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     connected: true,
     isBot,
     isSpectator,
-    teamId: isValidLobbyOptionId(teamId, GAME_CONFIG.lobby.teams) ? teamId : GAME_CONFIG.lobby.teams[0].id,
+    teamId: normalizedTeamId,
     classId: isValidLobbyOptionId(classId, GAME_CONFIG.lobby.classes)
       ? classId
       : GAME_CONFIG.lobby.classes[0].id,
@@ -1329,6 +1413,7 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     lastActiveAt: now,
     disconnectedAt: null,
     reconnectDeadlineAt: null,
+    spawnProtectedUntil: now + GAME_CONFIG.spawn.protectionMs,
     respawnAt: 0,
     lastShotAt: 0,
     nextAiThinkAt: botAiState ? now + botAiState.phaseOffsetMs : 0,
@@ -6622,7 +6707,10 @@ function resetPlayerForRound(room, player) {
     return;
   }
 
-  const spawn = createSpawnPoint(room);
+  const now = Date.now();
+  const spawn = createSpawnPoint(room, {
+    teamId: player.teamId
+  });
   player.x = spawn.x;
   player.y = spawn.y;
   player.angle = 0;
@@ -6636,13 +6724,14 @@ function resetPlayerForRound(room, player) {
   player.alive = true;
   player.nextAiThinkAt = 0;
   player.respawnAt = 0;
+  grantSpawnProtection(player, now);
   player.lastShotAt = 0;
   player.lastProcessedInputTick = 0;
   player.lastProcessedInputClientSentAt = 0;
   player.lastReceivedInputClientSentAt = 0;
   player.pendingInputs = [];
   resetPlayerHistory(player);
-  markPlayerActive(player, Date.now());
+  markPlayerActive(player, now);
   player.input = {
     seq: player.lastProcessedInputSeq,
     clientSentAt: 0,
@@ -6654,19 +6743,19 @@ function resetPlayerForRound(room, player) {
     shoot: false,
     turretAngle: 0
   };
-  player.animation = createPlayerAnimationState(Date.now(), {
+  player.animation = createPlayerAnimationState(now, {
     locomotion: ANIMATION_POSES.IDLE,
     overlayAction: ANIMATION_ACTIONS.SPAWN,
     eventAction: ANIMATION_ACTIONS.SPAWN,
     eventSeq: (player.animation?.eventSeq ?? 0) + 1,
-    eventStartedAt: Date.now(),
+    eventStartedAt: now,
     trackPhase: 0
   });
-  player.combat = createPlayerCombatState(player, Date.now());
+  player.combat = createPlayerCombatState(player, now);
   clearCombatContributors(player);
   rememberSafePlayerState(player);
   if (player.isBot) {
-    resetBotAiState(player, Date.now());
+    resetBotAiState(player, now);
   }
 }
 
@@ -6686,7 +6775,10 @@ function clearRoomCombatState(room) {
       continue;
     }
 
-    const spawn = createSpawnPoint(room);
+    const now = Date.now();
+    const spawn = createSpawnPoint(room, {
+      teamId: player.teamId
+    });
     player.x = spawn.x;
     player.y = spawn.y;
     player.angle = 0;
@@ -6698,13 +6790,14 @@ function clearRoomCombatState(room) {
     player.alive = true;
     player.nextAiThinkAt = 0;
     player.respawnAt = 0;
+    grantSpawnProtection(player, now);
     player.lastShotAt = 0;
     player.lastProcessedInputTick = 0;
     player.lastProcessedInputClientSentAt = 0;
     player.lastReceivedInputClientSentAt = 0;
     player.pendingInputs = [];
     resetPlayerHistory(player);
-    markPlayerActive(player, Date.now());
+    markPlayerActive(player, now);
     player.input.forward = false;
     player.input.back = false;
     player.input.left = false;
@@ -6713,19 +6806,19 @@ function clearRoomCombatState(room) {
     player.input.turretAngle = 0;
     player.input.clientSentAt = 0;
     player.input.receivedAt = 0;
-    player.animation = createPlayerAnimationState(Date.now(), {
+    player.animation = createPlayerAnimationState(now, {
       locomotion: ANIMATION_POSES.IDLE,
       overlayAction: ANIMATION_ACTIONS.SPAWN,
       eventAction: ANIMATION_ACTIONS.SPAWN,
       eventSeq: (player.animation?.eventSeq ?? 0) + 1,
-      eventStartedAt: Date.now(),
+      eventStartedAt: now,
       trackPhase: 0
     });
-    player.combat = createPlayerCombatState(player, Date.now());
+    player.combat = createPlayerCombatState(player, now);
     clearCombatContributors(player);
     rememberSafePlayerState(player);
     if (player.isBot) {
-      resetBotAiState(player, Date.now());
+      resetBotAiState(player, now);
     }
   }
 }
@@ -7549,12 +7642,13 @@ function canSimulatePlayer(room, player) {
   return isMovementPhase(room.match.phase) && !player.isSpectator;
 }
 
-function isEnemyBotTarget(player, candidate) {
+function isEnemyBotTarget(player, candidate, now = Date.now()) {
   return (
     candidate &&
     candidate.id !== player.id &&
     candidate.connected &&
     candidate.alive &&
+    !hasSpawnProtection(candidate, now) &&
     isActiveParticipant(candidate) &&
     (!player.isBot ? candidate.teamId !== player.teamId : !candidate.isBot)
   );
@@ -7595,7 +7689,7 @@ function scoreBotTarget(room, player, candidate, now) {
 
 function selectBotTarget(room, player, now) {
   return getPlayersInSimulationOrder(room)
-    .filter((candidate) => isEnemyBotTarget(player, candidate))
+    .filter((candidate) => isEnemyBotTarget(player, candidate, now))
     .sort((left, right) => {
       const scoreDelta = scoreBotTarget(room, player, right, now) - scoreBotTarget(room, player, left, now);
       return scoreDelta || comparePlayersInSimulationOrder(left, right);
@@ -7993,6 +8087,10 @@ function getPlayerCollisionStateAtTime(player, sampleTime, currentTime) {
 
 function applyBulletHit(room, bullet, player, impactTime) {
   const attacker = room.players.get(bullet.ownerId) ?? null;
+  if (hasSpawnProtection(player, impactTime)) {
+    room.bullets.delete(bullet.id);
+    return;
+  }
   const resolution = resolveCombatHit(room, attacker, player, impactTime);
   player.hp = Math.max(0, player.hp - resolution.damage);
   room.bullets.delete(bullet.id);
@@ -8243,10 +8341,13 @@ function updatePlayer(room, player, deltaSeconds, now) {
   syncPlayerCombatProfile(player, now);
   updateBotInputs(room, player, now);
   applyPendingInputs(player, room.tickNumber);
+  clearSpawnProtectionOnAction(player, now);
 
   if (!player.alive) {
     if (now >= player.respawnAt) {
-      const spawn = createSpawnPoint(room);
+      const spawn = createSpawnPoint(room, {
+        teamId: player.teamId
+      });
       player.x = spawn.x;
       player.y = spawn.y;
       player.angle = 0;
@@ -8254,6 +8355,7 @@ function updatePlayer(room, player, deltaSeconds, now) {
       player.hp = GAME_CONFIG.tank.hitPoints;
       normalizePlayerInventory(player);
       player.alive = true;
+      grantSpawnProtection(player, now);
       player.credits += GAME_CONFIG.economy.respawnCredits;
       player.combat = createPlayerCombatState(player, now);
       clearCombatContributors(player);

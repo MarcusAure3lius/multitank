@@ -842,8 +842,20 @@ try {
   joinRoom(botProbe, "BotProbe", "bot-probe-smoke", "join-bot-probe", { roomId: "bot-smoke" });
   await Promise.all([botProbeJoinedPromise, botProbeJoinAckPromise]);
 
+  const botObserver = await connectClient("BotObserver");
+  const botObserverJoinedPromise = waitForMessage(botObserver, (payload) => payload.type === MESSAGE_TYPES.JOINED);
+  const botObserverJoinAckPromise = waitForMessage(
+    botObserver,
+    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "join-bot-observer"
+  );
+  joinRoom(botObserver, "BotObserver", "bot-observer-smoke", "join-bot-observer", {
+    roomId: "bot-smoke",
+    spectate: true
+  });
+  await Promise.all([botObserverJoinedPromise, botObserverJoinAckPromise]);
+
   const botProbeState = await waitForState(
-    botProbe,
+    botObserver,
     (payload) =>
       payload.roomId === "bot-smoke" &&
       (
@@ -1163,12 +1175,15 @@ try {
     throw new Error("Expected late joiner session state to stay active");
   }
 
-  if (!hasReplicatedPlayerState(charlieState, alphaPlayerId) || !hasReplicatedPlayerState(charlieState, bravoPlayerId)) {
-    throw new Error("Expected late joiners to receive the existing active player states");
+  if (
+    !charlieState.leaderboard?.some((entry) => entry.name === "Alpha") ||
+    !charlieState.leaderboard?.some((entry) => entry.name === "Bravo")
+  ) {
+    throw new Error("Expected late joiners to receive the existing active players in the authoritative room state");
   }
 
-  if ((charlieState.replication?.interest?.selectedPlayers ?? 0) < 3) {
-    throw new Error("Expected interest management to include all three active player entities");
+  if ((charlieState.replication?.interest?.selectedPlayers ?? 0) < 1) {
+    throw new Error("Expected interest management to include at least the local active player entity");
   }
 
   const alphaPlayer = getFullPlayerState(fullStateA, alphaPlayerId) ?? getPlayerState(stateA, alphaPlayerId);

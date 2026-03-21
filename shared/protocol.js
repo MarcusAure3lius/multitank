@@ -179,6 +179,10 @@ export const GAME_CONFIG = Object.freeze({
     creditsReward: 20,
     rewardIntervalMs: 2000
   }),
+  spawn: Object.freeze({
+    protectionMs: 12000,
+    safeEnemyDistance: 1800
+  }),
   tank: Object.freeze({
     radius: 22,
     speed: 220,
