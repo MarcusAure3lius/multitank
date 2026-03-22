@@ -7127,10 +7127,15 @@ function maybeStartRematch(room, now) {
   return true;
 }
 
+function canAddBotsInPhase(phase) {
+  return phase === MATCH_PHASES.WAITING || isWarmupPhase(phase) || phase === MATCH_PHASES.PAUSE || isCombatPhase(phase);
+}
+
 function syncRoomBots(room, now) {
   const humanPlayerCount = getRestorableHumanMatchPlayerCount(room, now);
   const bots = getBotPlayers(room);
   const anchorPlayer = getPreferredBotAnchorPlayer(room);
+  const desiredBotCount = Math.min(GAME_CONFIG.ai.maxBotsPerRoom, humanPlayerCount > 0 ? 1 : 0);
 
   if (humanPlayerCount === 0) {
     for (const bot of bots) {
@@ -7147,12 +7152,6 @@ function syncRoomBots(room, now) {
     syncBotLoadout(bot, anchorPlayer, now);
   }
 
-  if (room.match.phase !== MATCH_PHASES.WAITING && !isWarmupPhase(room.match.phase)) {
-    return;
-  }
-
-  const desiredBotCount = Math.min(GAME_CONFIG.ai.maxBotsPerRoom, humanPlayerCount > 0 ? 1 : 0);
-
   if (bots.length > desiredBotCount) {
     for (const bot of bots.slice(desiredBotCount)) {
       removePlayerFromRoom(room, bot.id, { now });
@@ -7160,9 +7159,19 @@ function syncRoomBots(room, now) {
     return;
   }
 
+  if (!canAddBotsInPhase(room.match.phase)) {
+    return;
+  }
+
   while (getBotPlayers(room).length < desiredBotCount) {
     const bot = createBotState(room, anchorPlayer, now);
     room.players.set(bot.id, bot);
+    if (room.match.phase !== MATCH_PHASES.WAITING && !isWarmupPhase(room.match.phase)) {
+      queueSpawnStateEvent(room, bot, now);
+      queueAnimationStateEvent(room, bot, ANIMATION_ACTIONS.SPAWN, now);
+      queueHealthStateEvent(room, bot, GAME_CONFIG.tank.hitPoints, now);
+      queueInventoryStateEvent(room, bot, now);
+    }
   }
 }
 
