@@ -844,13 +844,18 @@ function scheduleReconnect() {
   }
 
   reconnectAttempts += 1;
-  setStatus(`Reconnecting (${reconnectAttempts})...`);
+  const delayMs = Math.min(
+    GAME_CONFIG.session.maxReconnectRetryMs ?? GAME_CONFIG.session.reconnectRetryMs,
+    GAME_CONFIG.session.reconnectRetryMs * 2 ** Math.min(reconnectAttempts - 1, 3)
+  );
+  const delaySeconds = Number((delayMs / 1000).toFixed(1));
+  setStatus(`Reconnecting (${reconnectAttempts}) in ${delaySeconds}s...`);
   matchStatusElement.textContent = "Trying to recover your match session";
 
   reconnectTimer = window.setTimeout(() => {
     reconnectTimer = null;
     connect({ isReconnect: true });
-  }, GAME_CONFIG.session.reconnectRetryMs);
+  }, delayMs);
 }
 
 function buildSocketUrl() {

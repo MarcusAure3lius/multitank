@@ -7036,16 +7036,21 @@ function setRoomPhase(room, phase, now, winner = null, options = {}) {
 }
 
 function pauseMatchForReconnect(room, now) {
-  if (!isCombatPhase(room.match.phase)) {
+  if (!isWarmupPhase(room.match.phase) && !isCombatPhase(room.match.phase)) {
     return;
   }
 
   room.match.pausedRemainingMs =
     room.match.phase === MATCH_PHASES.LIVE_ROUND && !GAME_CONFIG.match.continuousMode
       ? Math.max(1000, (room.match.phaseEndsAt ?? now) - now)
-      : null;
+      : isWarmupPhase(room.match.phase)
+        ? Math.max(1000, (room.match.phaseEndsAt ?? now) - now)
+        : null;
   setRoomPhase(room, MATCH_PHASES.PAUSE, now, getCurrentWinner(room), {
-    resumePhase: room.match.phase
+    resumePhase: room.match.phase,
+    message: isWarmupPhase(room.match.phase)
+      ? "Warmup paused while a player reconnects"
+      : "Match paused while a player reconnects"
   });
 }
 
@@ -7060,11 +7065,15 @@ function resumePausedMatch(room, now) {
   room.match.phaseEndsAt =
     resumePhase === MATCH_PHASES.LIVE_ROUND && !GAME_CONFIG.match.continuousMode
       ? now + Math.max(1000, room.match.pausedRemainingMs ?? GAME_CONFIG.match.durationMs)
+      : isWarmupPhase(resumePhase)
+        ? now + Math.max(1000, room.match.pausedRemainingMs ?? GAME_CONFIG.match.warmupMs)
       : null;
   room.match.pausedRemainingMs = null;
   room.match.message =
     resumePhase === MATCH_PHASES.OVERTIME
       ? "Overtime"
+      : isWarmupPhase(resumePhase)
+        ? "Warmup"
       : GAME_CONFIG.match.continuousMode
         ? "Continuous battle"
         : "Live round";
@@ -7093,7 +7102,11 @@ function shouldAutoReadyPlayer(room, player) {
     room &&
     player &&
     !player.isSpectator &&
-    (room.match.phase === MATCH_PHASES.WAITING || isWarmupPhase(room.match.phase))
+    (
+      room.match.phase === MATCH_PHASES.WAITING ||
+      isWarmupPhase(room.match.phase) ||
+      (room.match.phase === MATCH_PHASES.PAUSE && isWarmupPhase(room.match.resumePhase))
+    )
   );
 }
 
@@ -7346,8 +7359,6 @@ function removeSocketFromRoom(socket, options = {}) {
 
   if (connectedPlayers.length === 0 && recoverableDisconnectedPlayers.length === 0) {
     deleteRoom(roomId);
-  } else if (isWarmupPhase(room.match.phase)) {
-    setRoomPhase(room, MATCH_PHASES.WAITING, now);
   }
 
   socket.data.roomId = null;
@@ -8645,14 +8656,22 @@ function updateRoomPhase(room, now) {
       restorablePlayerCount < GAME_CONFIG.match.minPlayers ||
       (room.match.phaseEndsAt !== null && now >= room.match.phaseEndsAt)
     ) {
-      finishMatchDueToDisconnect(room, now);
+      const resumePhase = room.match.resumePhase ?? MATCH_PHASES.WAITING;
+      if (isCombatPhase(resumePhase)) {
+        finishMatchDueToDisconnect(room, now);
+      } else {
+        resetToLobby(room, now);
+      }
     }
 
     return;
   }
 
   if (connectedPlayers.length < GAME_CONFIG.match.minPlayers) {
-    if (isCombatPhase(room.match.phase) && restorablePlayerCount >= GAME_CONFIG.match.minPlayers) {
+    if (
+      (isWarmupPhase(room.match.phase) || isCombatPhase(room.match.phase)) &&
+      restorablePlayerCount >= GAME_CONFIG.match.minPlayers
+    ) {
       pauseMatchForReconnect(room, now);
       return;
     }
