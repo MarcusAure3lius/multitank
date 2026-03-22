@@ -9042,8 +9042,28 @@ wss.on("connection", (socket, request) => {
     }
   });
 
-  socket.on("close", () => {
+  socket.on("error", (error) => {
+    console.error("WebSocket error", {
+      roomId: socket.data?.roomId ?? null,
+      playerId: socket.data?.playerId ?? null,
+      profileId: socket.data?.profileId ?? null,
+      remoteAddress: socket.data?.remoteAddress ?? null,
+      message: error?.message ?? String(error)
+    });
+  });
+
+  socket.on("close", (code, reasonBuffer) => {
     connectedSocketCount = Math.max(0, connectedSocketCount - 1);
+    console.log("WebSocket closed", {
+      roomId: socket.data?.roomId ?? null,
+      playerId: socket.data?.playerId ?? null,
+      profileId: socket.data?.profileId ?? null,
+      remoteAddress: socket.data?.remoteAddress ?? null,
+      code,
+      reason: Buffer.isBuffer(reasonBuffer) ? reasonBuffer.toString("utf8") : String(reasonBuffer ?? ""),
+      connectedForMs: Date.now() - connectedAt,
+      silenceMs: Date.now() - Number(socket.data?.lastHeardAt ?? connectedAt)
+    });
     removeSocketFromRoom(socket, { preserveForReconnect: true });
   });
 });
