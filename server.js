@@ -7189,11 +7189,15 @@ function syncRoomBots(room, now) {
 }
 
 function startMatch(room, now) {
+  const preserveExistingState = GAME_CONFIG.match.continuousMode;
   room.roundNumber += 1;
-  room.bullets.clear();
-  room.nextBulletId = 1;
-  resetObjectiveState(room);
   room.events.length = 0;
+
+  if (!preserveExistingState) {
+    room.bullets.clear();
+    room.nextBulletId = 1;
+    resetObjectiveState(room);
+  }
 
   for (const player of room.players.values()) {
     if (player.isSpectator) {
@@ -7201,16 +7205,21 @@ function startMatch(room, now) {
       continue;
     }
 
-    resetPlayerForRound(room, player);
+    if (!preserveExistingState) {
+      resetPlayerForRound(room, player);
+    }
+
     if (player.connected) {
       updateProfileStats(player.profileId, (stats) => {
         stats.matchesPlayed += 1;
       });
     }
 
-    queueSpawnStateEvent(room, player, now);
-    queueAnimationStateEvent(room, player, ANIMATION_ACTIONS.SPAWN, now);
-    queueInventoryStateEvent(room, player, now);
+    if (!preserveExistingState) {
+      queueSpawnStateEvent(room, player, now);
+      queueAnimationStateEvent(room, player, ANIMATION_ACTIONS.SPAWN, now);
+      queueInventoryStateEvent(room, player, now);
+    }
   }
 
   setRoomPhase(room, MATCH_PHASES.LIVE_ROUND, now);
