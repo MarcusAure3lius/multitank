@@ -133,7 +133,7 @@ export const GAME_CONFIG = Object.freeze({
     reliableResendMs: 750,
     maxReliableHistory: 256,
     heartbeatIntervalMs: 5000,
-    heartbeatTimeoutMs: 15000,
+    heartbeatTimeoutMs: 45000,
     maxOutgoingBytesPerSecond: 96000,
     maxStatePayloadBytes: 12000,
     stateChunkChars: 7000,

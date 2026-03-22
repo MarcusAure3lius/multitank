@@ -1045,6 +1045,63 @@ function createSpawnPoint(room = null, options = {}) {
   );
 }
 
+function cloneSpawnPoint(point, teamId = null) {
+  return {
+    x: Number(point?.x) || 0,
+    y: Number(point?.y) || 0,
+    teamId
+  };
+}
+
+function getPlayerHomeSpawn(player, teamId) {
+  if (
+    !player?.homeSpawn ||
+    !Number.isFinite(Number(player.homeSpawn.x)) ||
+    !Number.isFinite(Number(player.homeSpawn.y)) ||
+    player.homeSpawn.teamId !== teamId
+  ) {
+    return null;
+  }
+
+  return cloneSpawnPoint(player.homeSpawn, teamId);
+}
+
+function assignPlayerHomeSpawn(room, player, options = {}) {
+  const teamId = isValidLobbyOptionId(options.teamId ?? player?.teamId, GAME_CONFIG.lobby.teams)
+    ? options.teamId ?? player.teamId
+    : GAME_CONFIG.lobby.teams[0]?.id ?? "alpha";
+  const existingHomeSpawn = !options.force ? getPlayerHomeSpawn(player, teamId) : null;
+
+  if (existingHomeSpawn) {
+    return existingHomeSpawn;
+  }
+
+  const spawn = createSpawnPoint(room, {
+    teamId,
+    spawnKey: String(options.spawnKey ?? player?.id ?? ""),
+    enforceEnemyBuffer: options.enforceEnemyBuffer
+  });
+  const homeSpawn = cloneSpawnPoint(spawn, teamId);
+
+  if (player) {
+    player.homeSpawn = homeSpawn;
+  }
+
+  return cloneSpawnPoint(homeSpawn, teamId);
+}
+
+function getStableSpawnPoint(room, player, options = {}) {
+  if (!player) {
+    return createSpawnPoint(room, options);
+  }
+
+  const homeSpawn = assignPlayerHomeSpawn(room, player, options);
+  return {
+    x: homeSpawn.x,
+    y: homeSpawn.y
+  };
+}
+
 function createProfile(profileId, playerName) {
   return {
     profileId,
@@ -1436,6 +1493,7 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     connected: true,
     isBot,
     isSpectator,
+    homeSpawn: cloneSpawnPoint(spawn, normalizedTeamId),
     teamId: normalizedTeamId,
     classId: isValidLobbyOptionId(classId, GAME_CONFIG.lobby.classes)
       ? classId
@@ -1514,6 +1572,7 @@ function syncBotLoadout(bot, anchorPlayer, now) {
     return;
   }
 
+  const previousTeamId = bot.teamId;
   if (anchorPlayer) {
     bot.teamId = getOpposingTeamId(anchorPlayer.teamId);
     bot.classId = isValidLobbyOptionId(anchorPlayer.classId, GAME_CONFIG.lobby.classes)
@@ -1522,6 +1581,10 @@ function syncBotLoadout(bot, anchorPlayer, now) {
   } else {
     bot.teamId = getOpposingTeamId(bot.teamId);
     bot.classId = GAME_CONFIG.lobby.classes[0].id;
+  }
+
+  if (previousTeamId !== bot.teamId) {
+    bot.homeSpawn = null;
   }
 
   bot.color = "#dc2626";
@@ -6749,7 +6812,7 @@ function resetPlayerForRound(room, player) {
   }
 
   const now = Date.now();
-  const spawn = createSpawnPoint(room, {
+  const spawn = getStableSpawnPoint(room, player, {
     teamId: player.teamId,
     spawnKey: player.id
   });
@@ -6818,7 +6881,7 @@ function clearRoomCombatState(room) {
     }
 
     const now = Date.now();
-    const spawn = createSpawnPoint(room, {
+    const spawn = getStableSpawnPoint(room, player, {
       teamId: player.teamId,
       spawnKey: player.id
     });
@@ -7432,6 +7495,9 @@ function joinRoom(socket, payload) {
     player.reconnectDeadlineAt = null;
     player.slotReserved = false;
     if (requestedTeamId) {
+      if (player.teamId !== requestedTeamId) {
+        player.homeSpawn = null;
+      }
       player.teamId = requestedTeamId;
     }
     if (requestedClassId) {
@@ -7568,6 +7634,9 @@ function handleLobby(socket, payload) {
         return;
       }
 
+      if (player.teamId !== payload.teamId) {
+        player.homeSpawn = null;
+      }
       player.teamId = payload.teamId;
       return;
     case "class":
@@ -8438,7 +8507,7 @@ function updatePlayer(room, player, deltaSeconds, now) {
 
   if (!player.alive) {
     if (!GAME_CONFIG.match.survivalMode && now >= player.respawnAt) {
-      const spawn = createSpawnPoint(room, {
+      const spawn = getStableSpawnPoint(room, player, {
         teamId: player.teamId,
         spawnKey: player.id,
         enforceEnemyBuffer: false
