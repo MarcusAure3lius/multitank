@@ -311,8 +311,8 @@ export const GAME_CONFIG = Object.freeze({
     maxHumanPlayersPerRoom: 4,
     maxSpectatorsPerRoom: 8,
     reconnectGraceMs: 90000,
-    reconnectRetryMs: 2000,
-    maxReconnectRetryMs: 10000,
+    reconnectRetryMs: 5000,
+    maxReconnectRetryMs: 20000,
     afkTimeoutMs: 60000
   }),
   respawnDelayMs: 2000,

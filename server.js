@@ -2092,6 +2092,10 @@ function canViewerSeePlayer(viewer, candidate) {
     return true;
   }
 
+  if (candidate.isBot) {
+    return true;
+  }
+
   if (candidate.teamId === viewer.teamId) {
     return true;
   }
@@ -2150,6 +2154,12 @@ function getVisiblePlayersForViewer(room, viewer) {
   for (const teammate of getPlayersInSimulationOrder(room)) {
     if (teammate.teamId === viewer.teamId) {
       candidates.set(teammate.id, teammate);
+    }
+  }
+
+  for (const candidate of getPlayersInSimulationOrder(room)) {
+    if (candidate.isBot) {
+      candidates.set(candidate.id, candidate);
     }
   }
 
@@ -2448,6 +2458,10 @@ function computePlayerInterestPriority(room, viewer, candidate, knownEntities) {
 
   if (candidate.id === viewer.id) {
     priority += 1_000_000;
+  }
+
+  if (candidate.isBot) {
+    priority += 450_000;
   }
 
   if (candidate.teamId === viewer.teamId) {
