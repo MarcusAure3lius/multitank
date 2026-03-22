@@ -877,73 +877,6 @@ try {
     throw new Error("Expected repeated malformed packets to be rejected");
   }
 
-  const botProbe = await connectClient("BotProbe");
-  const botProbeJoinedPromise = waitForMessage(botProbe, (payload) => payload.type === MESSAGE_TYPES.JOINED);
-  const botProbeJoinAckPromise = waitForMessage(
-    botProbe,
-    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "join-bot-probe"
-  );
-  joinRoom(botProbe, "BotProbe", "bot-probe-smoke", "join-bot-probe", { roomId: "bot-smoke" });
-  await Promise.all([botProbeJoinedPromise, botProbeJoinAckPromise]);
-
-  const botObserver = await connectClient("BotObserver");
-  const botObserverJoinedPromise = waitForMessage(botObserver, (payload) => payload.type === MESSAGE_TYPES.JOINED);
-  const botObserverJoinAckPromise = waitForMessage(
-    botObserver,
-    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "join-bot-observer"
-  );
-  joinRoom(botObserver, "BotObserver", "bot-observer-smoke", "join-bot-observer", {
-    roomId: "bot-smoke",
-    spectate: true
-  });
-  await Promise.all([botObserverJoinedPromise, botObserverJoinAckPromise]);
-
-  const botProbeState = await waitForState(
-    botObserver,
-    (payload) =>
-      payload.roomId === "bot-smoke" &&
-      (
-        payload.match?.phase === MATCH_PHASES.WARMUP ||
-        payload.match?.phase === MATCH_PHASES.IN_PROGRESS
-      ) &&
-      (
-        payload.players.some(
-          (player) =>
-            player.isBot &&
-            player.ai &&
-            typeof player.ai.intent === "string" &&
-            typeof player.ai.pathLength === "number" &&
-            typeof player.ai.hasLineOfSight === "boolean"
-        ) ||
-        payload.replication?.spawns?.some(
-          (record) =>
-            record.kind === REPLICATION_KINDS.PLAYER &&
-            record.state?.isBot &&
-            record.state?.ai &&
-            typeof record.state.ai.intent === "string"
-        ) ||
-        payload.replication?.updates?.some(
-          (record) =>
-            record.kind === REPLICATION_KINDS.PLAYER &&
-            record.state?.ai &&
-            typeof record.state.ai.intent === "string"
-        )
-      ),
-    "replicated bot ai state"
-  );
-
-  if (
-    !botProbeState.players.some((player) => player.isBot && player.ai?.intent) &&
-    !botProbeState.replication?.spawns?.some(
-      (record) => record.kind === REPLICATION_KINDS.PLAYER && record.state?.isBot && record.state?.ai?.intent
-    ) &&
-    !botProbeState.replication?.updates?.some(
-      (record) => record.kind === REPLICATION_KINDS.PLAYER && record.state?.ai?.intent
-    )
-  ) {
-    throw new Error("Expected authoritative bot snapshots to include replicated AI state");
-  }
-
   const alphaProfileId = "alpha-smoke";
   const bravoProfileId = "bravo-smoke";
   const alpha = await connectClient("Alpha");
@@ -1370,7 +1303,6 @@ try {
   alphaReconnect.close();
   bravo.close();
   charlie.close();
-  botProbe.close();
   await stopServer();
   console.log("Smoke test passed");
 } catch (error) {
