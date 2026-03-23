@@ -235,18 +235,18 @@ export const GAME_CONFIG = Object.freeze({
   }),
   match: Object.freeze({
     minPlayers: 2,
-    continuousMode: false,
+    continuousMode: true,
     survivalMode: false,
     warmupMs: 3000,
     countdownMs: 3000,
     durationMs: 90000,
     roundEndMs: 2000,
-    autoRestartRound: true,
+    autoRestartRound: false,
     resultsMs: 4000,
     mapTransitionMs: 2000,
     shutdownGraceMs: 1000,
     resetDelayMs: 6000,
-    scoreToWin: 1
+    scoreToWin: 5
   }),
   lobby: Object.freeze({
     maps: Object.freeze([

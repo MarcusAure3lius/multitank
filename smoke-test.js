@@ -903,22 +903,22 @@ try {
   });
   const [soloJoined] = await Promise.all([soloJoinedPromise, soloJoinAckPromise]);
 
-  const soloBotState = await waitForState(
+  const soloWarmupState = await waitForState(
     solo,
     (payload) => {
       const localPlayer = getPlayerState(payload, soloJoined.playerId);
       const enemyBot = (payload.players ?? []).find((player) => player.isBot);
       return (
-        (payload.match?.phase === MATCH_PHASES.WARMUP || payload.match?.phase === MATCH_PHASES.IN_PROGRESS) &&
+        payload.match?.phase === MATCH_PHASES.WARMUP &&
         Boolean(localPlayer) &&
         Boolean(enemyBot)
       );
     },
-    "solo bot warmup or live state"
+    "solo bot warmup state"
   );
 
-  const soloPlayer = getPlayerState(soloBotState, soloJoined.playerId);
-  const enemyBot = (soloBotState.players ?? []).find((player) => player.isBot);
+  const soloPlayer = getPlayerState(soloWarmupState, soloJoined.playerId);
+  const enemyBot = (soloWarmupState.players ?? []).find((player) => player.isBot);
 
   if (!soloPlayer || !enemyBot) {
     throw new Error("Expected a solo room to spawn a replicated enemy bot");
@@ -939,6 +939,14 @@ try {
       (payload.players ?? []).some((player) => player.isBot && player.hp === GAME_CONFIG.tank.hitPoints),
     "solo bot live state"
   );
+
+  const soloLivePlayer = getPlayerState(soloLiveState, soloJoined.playerId);
+  if (
+    !soloLivePlayer ||
+    Math.hypot(soloLivePlayer.x - soloPlayer.x, soloLivePlayer.y - soloPlayer.y) > 1
+  ) {
+    throw new Error("Expected solo bot rooms to enter live play without resetting the human player's spawn position");
+  }
 
   if ((soloLiveState.leaderboard?.length ?? 0) < 2) {
     throw new Error("Expected a solo room with a bot to publish both combatants in the leaderboard");
