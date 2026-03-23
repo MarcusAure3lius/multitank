@@ -194,7 +194,7 @@ export const GAME_CONFIG = Object.freeze({
     maxInputJitterRadians: Math.PI
   }),
   bullet: Object.freeze({
-    radius: 5,
+    radius: 10,
     speed: 700,
     damage: 25,
     lifeMs: 1400
