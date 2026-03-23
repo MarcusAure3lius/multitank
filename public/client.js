@@ -143,6 +143,10 @@ let latestLatencyMs = 0;
 let lastServerMessageAt = 0;
 let lastSocketCloseInfo = null;
 let pointerPrimaryDown = false;
+let lastPointerViewportPosition = {
+  normalizedX: 0.5,
+  normalizedY: 0.5
+};
 let lastPointerWorldPosition = {
   x: GAME_CONFIG.world.width / 2,
   y: GAME_CONFIG.world.height / 2
@@ -495,9 +499,10 @@ function updateLocalRenderState(deltaSeconds) {
 
   if (canSimulateLocalPlayer() && localPlayer.alive) {
     const inputState = getCapturedInputState();
+    const pointerWorldPosition = refreshPointerWorldPosition();
     const targetTurretAngle = Math.atan2(
-      lastPointerWorldPosition.y - renderState.y,
-      lastPointerWorldPosition.x - renderState.x
+      pointerWorldPosition.y - renderState.y,
+      pointerWorldPosition.x - renderState.x
     );
     const simulated = simulateTankMovement(
       {
@@ -525,16 +530,25 @@ function updateLocalRenderState(deltaSeconds) {
       simulated.y + (Math.abs(driftY) <= correctionDeadzone ? 0 : driftY * correctionStrength);
     renderState.angle =
       simulated.angle + (Math.abs(driftAngle) <= 0.01 ? 0 : driftAngle * correctionStrength);
-    renderState.turretAngle =
+    const correctedTurretAngle =
       simulated.turretAngle +
       (Math.abs(driftTurretAngle) <= 0.01 ? 0 : driftTurretAngle * correctionStrength);
+    renderState.turretAngle = lerpAngle(
+      renderState.turretAngle,
+      correctedTurretAngle,
+      getTurretVisualSmoothing(deltaSeconds)
+    );
     return renderState;
   }
 
   renderState.x = lerp(renderState.x, visualState.x, 0.24);
   renderState.y = lerp(renderState.y, visualState.y, 0.24);
   renderState.angle = lerpAngle(renderState.angle, visualState.angle, 0.24);
-  renderState.turretAngle = lerpAngle(renderState.turretAngle, visualState.turretAngle, 0.24);
+  renderState.turretAngle = lerpAngle(
+    renderState.turretAngle,
+    visualState.turretAngle,
+    getTurretVisualSmoothing(deltaSeconds)
+  );
   return renderState;
 }
 
@@ -1078,6 +1092,10 @@ function lerpWrappedUnit(current, target, amount) {
   return (current + delta * amount + 1) % 1;
 }
 
+function getTurretVisualSmoothing(deltaSeconds) {
+  return clamp(1 - Math.exp(-20 * deltaSeconds), 0.2, 0.42);
+}
+
 function rememberProcessedEvent(eventId) {
   if (!eventId || processedEventIds.has(eventId)) {
     return false;
@@ -1253,25 +1271,46 @@ function consumeServerEvents(events) {
   }
 }
 
-function getPointerWorldPosition(event) {
+function getPointerViewportPosition(event) {
   const bounds = canvas.getBoundingClientRect();
-  const normalizedX = (event.clientX - bounds.left) / bounds.width;
-  const normalizedY = (event.clientY - bounds.top) / bounds.height;
-  const visibleWidth = canvas.width / cameraZoom;
-  const visibleHeight = canvas.height / cameraZoom;
+  return {
+    normalizedX: clamp((event.clientX - bounds.left) / bounds.width, 0, 1),
+    normalizedY: clamp((event.clientY - bounds.top) / bounds.height, 0, 1)
+  };
+}
+
+function getPointerWorldPositionFromViewport(pointerViewportPosition = lastPointerViewportPosition) {
+  const visibleViewport = getVisibleViewportSize();
+  const normalizedX = clamp(pointerViewportPosition?.normalizedX ?? 0.5, 0, 1);
+  const normalizedY = clamp(pointerViewportPosition?.normalizedY ?? 0.5, 0, 1);
 
   return {
     x: clamp(
-      camera.x + normalizedX * visibleWidth,
+      camera.x + normalizedX * visibleViewport.width,
       0,
       GAME_CONFIG.world.width
     ),
     y: clamp(
-      camera.y + normalizedY * visibleHeight,
+      camera.y + normalizedY * visibleViewport.height,
       0,
       GAME_CONFIG.world.height
     )
   };
+}
+
+function getPointerWorldPosition(event) {
+  return getPointerWorldPositionFromViewport(getPointerViewportPosition(event));
+}
+
+function updateTrackedPointerPosition(event) {
+  lastPointerViewportPosition = getPointerViewportPosition(event);
+  lastPointerWorldPosition = getPointerWorldPositionFromViewport(lastPointerViewportPosition);
+  return lastPointerWorldPosition;
+}
+
+function refreshPointerWorldPosition() {
+  lastPointerWorldPosition = getPointerWorldPositionFromViewport(lastPointerViewportPosition);
+  return lastPointerWorldPosition;
 }
 
 function getLocalPlayer() {
@@ -1289,6 +1328,7 @@ function resizeCanvas() {
   canvas.width = nextWidth;
   canvas.height = nextHeight;
   cameraNeedsSnap = true;
+  refreshPointerWorldPosition();
 }
 
 function getVisibleViewportSize() {
@@ -1851,7 +1891,7 @@ function createInputFrame() {
   const localPlayer = getLocalPlayer();
   const visualState = ensureLocalVisualState(localPlayer);
   const renderState = ensureLocalRenderState();
-  const target = lastPointerWorldPosition;
+  const target = refreshPointerWorldPosition();
   const seq = nextInputSeq++;
   const capturedInputState = getCapturedInputState();
   const aimOrigin = renderState ?? visualState;
@@ -3247,12 +3287,12 @@ window.addEventListener("keyup", (event) => {
 window.addEventListener("resize", resizeCanvas);
 
 canvas.addEventListener("pointermove", (event) => {
-  lastPointerWorldPosition = getPointerWorldPosition(event);
+  updateTrackedPointerPosition(event);
 });
 
 canvas.addEventListener("pointerdown", (event) => {
   unlockAudio();
-  lastPointerWorldPosition = getPointerWorldPosition(event);
+  updateTrackedPointerPosition(event);
   if (event.button === 0) {
     pointerPrimaryDown = true;
   }
@@ -3290,6 +3330,7 @@ canvas.addEventListener("wheel", (event) => {
   camera.x = clamped.x;
   camera.y = clamped.y;
   cameraNeedsSnap = false;
+  refreshPointerWorldPosition();
 }, { passive: false });
 
 setInterval(() => {
