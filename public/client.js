@@ -1096,6 +1096,46 @@ function getTurretVisualSmoothing(deltaSeconds) {
   return clamp(1 - Math.exp(-20 * deltaSeconds), 0.2, 0.42);
 }
 
+function getRecoilKickSmoothing(deltaSeconds) {
+  return clamp(1 - Math.exp(-28 * deltaSeconds), 0.24, 0.58);
+}
+
+function getRecoilRecoverySmoothing(deltaSeconds) {
+  return clamp(1 - Math.exp(-8 * deltaSeconds), 0.08, 0.22);
+}
+
+function triggerShotRecoil(player, now, options = {}) {
+  if (!player) {
+    return;
+  }
+
+  player.muzzleFlashUntil = now + 90;
+  player.recoilTarget = Math.max(player.recoilTarget ?? 0, options.strength ?? 0.74);
+
+  if (options.predicted) {
+    player.lastPredictedRecoilAt = now;
+  }
+}
+
+function updateVisualRecoil(player, deltaSeconds) {
+  if (!player) {
+    return;
+  }
+
+  const currentRecoil = player.predictedRecoil ?? 0;
+  const recoilTarget = player.recoilTarget ?? 0;
+  player.predictedRecoil = lerp(currentRecoil, recoilTarget, getRecoilKickSmoothing(deltaSeconds));
+  player.recoilTarget = lerp(recoilTarget, 0, getRecoilRecoverySmoothing(deltaSeconds));
+
+  if (Math.abs(player.predictedRecoil) <= 0.001) {
+    player.predictedRecoil = 0;
+  }
+
+  if (Math.abs(player.recoilTarget) <= 0.001) {
+    player.recoilTarget = 0;
+  }
+}
+
 function rememberProcessedEvent(eventId) {
   if (!eventId || processedEventIds.has(eventId)) {
     return false;
@@ -1147,8 +1187,12 @@ function triggerAnimationEvent(event) {
 
   switch (event.action) {
     case ANIMATION_ACTIONS.FIRE:
-      player.muzzleFlashUntil = now + 90;
-      player.predictedRecoil = Math.max(player.predictedRecoil ?? 0, 1);
+      if (player.id === localPlayerId && now - (player.lastPredictedRecoilAt ?? -Infinity) <= 220) {
+        player.muzzleFlashUntil = Math.max(player.muzzleFlashUntil ?? 0, now + 90);
+        break;
+      }
+
+      triggerShotRecoil(player, now);
       break;
     case ANIMATION_ACTIONS.HIT:
       player.hitFlashUntil = now + 180;
@@ -1859,8 +1903,7 @@ function spawnPredictedProjectile(localPlayer, inputFrame) {
     expiresAt: now + Math.min(450, GAME_CONFIG.bullet.lifeMs)
   });
 
-  localPlayer.muzzleFlashUntil = now + 90;
-  localPlayer.predictedRecoil = 1;
+  triggerShotRecoil(localPlayer, now, { predicted: true });
 }
 
 function reconcilePredictedProjectile(authoritativeBullet) {
@@ -2814,7 +2857,6 @@ function updateRenderState(deltaSeconds, frameAt) {
         0,
         0.22
       );
-      player.predictedRecoil = lerp(player.predictedRecoil ?? 0, 0, 0.28);
       player.displayX = player.renderX + (player.correctionOffsetX ?? 0);
       player.displayY = player.renderY + (player.correctionOffsetY ?? 0);
       player.displayAngle = player.renderAngle + (player.correctionOffsetAngle ?? 0);
@@ -2862,6 +2904,7 @@ function updateRenderState(deltaSeconds, frameAt) {
     }
 
     const distanceMoved = Math.hypot(getPlayerVisualX(player) - previousDisplayX, getPlayerVisualY(player) - previousDisplayY);
+    updateVisualRecoil(player, deltaSeconds);
     const blendedMotion = Math.min(1, (distanceMoved / Math.max(0.001, deltaSeconds)) / GAME_CONFIG.tank.speed);
     updateVisualAnimationState(player, blendedMotion);
   }
