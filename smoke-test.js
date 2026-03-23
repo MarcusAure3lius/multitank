@@ -890,6 +890,62 @@ try {
   }
   invalidPacketClient.close();
 
+  const solo = await connectClient("Solo");
+  const soloJoinedPromise = waitForMessage(solo, (payload) => payload.type === MESSAGE_TYPES.JOINED);
+  const soloJoinAckPromise = waitForMessage(
+    solo,
+    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "join-solo"
+  );
+  joinRoom(solo, "Solo", "solo-smoke", "join-solo", {
+    roomId: "solo-bot",
+    teamId: "alpha",
+    classId: "scout"
+  });
+  const [soloJoined] = await Promise.all([soloJoinedPromise, soloJoinAckPromise]);
+
+  const soloBotState = await waitForState(
+    solo,
+    (payload) => {
+      const localPlayer = getPlayerState(payload, soloJoined.playerId);
+      const enemyBot = (payload.players ?? []).find((player) => player.isBot);
+      return (
+        (payload.match?.phase === MATCH_PHASES.WARMUP || payload.match?.phase === MATCH_PHASES.IN_PROGRESS) &&
+        Boolean(localPlayer) &&
+        Boolean(enemyBot)
+      );
+    },
+    "solo bot warmup or live state"
+  );
+
+  const soloPlayer = getPlayerState(soloBotState, soloJoined.playerId);
+  const enemyBot = (soloBotState.players ?? []).find((player) => player.isBot);
+
+  if (!soloPlayer || !enemyBot) {
+    throw new Error("Expected a solo room to spawn a replicated enemy bot");
+  }
+
+  if (enemyBot.teamId === soloPlayer.teamId || enemyBot.classId !== soloPlayer.classId) {
+    throw new Error("Expected the solo enemy bot to mirror the player's class on the opposing team");
+  }
+
+  if (enemyBot.color !== "#dc2626" || enemyBot.hp !== GAME_CONFIG.tank.hitPoints || enemyBot.alive !== true) {
+    throw new Error("Expected the solo enemy bot to spawn as a red full-health combatant");
+  }
+
+  const soloLiveState = await waitForState(
+    solo,
+    (payload) =>
+      payload.match?.phase === MATCH_PHASES.IN_PROGRESS &&
+      (payload.players ?? []).some((player) => player.isBot && player.hp === GAME_CONFIG.tank.hitPoints),
+    "solo bot live state"
+  );
+
+  if ((soloLiveState.leaderboard?.length ?? 0) < 2) {
+    throw new Error("Expected a solo room with a bot to publish both combatants in the leaderboard");
+  }
+
+  solo.close();
+
   const alphaProfileId = "alpha-smoke";
   const bravoProfileId = "bravo-smoke";
   const alpha = await connectClient("Alpha");

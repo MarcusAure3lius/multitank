@@ -7181,7 +7181,7 @@ function syncRoomBots(room, now) {
   const humanPlayerCount = getRestorableHumanMatchPlayerCount(room, now);
   const bots = getBotPlayers(room);
   const anchorPlayer = getPreferredBotAnchorPlayer(room);
-  const desiredBotCount = Math.min(GAME_CONFIG.ai.maxBotsPerRoom, humanPlayerCount > 0 ? 1 : 0);
+  const desiredBotCount = Math.min(GAME_CONFIG.ai.maxBotsPerRoom, humanPlayerCount === 1 ? 1 : 0);
 
   if (humanPlayerCount === 0) {
     for (const bot of bots) {
@@ -8832,6 +8832,11 @@ function updateRoomPhase(room, now) {
   }
 
   if (room.match.phase === MATCH_PHASES.ROUND_END && now >= room.match.phaseEndsAt) {
+    if (GAME_CONFIG.match.autoRestartRound) {
+      startMatch(room, now);
+      return;
+    }
+
     setRoomPhase(room, MATCH_PHASES.RESULTS, now, getCurrentWinner(room));
     return;
   }
