@@ -6909,9 +6909,13 @@ function resetPlayerForRound(room, player) {
   }
 }
 
-function clearRoomCombatState(room) {
+function clearTransientRoomCombatState(room) {
   room.bullets.clear();
   room.pendingShots.length = 0;
+}
+
+function clearRoomCombatState(room) {
+  clearTransientRoomCombatState(room);
   room.nextBulletId = 1;
   resetObjectiveState(room);
   for (const player of room.players.values()) {
@@ -7272,7 +7276,7 @@ function startMatch(room, now) {
 
 function finishMatch(room, now, winner, options = {}) {
   const { message = null } = options;
-  clearRoomCombatState(room);
+  clearTransientRoomCombatState(room);
   setRoomPhase(room, MATCH_PHASES.ROUND_END, now, winner, {
     message
   });
@@ -8558,7 +8562,7 @@ function simulateBulletToTime(room, bullet, targetTime, currentTime = targetTime
 
 function resolvePendingShots(room, now) {
   if (!canShootPhase(room.match.phase)) {
-    room.pendingShots.length = 0;
+    clearTransientRoomCombatState(room);
     return;
   }
 
@@ -8571,6 +8575,11 @@ function resolvePendingShots(room, now) {
   );
 
   while (room.pendingShots.length > 0) {
+    if (!canShootPhase(room.match.phase)) {
+      clearTransientRoomCombatState(room);
+      return;
+    }
+
     const shot = room.pendingShots.shift();
     const player = room.players.get(shot.playerId);
 
@@ -8600,6 +8609,11 @@ function resolvePendingShots(room, now) {
     room.bullets.set(bulletId, bullet);
     if (!simulateBulletToTime(room, bullet, now, now)) {
       continue;
+    }
+
+    if (!canShootPhase(room.match.phase)) {
+      clearTransientRoomCombatState(room);
+      return;
     }
   }
 }
@@ -8710,12 +8724,16 @@ function updatePlayer(room, player, deltaSeconds, now) {
 
 function updateBullets(room, deltaSeconds, now) {
   if (!canShootPhase(room.match.phase)) {
-    room.bullets.clear();
-    room.pendingShots.length = 0;
+    clearTransientRoomCombatState(room);
     return;
   }
 
   for (const bullet of Array.from(room.bullets.values())) {
+    if (!canShootPhase(room.match.phase)) {
+      clearTransientRoomCombatState(room);
+      return;
+    }
+
     if (!Number.isFinite(bullet.lastSimulatedAt)) {
       bullet.lastSimulatedAt = now;
     }
