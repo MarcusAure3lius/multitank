@@ -499,14 +499,12 @@ function updateLocalRenderState(deltaSeconds) {
       lastPointerWorldPosition.y - renderState.y,
       lastPointerWorldPosition.x - renderState.x
     );
-    // Extrapolate from the latest reconciled visual state so the local render path
-    // doesn't drift away from the authoritative replay path when movement begins.
     const simulated = simulateTankMovement(
       {
-        x: visualState.x,
-        y: visualState.y,
-        angle: visualState.angle,
-        turretAngle: visualState.turretAngle
+        x: renderState.x,
+        y: renderState.y,
+        angle: renderState.angle,
+        turretAngle: renderState.turretAngle
       },
       {
         ...inputState,
