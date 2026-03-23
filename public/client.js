@@ -60,6 +60,11 @@ const STORAGE_KEYS = {
   authToken: "multitank.authToken"
 };
 
+const SESSION_STORAGE_KEYS = {
+  clientSessionId: "multitank.clientSessionId",
+  compatibilityReloadAt: "multitank.compatibilityReloadAt"
+};
+
 const NETWORK_RENDER = Object.freeze({
   interpolationBackTimeMs: 48,
   minInterpolationBackTimeMs: 16,
@@ -114,6 +119,7 @@ let localRenderState = null;
 let socket = null;
 let localPlayerId = null;
 let profileId = getOrCreateProfileId();
+let clientSessionId = getOrCreateClientSessionId();
 let authToken = localStorage.getItem(STORAGE_KEYS.authToken) ?? null;
 let currentRoomId = null;
 let latestMatch = null;
@@ -180,6 +186,51 @@ function getOrCreateProfileId() {
   const created = crypto.randomUUID().replace(/-/g, "");
   localStorage.setItem(STORAGE_KEYS.profileId, created);
   return created;
+}
+
+function getOrCreateClientSessionId() {
+  try {
+    const stored = sessionStorage.getItem(SESSION_STORAGE_KEYS.clientSessionId);
+    if (stored) {
+      return stored;
+    }
+
+    const created = crypto.randomUUID().replace(/-/g, "");
+    sessionStorage.setItem(SESSION_STORAGE_KEYS.clientSessionId, created);
+    return created;
+  } catch (error) {
+    return crypto.randomUUID().replace(/-/g, "");
+  }
+}
+
+function rotateClientSessionId() {
+  clientSessionId = crypto.randomUUID().replace(/-/g, "");
+  try {
+    sessionStorage.setItem(SESSION_STORAGE_KEYS.clientSessionId, clientSessionId);
+  } catch (error) {
+    // Session storage can be unavailable in hardened browser modes.
+  }
+  return clientSessionId;
+}
+
+function requestCompatibilityRefresh(reason) {
+  try {
+    const now = Date.now();
+    const key = `${SESSION_STORAGE_KEYS.compatibilityReloadAt}.${reason}`;
+    const lastReloadAt = Number(sessionStorage.getItem(key) ?? 0);
+    if (now - lastReloadAt < 5000) {
+      return false;
+    }
+    sessionStorage.setItem(key, String(now));
+  } catch (error) {
+    // Fall through and still try to refresh.
+  }
+
+  setStatus("Refreshing to recover the connection...");
+  window.setTimeout(() => {
+    window.location.reload();
+  }, 150);
+  return true;
 }
 
 function setStatus(text) {
@@ -2411,6 +2462,7 @@ function connect(options = {}) {
       roomId: roomInput.value,
       profileId,
       authToken,
+      sessionId: clientSessionId,
       spectate: spectateInput.checked,
       mapId: mapSelect.value,
       teamId: teamSelect.value,
@@ -2427,10 +2479,8 @@ function connect(options = {}) {
       setStatus(parsed.error.message);
       if (parsed.error.code === "unsupported_version" || parsed.error.code === "invalid_version") {
         joinInProgress = false;
-        nextSocket.skipReconnect = true;
-        currentRoomId = null;
         updateSessionChrome();
-        nextSocket.close(4006, "Protocol mismatch");
+        requestCompatibilityRefresh("protocol");
       }
       return;
     }
@@ -2440,22 +2490,10 @@ function connect(options = {}) {
     if (payload.type === MESSAGE_TYPES.JOINED) {
       clearPendingReliableMessages(MESSAGE_TYPES.JOIN);
       if (payload.gameVersion && payload.gameVersion !== GAME_BUILD_VERSION) {
-        setStatus(`Game version mismatch. Refresh required (${payload.gameVersion} available).`);
-        joinInProgress = false;
-        nextSocket.skipReconnect = true;
-        currentRoomId = null;
-        updateSessionChrome();
-        nextSocket.close(4009, "Game version mismatch");
-        return;
+        setStatus(`Connected to a newer server build (${payload.gameVersion}). Refresh when convenient.`);
       }
       if (payload.assetVersion && payload.assetVersion !== ASSET_BUNDLE_VERSION) {
-        setStatus(`Asset mismatch. Refresh required (${payload.assetVersion} available).`);
-        joinInProgress = false;
-        nextSocket.skipReconnect = true;
-        currentRoomId = null;
-        updateSessionChrome();
-        nextSocket.close(4010, "Asset version mismatch");
-        return;
+        setStatus(`Connected with newer assets available (${payload.assetVersion}). Refresh when convenient.`);
       }
       localPlayerId = payload.playerId;
       profileId = payload.profileId;
@@ -2515,26 +2553,21 @@ function connect(options = {}) {
       }
 
       if (payload.code === "game_version_mismatch") {
-        joinInProgress = false;
-        nextSocket.skipReconnect = true;
-        currentRoomId = null;
-        updateSessionChrome();
+        setStatus(`${payload.message} Continuing with the current session.`);
       }
 
       if (payload.code === "invalid_auth_token") {
         authToken = null;
         localStorage.removeItem(STORAGE_KEYS.authToken);
-        joinInProgress = false;
-        nextSocket.skipReconnect = true;
-        currentRoomId = null;
-        updateSessionChrome();
+        setStatus("Sign-in expired. Continuing as a guest.");
       }
 
-      if (payload.code === "asset_version_mismatch" || payload.code === "unsupported_version") {
-        joinInProgress = false;
-        nextSocket.skipReconnect = true;
-        currentRoomId = null;
-        updateSessionChrome();
+      if (payload.code === "asset_version_mismatch") {
+        setStatus(`${payload.message} Continuing with the current session.`);
+      }
+
+      if (payload.code === "unsupported_version") {
+        requestCompatibilityRefresh("protocol");
       }
     }
   });
@@ -2553,30 +2586,26 @@ function connect(options = {}) {
     }
 
     if (event.code === 4001) {
-      setStatus("This profile connected from another session");
-      currentRoomId = null;
-      updateSessionChrome();
+      rotateClientSessionId();
+      setStatus("This session was claimed elsewhere. Rejoining with a fresh local session...");
+      pendingInputs.length = 0;
+      currentRoomId ||= roomInput.value || "default";
+      scheduleReconnect();
       return;
     }
 
     if (event.code === 4009) {
-      setStatus("Game updated on server. Refresh to continue.");
-      currentRoomId = null;
-      updateSessionChrome();
+      requestCompatibilityRefresh("game-version");
       return;
     }
 
     if (event.code === 4010) {
-      setStatus("Assets updated on server. Refresh to continue.");
-      currentRoomId = null;
-      updateSessionChrome();
+      requestCompatibilityRefresh("asset-version");
       return;
     }
 
     if (event.code === 4006) {
-      setStatus("Protocol mismatch. Refresh to continue.");
-      currentRoomId = null;
-      updateSessionChrome();
+      requestCompatibilityRefresh("protocol");
       return;
     }
 

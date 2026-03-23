@@ -206,6 +206,7 @@ function joinRoom(socket, name, profileId, messageId, options = {}) {
       roomId: options.roomId ?? "smoke",
       profileId,
       authToken: options.authToken ?? null,
+      sessionId: options.sessionId ?? `${profileId}-session`,
       spectate: Boolean(options.spectate),
       mapId: options.mapId ?? null,
       teamId: options.teamId ?? null,
@@ -824,33 +825,45 @@ try {
     staleClient,
     (payload) => payload.type === MESSAGE_TYPES.ERROR && payload.code === "game_version_mismatch"
   );
-  const staleClosePromise = once(staleClient, "close");
+  const staleJoinedPromise = waitForMessage(staleClient, (payload) => payload.type === MESSAGE_TYPES.JOINED);
   joinRoom(staleClient, "OldBuild", "old-build-smoke", "join-old-build", {
+    roomId: "compat-build",
     gameVersion: "0.0.0"
   });
-  const [staleError, staleClose] = await Promise.all([staleErrorPromise, staleClosePromise]);
+  const [staleError, staleJoined] = await Promise.all([staleErrorPromise, staleJoinedPromise]);
 
-  if (!String(staleError.message ?? "").includes("Refresh required") || staleClose[0] !== 4009) {
-    throw new Error("Expected stale game builds to be rejected before joining");
+  if (
+    !String(staleError.message ?? "").includes("compatibility mode") ||
+    staleJoined.roomId !== "compat-build" ||
+    staleClient.readyState !== WebSocket.OPEN
+  ) {
+    throw new Error("Expected stale game builds to stay connected in compatibility mode");
   }
+  staleClient.close();
 
   const staleAssetsClient = await connectClient("OldAssets");
   const staleAssetsErrorPromise = waitForMessage(
     staleAssetsClient,
     (payload) => payload.type === MESSAGE_TYPES.ERROR && payload.code === "asset_version_mismatch"
   );
-  const staleAssetsClosePromise = once(staleAssetsClient, "close");
+  const staleAssetsJoinedPromise = waitForMessage(staleAssetsClient, (payload) => payload.type === MESSAGE_TYPES.JOINED);
   joinRoom(staleAssetsClient, "OldAssets", "old-assets-smoke", "join-old-assets", {
+    roomId: "compat-assets",
     assetVersion: "0.0.0-assets"
   });
-  const [staleAssetsError, staleAssetsClose] = await Promise.all([
+  const [staleAssetsError, staleAssetsJoined] = await Promise.all([
     staleAssetsErrorPromise,
-    staleAssetsClosePromise
+    staleAssetsJoinedPromise
   ]);
 
-  if (!String(staleAssetsError.message ?? "").includes("assets") || staleAssetsClose[0] !== 4010) {
-    throw new Error("Expected stale asset bundles to be rejected before joining");
+  if (
+    !String(staleAssetsError.message ?? "").includes("compatibility mode") ||
+    staleAssetsJoined.roomId !== "compat-assets" ||
+    staleAssetsClient.readyState !== WebSocket.OPEN
+  ) {
+    throw new Error("Expected stale asset bundles to stay connected in compatibility mode");
   }
+  staleAssetsClient.close();
 
   const spamClient = await connectClient("Spam");
   const spamClosePromise = once(spamClient, "close");
@@ -909,6 +922,24 @@ try {
   const alphaPlayerId = alphaJoined.playerId;
   const bravoPlayerId = bravoJoined.playerId;
   let alphaInputSeq = 1;
+
+  const alphaClone = await connectClient("AlphaClone");
+  const alphaCloneJoinedPromise = waitForMessage(alphaClone, (payload) => payload.type === MESSAGE_TYPES.JOINED);
+  const alphaCloneAckPromise = waitForMessage(
+    alphaClone,
+    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "join-alpha-clone"
+  );
+  joinRoom(alphaClone, "Alpha Clone", alphaProfileId, "join-alpha-clone", {
+    sessionId: "alpha-second-tab",
+    spectate: true
+  });
+  const [alphaCloneJoined] = await Promise.all([alphaCloneJoinedPromise, alphaCloneAckPromise]);
+
+  if (alphaCloneJoined.playerId === alphaPlayerId) {
+    throw new Error("Expected a second session on the same profile to get its own player identity");
+  }
+
+  alphaClone.close();
 
   const lobbyState = await waitForState(
     alpha,

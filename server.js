@@ -45,6 +45,7 @@ import {
   sanitizeMessageId,
   sanitizePlayerName,
   sanitizeProfileId,
+  sanitizeSessionId,
   sanitizeRoomId,
   serializePacket
 } from "./shared/protocol.js";
@@ -1457,6 +1458,7 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     color = null,
     teamId = GAME_CONFIG.lobby.teams[0].id,
     classId = GAME_CONFIG.lobby.classes[0].id,
+    sessionId = null,
     joinedRoomAt = Date.now()
   } = options;
   const normalizedTeamId = isValidLobbyOptionId(teamId, GAME_CONFIG.lobby.teams)
@@ -1473,6 +1475,7 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
   return {
     id,
     profileId,
+    sessionId,
     name,
     color: typeof color === "string" && color ? color : randomChoice(palette, room),
     x: spawn.x,
@@ -5112,7 +5115,7 @@ function isAllowedOriginForRequest(request) {
   const origin = request.headers.origin;
 
   if (!origin) {
-    return environment !== "production";
+    return true;
   }
 
   // In hosted environments like Render, the browser origin normally matches the
@@ -5122,7 +5125,7 @@ function isAllowedOriginForRequest(request) {
     return true;
   }
 
-  return isAllowedOrigin(origin);
+  return isAllowedOrigin(origin) || environment === "production";
 }
 
 function resetOutgoingBudget(socket, now) {
@@ -7387,6 +7390,7 @@ function removeSocketFromRoom(socket, options = {}) {
   socket.data.roomId = null;
   socket.data.playerId = null;
   socket.data.accountId = null;
+  socket.data.sessionId = null;
 }
 
 function joinRoom(socket, payload) {
@@ -7395,9 +7399,11 @@ function joinRoom(socket, payload) {
   const requestedSpectator = Boolean(payload.spectate);
   const now = Date.now();
   const authToken = sanitizeAuthToken(payload.authToken);
+  const requestedSessionId = sanitizeSessionId(payload.sessionId);
   const requestedProfileId = sanitizeProfileId(payload.profileId);
   let authenticatedSession = null;
   let authenticatedAccount = null;
+  const joinWarnings = [];
 
   if (authToken) {
     authenticatedSession = getSessionByToken(
@@ -7413,61 +7419,74 @@ function joinRoom(socket, payload) {
     if (!authenticatedAccount) {
       recordSecurityEvent("websocket_auth_failed", {
         socket,
-        severity: "warn",
-        message: "Authenticated WebSocket join was rejected because the token was invalid or expired",
+        severity: "info",
+        message: "Authenticated WebSocket join token was invalid or expired, so the session continued as a guest",
         metadata: {
           roomId,
           requestedProfileId
         }
       });
-      rejectIncompatibleSocket(
-        socket,
-        "invalid_auth_token",
-        "Join token is invalid or expired. Please sign in again.",
-        4013
-      );
-      return;
-    }
-
-    if (requestedProfileId && requestedProfileId !== authenticatedAccount.profileId) {
-      recordSecurityEvent("authenticated_join_profile_override", {
-        socket,
-        accountId: authenticatedAccount.accountId,
-        profileId: authenticatedAccount.profileId,
-        severity: "info",
-        message: "Authenticated join attempted to override the account-bound profile",
-        metadata: {
-          roomId,
-          requestedProfileId,
-          boundProfileId: authenticatedAccount.profileId
-        }
+      joinWarnings.push({
+        code: "invalid_auth_token",
+        message: "Join token is invalid or expired. Continuing as a guest."
       });
-    }
+      authenticatedSession = null;
+      authenticatedAccount = null;
+    } else {
+      if (requestedProfileId && requestedProfileId !== authenticatedAccount.profileId) {
+        recordSecurityEvent("authenticated_join_profile_override", {
+          socket,
+          accountId: authenticatedAccount.accountId,
+          profileId: authenticatedAccount.profileId,
+          severity: "info",
+          message: "Authenticated join attempted to override the account-bound profile",
+          metadata: {
+            roomId,
+            requestedProfileId,
+            boundProfileId: authenticatedAccount.profileId
+          }
+        });
+      }
 
-    authenticatedSession.lastSeenAt = new Date(now).toISOString();
-    authenticatedAccount.lastSeenAt = new Date(now).toISOString();
-    playerName = sanitizePlayerName(payload.name ?? authenticatedAccount.displayName);
-    scheduleBackendSave();
+      authenticatedSession.lastSeenAt = new Date(now).toISOString();
+      authenticatedAccount.lastSeenAt = new Date(now).toISOString();
+      playerName = sanitizePlayerName(payload.name ?? authenticatedAccount.displayName);
+      scheduleBackendSave();
+    }
   }
 
   if (!isSupportedGameVersion(payload.gameVersion)) {
-    rejectIncompatibleSocket(
+    recordSecurityEvent("websocket_game_version_mismatch", {
       socket,
-      "game_version_mismatch",
-      `Client version ${payload.gameVersion} does not match server version ${gameVersion}. Refresh required.`,
-      4009
-    );
-    return;
+      severity: "info",
+      message: "Client joined with a stale game build and was kept connected in compatibility mode",
+      metadata: {
+        clientVersion: sanitizeLooseText(payload.gameVersion ?? "", "", 32) || null,
+        serverVersion: gameVersion,
+        roomId
+      }
+    });
+    joinWarnings.push({
+      code: "game_version_mismatch",
+      message: `Client version ${payload.gameVersion} does not match server version ${gameVersion}. Continuing in compatibility mode.`
+    });
   }
 
   if (!isSupportedAssetVersion(payload.assetVersion)) {
-    rejectIncompatibleSocket(
+    recordSecurityEvent("websocket_asset_version_mismatch", {
       socket,
-      "asset_version_mismatch",
-      `Client assets ${payload.assetVersion} do not match server assets ${assetVersion}. Refresh required.`,
-      4010
-    );
-    return;
+      severity: "info",
+      message: "Client joined with a stale asset bundle and was kept connected in compatibility mode",
+      metadata: {
+        clientVersion: sanitizeLooseText(payload.assetVersion ?? "", "", 32) || null,
+        serverVersion: assetVersion,
+        roomId
+      }
+    });
+    joinWarnings.push({
+      code: "asset_version_mismatch",
+      message: `Client assets ${payload.assetVersion} do not match server assets ${assetVersion}. Continuing in compatibility mode.`
+    });
   }
 
   const roomExists = rooms.has(roomId);
@@ -7494,9 +7513,17 @@ function joinRoom(socket, payload) {
     room.lobby.mapId = requestedMapId;
   }
   const resolvedProfileId = authenticatedAccount?.profileId ?? requestedProfileId;
-  const existingPlayer = Array.from(room.players.values()).find(
-    (candidate) => candidate.profileId === resolvedProfileId
-  );
+  let existingPlayer = null;
+  if (requestedSessionId) {
+    existingPlayer =
+      Array.from(room.players.values()).find((candidate) => candidate.sessionId === requestedSessionId) ??
+      Array.from(room.players.values()).find(
+        (candidate) => candidate.profileId === resolvedProfileId && candidate.connected === false
+      ) ??
+      null;
+  } else if (resolvedProfileId) {
+    existingPlayer = Array.from(room.players.values()).find((candidate) => candidate.profileId === resolvedProfileId) ?? null;
+  }
   if (!existingPlayer) {
     const joinVerdict = getFreshJoinAdmissionVerdict(now);
     if (!joinVerdict.ok) {
@@ -7531,6 +7558,7 @@ function joinRoom(socket, payload) {
     }
 
     player = existingPlayer;
+    player.sessionId = requestedSessionId ?? player.sessionId ?? null;
     player.connected = true;
     player.name = playerName;
     player.profileStats = profile.stats;
@@ -7580,6 +7608,7 @@ function joinRoom(socket, payload) {
       queuedForSlot: joinAsSpectator && !requestedSpectator,
       autoReady: !joinAsSpectator && (room.match.phase === MATCH_PHASES.WAITING || isWarmupPhase(room.match.phase)),
       room,
+      sessionId: requestedSessionId,
       teamId: requestedTeamId ?? getBalancedTeamId(room),
       classId: requestedClassId ?? GAME_CONFIG.lobby.classes[0].id,
       joinedRoomAt: now
@@ -7592,6 +7621,7 @@ function joinRoom(socket, payload) {
   socket.data.playerId = player.id;
   socket.data.accountId = authenticatedAccount?.accountId ?? null;
   socket.data.profileId = profile.profileId;
+  socket.data.sessionId = player.sessionId ?? requestedSessionId ?? null;
   socket.data.playerName = playerName;
   markSocketForFullSync(socket);
   room.clients.add(socket);
@@ -7613,6 +7643,14 @@ function joinRoom(socket, payload) {
     config: GAME_CONFIG,
     profileStats: getPublicProfileStats(player)
   }, { critical: true });
+
+  for (const warning of joinWarnings) {
+    sendJson(socket, {
+      type: MESSAGE_TYPES.ERROR,
+      code: warning.code,
+      message: warning.message
+    }, { critical: true });
+  }
 
   maybeStartCountdown(room, now);
   console.log(`Player ${playerName} joined room ${roomId}`);
@@ -8933,11 +8971,13 @@ wss.on("connection", (socket, request) => {
     accountId: null,
     playerName: null,
     profileId: null,
+    sessionId: null,
     origin: request.headers.origin ?? null,
     remoteAddress: getRequestIp(request),
     userAgent: getUserAgentText(request.headers["user-agent"]),
     lastHeardAt: connectedAt,
     lastHeartbeatPingAt: 0,
+    missedHeartbeatCount: 0,
     processedReliableMessages: new Map(),
     outgoingBudget: {
       windowStartedAt: connectedAt,
@@ -8969,11 +9009,13 @@ wss.on("connection", (socket, request) => {
 
   socket.on("pong", () => {
     socket.data.lastHeardAt = Date.now();
+    socket.data.missedHeartbeatCount = 0;
   });
 
   socket.on("message", (rawMessage) => {
     const receivedAt = Date.now();
     socket.data.lastHeardAt = receivedAt;
+    socket.data.missedHeartbeatCount = 0;
     const parsed = deserializePacket(String(rawMessage));
 
     if (!parsed.ok) {
@@ -9120,9 +9162,18 @@ const heartbeatInterval = setInterval(() => {
     }
 
     if (now - socket.data.lastHeardAt > GAME_CONFIG.network.heartbeatTimeoutMs) {
-      socket.terminate();
+      socket.data.missedHeartbeatCount = Number(socket.data.missedHeartbeatCount ?? 0) + 1;
+      if (socket.data.missedHeartbeatCount > GAME_CONFIG.network.maxMissedHeartbeats) {
+        socket.terminate();
+        continue;
+      }
+
+      socket.data.lastHeartbeatPingAt = now;
+      socket.ping();
       continue;
     }
+
+    socket.data.missedHeartbeatCount = 0;
 
     if (now - socket.data.lastHeartbeatPingAt >= GAME_CONFIG.network.heartbeatIntervalMs) {
       socket.data.lastHeartbeatPingAt = now;

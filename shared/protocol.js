@@ -133,7 +133,8 @@ export const GAME_CONFIG = Object.freeze({
     reliableResendMs: 750,
     maxReliableHistory: 256,
     heartbeatIntervalMs: 5000,
-    heartbeatTimeoutMs: 45000,
+    heartbeatTimeoutMs: 180000,
+    maxMissedHeartbeats: 6,
     maxOutgoingBytesPerSecond: 96000,
     maxStatePayloadBytes: 12000,
     stateChunkChars: 7000,
@@ -429,6 +430,15 @@ export function sanitizeAuthToken(value) {
     .trim()
     .replace(/[^a-zA-Z0-9._-]/g, "")
     .slice(0, 256);
+
+  return normalized || null;
+}
+
+export function sanitizeSessionId(value) {
+  const normalized = String(value ?? "")
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, "")
+    .slice(0, 96);
 
   return normalized || null;
 }
@@ -1017,6 +1027,7 @@ function normalizeJoinPacket(packet, version) {
     name: sanitizePlayerName(packet.name ?? packet.n),
     profileId: sanitizeProfileId(packet.profileId ?? packet.p),
     authToken: sanitizeAuthToken(packet.authToken ?? packet.at),
+    sessionId: sanitizeSessionId(packet.sessionId ?? packet.sid),
     spectate: readBoolean(packet.spectate ?? packet.sp, false),
     mapId: sanitizeText(packet.mapId ?? packet.mid, "", 24) || null,
     teamId: sanitizeText(packet.teamId ?? packet.tid, "", 24) || null,
@@ -1254,6 +1265,7 @@ function encodePacketObject(packet) {
         n: sanitizePlayerName(packet.name),
         p: sanitizeProfileId(packet.profileId),
         at: sanitizeAuthToken(packet.authToken),
+        sid: sanitizeSessionId(packet.sessionId),
         sp: readBoolean(packet.spectate, false),
         mid: sanitizeText(packet.mapId ?? "", "", 24) || null,
         tid: sanitizeText(packet.teamId ?? "", "", 24) || null,
