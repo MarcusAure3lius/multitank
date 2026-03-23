@@ -1326,6 +1326,17 @@ function validatePlayerSimulationState(room, player, previousState, deltaSeconds
   const maxAllowedTurn = movedDistance > 0.01 ? Math.PI * 2 : GAME_CONFIG.tank.turnSpeed * deltaSeconds + 0.3;
   const turnDelta = Math.abs(normalizeAngle(player.angle - previousState.angle));
 
+  if (player.isBot) {
+    if (!positionIsFinite || !angleIsFinite || outOfBounds || insideObstacle) {
+      restoreLastSafePlayerState(player);
+      resetBotAiState(player, now);
+      return;
+    }
+
+    rememberSafePlayerState(player);
+    return;
+  }
+
   if (!positionIsFinite || !angleIsFinite || outOfBounds || insideObstacle) {
     restoreLastSafePlayerState(player);
     if (player.isBot) {
