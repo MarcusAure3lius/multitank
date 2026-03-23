@@ -141,6 +141,7 @@ let lastResyncRequestAt = 0;
 let lastStallWarningAt = 0;
 let latestLatencyMs = 0;
 let lastServerMessageAt = 0;
+let lastSocketCloseInfo = null;
 let pointerPrimaryDown = false;
 let lastPointerWorldPosition = {
   x: GAME_CONFIG.world.width / 2,
@@ -236,6 +237,31 @@ function requestCompatibilityRefresh(reason) {
 function setStatus(text) {
   statusElement.textContent = text;
   updateDiagnosticBanner();
+}
+
+function formatSocketCloseInfo(closeInfo) {
+  if (!closeInfo) {
+    return "n/a";
+  }
+
+  const code = Number.isFinite(Number(closeInfo.code)) ? Number(closeInfo.code) : 0;
+  const cleanState = closeInfo.wasClean ? "clean" : "unclean";
+  const reason = typeof closeInfo.reason === "string" && closeInfo.reason.trim()
+    ? closeInfo.reason.trim().slice(0, 80)
+    : "no reason";
+  return `code ${code} | ${cleanState} | ${reason}`;
+}
+
+function rememberSocketClose(event) {
+  lastSocketCloseInfo = {
+    code: Number.isFinite(Number(event?.code)) ? Number(event.code) : 0,
+    reason: typeof event?.reason === "string" ? event.reason : String(event?.reason ?? ""),
+    wasClean: Boolean(event?.wasClean),
+    at: Date.now()
+  };
+  console.warn("WebSocket closed in client", lastSocketCloseInfo);
+  updateDiagnosticBanner();
+  return lastSocketCloseInfo;
 }
 
 function updateLocalDevBadge() {
@@ -535,6 +561,7 @@ function updateDiagnosticBanner() {
   const playerSummary = localPlayer
     ? localPlayer.name
     : (localPlayerId ? `awaiting state for ${localPlayerId}` : "none");
+  const shouldShowCloseSummary = socket?.readyState !== WebSocket.OPEN && lastSocketCloseInfo;
 
   diagnosticBannerElement.hidden = false;
   diagnosticBannerElement.textContent =
@@ -542,6 +569,7 @@ function updateDiagnosticBanner() {
     `Room: ${currentRoomId ?? "-"} | Snapshot: ${snapshotState} | Players: ${players.size}\n` +
     `Local Player: ${playerSummary}\n` +
     `Playable: ${hasPlayableSession() ? "yes" : "no"} | Spectator: ${spectatorState ? "yes" : "no"} | Zoom: ${cameraZoom.toFixed(2)}` +
+    (shouldShowCloseSummary ? `\nLast Close: ${formatSocketCloseInfo(lastSocketCloseInfo)}` : "") +
     (renderFailure ? `\nRender Error: ${renderFailure}` : "");
 }
 
@@ -900,7 +928,8 @@ function scheduleReconnect() {
     GAME_CONFIG.session.reconnectRetryMs * 2 ** Math.min(reconnectAttempts - 1, 3)
   );
   const delaySeconds = Number((delayMs / 1000).toFixed(1));
-  setStatus(`Reconnecting (${reconnectAttempts}) in ${delaySeconds}s...`);
+  const closeSuffix = lastSocketCloseInfo ? ` | last close ${formatSocketCloseInfo(lastSocketCloseInfo)}` : "";
+  setStatus(`Reconnecting (${reconnectAttempts}) in ${delaySeconds}s...${closeSuffix}`);
   matchStatusElement.textContent = "Trying to recover your match session";
 
   reconnectTimer = window.setTimeout(() => {
@@ -2455,6 +2484,7 @@ function connect(options = {}) {
   nextSocket.addEventListener("open", () => {
     cancelReconnect();
     lastServerMessageAt = Date.now();
+    lastSocketCloseInfo = null;
     setStatus("Connected to server. Requesting match...");
     sendReliable({
       type: MESSAGE_TYPES.JOIN,
@@ -2577,6 +2607,7 @@ function connect(options = {}) {
       return;
     }
 
+    const closeInfo = rememberSocketClose(event);
     socket = null;
     joinInProgress = false;
 
@@ -2587,7 +2618,7 @@ function connect(options = {}) {
 
     if (event.code === 4001) {
       rotateClientSessionId();
-      setStatus("This session was claimed elsewhere. Rejoining with a fresh local session...");
+      setStatus(`This session was claimed elsewhere. Rejoining with a fresh local session... | ${formatSocketCloseInfo(closeInfo)}`);
       pendingInputs.length = 0;
       currentRoomId ||= roomInput.value || "default";
       scheduleReconnect();
