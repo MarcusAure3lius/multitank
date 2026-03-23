@@ -7223,7 +7223,7 @@ function syncRoomBots(room, now) {
 }
 
 function startMatch(room, now) {
-  const preserveExistingState = GAME_CONFIG.match.continuousMode;
+  const preserveExistingState = GAME_CONFIG.match.continuousMode || room.roundNumber === 0;
   room.roundNumber += 1;
   room.events.length = 0;
 
