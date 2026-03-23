@@ -952,6 +952,41 @@ try {
     throw new Error("Expected a solo room with a bot to publish both combatants in the leaderboard");
   }
 
+  let soloInputSeq = 1;
+  const soloMoveInput = findClearMovementInput(soloLivePlayer);
+  const soloMoveSeqStart = soloInputSeq;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    sendInput(solo, {
+      seq: soloInputSeq++,
+      clientSentAt: Date.now(),
+      forward: soloMoveInput.forward,
+      back: soloMoveInput.back,
+      left: soloMoveInput.left,
+      right: soloMoveInput.right,
+      shoot: false,
+      turretAngle: 0
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  const soloMoveSeqEnd = soloInputSeq - 1;
+
+  const soloMovedState = await waitForState(
+    solo,
+    (payload) => {
+      const movedSoloPlayer = getPlayerState(payload, soloJoined.playerId);
+      return (
+        payload.you?.lastProcessedInputSeq >= soloMoveSeqEnd &&
+        Boolean(movedSoloPlayer) &&
+        Math.hypot(movedSoloPlayer.x - soloLivePlayer.x, movedSoloPlayer.y - soloLivePlayer.y) >= 6
+      );
+    },
+    "solo bot movement state"
+  );
+
+  if (soloMovedState.you?.lastProcessedInputSeq < soloMoveSeqStart) {
+    throw new Error("Expected solo bot rooms to keep processing human movement inputs after the enemy spawns");
+  }
+
   solo.close();
 
   const alphaProfileId = "alpha-smoke";

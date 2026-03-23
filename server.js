@@ -1914,6 +1914,7 @@ function resolveCombatHit(room, attacker, target, now) {
   );
   const armorBlocked = Math.max(0, critDamage - mitigatedDamage);
   const shouldApplyStatus =
+    !attacker?.isBot &&
     attackerProfile.statusEffect !== STATUS_EFFECTS.NONE &&
     target.alive &&
     (rolledCritical || getRandomFloat(room) < attackerProfile.statusChance);
