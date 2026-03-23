@@ -264,6 +264,7 @@ export const GAME_CONFIG = Object.freeze({
     ])
   }),
   antiCheat: Object.freeze({
+    enabled: false,
     maxInputsPerSecond: 40,
     maxMessagesPerSecond: 120,
     maxControlMessagesPerSecond: 24,

@@ -1225,7 +1225,15 @@ function decayViolationPoints(player, now) {
   }
 }
 
+function isAntiCheatEnabled() {
+  return GAME_CONFIG.antiCheat?.enabled !== false;
+}
+
 function recordAntiCheatViolation(room, player, reason, message, now, weight = 1) {
+  if (!isAntiCheatEnabled()) {
+    return;
+  }
+
   if (!player?.antiCheat) {
     return;
   }
@@ -5188,6 +5196,10 @@ function rejectIncompatibleSocket(socket, code, message, closeCode) {
 }
 
 function enforceSocketMessageRate(socket, payloadType, now) {
+  if (!isAntiCheatEnabled()) {
+    return true;
+  }
+
   const messageBucket = socket.data?.messageBucket;
   const controlBucket = socket.data?.controlBucket;
 
@@ -5209,6 +5221,10 @@ function enforceSocketMessageRate(socket, payloadType, now) {
 }
 
 function recordInvalidPacket(socket, error, now) {
+  if (!isAntiCheatEnabled()) {
+    return;
+  }
+
   const invalidPacketBucket = socket.data?.invalidPacketBucket;
 
   if (!invalidPacketBucket) {
@@ -7825,7 +7841,7 @@ function handleInput(socket, payload, now) {
   autoReadyPlayerForImmediateMatch(room, player, now);
 
   const bucket = socket.data.inputBucket;
-  if (!consumeRateBucket(bucket, now, GAME_CONFIG.antiCheat.maxInputsPerSecond)) {
+  if (isAntiCheatEnabled() && !consumeRateBucket(bucket, now, GAME_CONFIG.antiCheat.maxInputsPerSecond)) {
     sendJson(socket, {
       type: MESSAGE_TYPES.ERROR,
       code: "input_rate_limit",

@@ -866,7 +866,6 @@ try {
   staleAssetsClient.close();
 
   const spamClient = await connectClient("Spam");
-  const spamClosePromise = once(spamClient, "close");
   for (let attempt = 0; attempt < GAME_CONFIG.antiCheat.maxControlMessagesPerSecond + 1; attempt += 1) {
     spamClient.send(
       serializePacket({
@@ -875,20 +874,21 @@ try {
       })
     );
   }
-  const [spamCloseCode] = await spamClosePromise;
-  if (spamCloseCode !== 4012) {
-    throw new Error("Expected control-message spam to be rejected with a rate-limit close");
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  if (spamClient.readyState !== WebSocket.OPEN) {
+    throw new Error("Expected control-message spam to stay connected with anti-cheat disabled");
   }
+  spamClient.close();
 
   const invalidPacketClient = await connectClient("Invalid");
-  const invalidPacketClosePromise = once(invalidPacketClient, "close");
   for (let attempt = 0; attempt < GAME_CONFIG.antiCheat.maxViolationPoints + 1; attempt += 1) {
     invalidPacketClient.send("{bad-json");
   }
-  const [invalidPacketCloseCode] = await invalidPacketClosePromise;
-  if (invalidPacketCloseCode !== 4007) {
-    throw new Error("Expected repeated malformed packets to be rejected");
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  if (invalidPacketClient.readyState !== WebSocket.OPEN) {
+    throw new Error("Expected malformed packets to stop causing disconnects with anti-cheat disabled");
   }
+  invalidPacketClient.close();
 
   const alphaProfileId = "alpha-smoke";
   const bravoProfileId = "bravo-smoke";
