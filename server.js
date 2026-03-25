@@ -8522,6 +8522,10 @@ function applyBulletHit(room, bullet, player, impactTime) {
         : `${player.name} was destroyed`
     });
 
+    if (isSoloBotDuelRoom(room)) {
+      clearOwnedEntityLifecycle(room, player.id);
+    }
+
     clearCombatContributors(player);
   }
 }
