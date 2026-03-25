@@ -3073,7 +3073,8 @@ function drawTank(player) {
   const turretBaseRadius = 10;
   const barrelHalfWidth = 6;
   const barrelLength = bodyRadius + 28 - Math.min(8, (player.predictedRecoil ?? 0) * 8);
-  const bodyColor = player.id === localPlayerId ? "#2563eb" : (player.color ?? "#ff4d00");
+  const isLocalPlayer = player.id === localPlayerId;
+  const bodyColor = isLocalPlayer ? "#2563eb" : (player.color ?? "#ff4d00");
   const alpha = player.connected === false ? 0.42 : 1;
 
   context.save();
@@ -3111,7 +3112,7 @@ function drawTank(player) {
   const hpRatio = clamp((Number(player.hp) || 0) / GAME_CONFIG.tank.hitPoints, 0, 1);
   const healthBarWidth = 52;
   const healthBarHeight = 7;
-  const healthBarY = y - bodyRadius - 18;
+  const healthBarY = isLocalPlayer ? y + bodyRadius + 11 : y - bodyRadius - 18;
   const healthBarX = x - healthBarWidth / 2;
 
   context.save();
