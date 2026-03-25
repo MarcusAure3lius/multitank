@@ -2449,7 +2449,7 @@ function buildMatchStatusText() {
       : latestObjective?.captureTargetName
         ? ` | capturing: ${latestObjective.captureTargetName}`
         : "";
-    if (GAME_CONFIG.match.continuousMode) {
+    if (latestMatch.phaseEndsAt === null) {
       return `${latestMatch.message}${objectiveText}${spectatorSuffix}`;
     }
     return `${latestMatch.message} | ${secondsLeft}s left | first to ${latestMatch.scoreToWin}${objectiveText}${spectatorSuffix}`;
