@@ -3118,7 +3118,7 @@ function drawTank(player) {
   context.globalAlpha = alpha;
   context.fillStyle = "rgba(17, 17, 17, 0.88)";
   context.fillRect(healthBarX, healthBarY, healthBarWidth, healthBarHeight);
-  context.fillStyle = hpRatio > 0.5 ? "#22c55e" : hpRatio > 0.25 ? "#f59e0b" : "#ef4444";
+  context.fillStyle = "#22c55e";
   context.fillRect(healthBarX + 1, healthBarY + 1, Math.max(0, (healthBarWidth - 2) * hpRatio), healthBarHeight - 2);
   context.restore();
 }
