@@ -182,7 +182,8 @@ export const GAME_CONFIG = Object.freeze({
   }),
   spawn: Object.freeze({
     protectionMs: 12000,
-    safeEnemyDistance: 1800
+    safeEnemyDistance: 1800,
+    safeRespawnDistance: 1200
   }),
   tank: Object.freeze({
     radius: 22,

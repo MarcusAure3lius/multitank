@@ -938,7 +938,8 @@ function clearSpawnProtectionOnAction(player, now = Date.now()) {
 function isSpawnPointSafe(room, x, y, options = {}) {
   const {
     teamId = null,
-    enforceEnemyBuffer = true
+    enforceEnemyBuffer = true,
+    minDistanceToPlayers = null
   } = options;
   if (collidesWithObstacle(x, y, GAME_CONFIG.tank.radius + 8)) {
     return false;
@@ -962,10 +963,14 @@ function isSpawnPointSafe(room, x, y, options = {}) {
 
     const dx = x - player.x;
     const dy = y - player.y;
-    const minDistance =
+    const configuredPlayerBuffer = Number.isFinite(Number(minDistanceToPlayers))
+      ? Math.max(GAME_CONFIG.tank.radius * 3, Number(minDistanceToPlayers))
+      : null;
+    const minDistance = configuredPlayerBuffer ?? (
       enforceEnemyBuffer && teamId && player.teamId !== teamId
         ? GAME_CONFIG.spawn.safeEnemyDistance
-        : GAME_CONFIG.tank.radius * 3;
+        : GAME_CONFIG.tank.radius * 3
+    );
     if (dx * dx + dy * dy < minDistance * minDistance) {
       return false;
     }
@@ -980,6 +985,9 @@ function createSpawnPoint(room = null, options = {}) {
     : GAME_CONFIG.lobby.teams[0]?.id ?? "alpha";
   const spawnKey = String(options.spawnKey ?? "");
   const enforceEnemyBuffer = options.enforceEnemyBuffer !== false;
+  const minDistanceToPlayers = Number.isFinite(Number(options.minDistanceToPlayers))
+    ? Number(options.minDistanceToPlayers)
+    : null;
   const { width, height, padding } = GAME_CONFIG.world;
   const spawnSlotCandidates = buildSpawnSlotCandidates(teamId, spawnKey);
 
@@ -993,7 +1001,7 @@ function createSpawnPoint(room = null, options = {}) {
       continue;
     }
 
-    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer })) {
+    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer, minDistanceToPlayers })) {
       return candidate;
     }
   }
@@ -1015,7 +1023,7 @@ function createSpawnPoint(room = null, options = {}) {
       continue;
     }
 
-    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer })) {
+    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer, minDistanceToPlayers })) {
       return candidate;
     }
   }
@@ -1026,7 +1034,7 @@ function createSpawnPoint(room = null, options = {}) {
       y: padding + fallbackRng.nextFloat() * (height - padding * 2)
     };
 
-    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer })) {
+    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer, minDistanceToPlayers })) {
       return candidate;
     }
   }
@@ -1039,7 +1047,9 @@ function createSpawnPoint(room = null, options = {}) {
   ];
 
   return (
-    fallbackPoints.find((candidate) => isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer })) ?? {
+    fallbackPoints.find((candidate) =>
+      isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer, minDistanceToPlayers })
+    ) ?? {
       x: padding + 60,
       y: padding + 60
     }
@@ -6886,9 +6896,11 @@ function resetPlayerForRound(room, player) {
   }
 
   const now = Date.now();
-  const spawn = getStableSpawnPoint(room, player, {
+  const spawn = createSpawnPoint(room, {
     teamId: player.teamId,
-    spawnKey: player.id
+    spawnKey: `${player.id}:round:${Math.floor(now)}`,
+    enforceEnemyBuffer: true,
+    minDistanceToPlayers: GAME_CONFIG.spawn.safeRespawnDistance
   });
   player.x = spawn.x;
   player.y = spawn.y;
@@ -6959,9 +6971,11 @@ function clearRoomCombatState(room) {
     }
 
     const now = Date.now();
-    const spawn = getStableSpawnPoint(room, player, {
+    const spawn = createSpawnPoint(room, {
       teamId: player.teamId,
-      spawnKey: player.id
+      spawnKey: `${player.id}:reset:${Math.floor(now)}`,
+      enforceEnemyBuffer: true,
+      minDistanceToPlayers: GAME_CONFIG.spawn.safeRespawnDistance
     });
     player.x = spawn.x;
     player.y = spawn.y;
@@ -8674,10 +8688,11 @@ function updatePlayer(room, player, deltaSeconds, now) {
 
   if (!player.alive) {
     if (!isRoomSurvivalMode(room) && now >= player.respawnAt) {
-      const spawn = getStableSpawnPoint(room, player, {
+      const spawn = createSpawnPoint(room, {
         teamId: player.teamId,
-        spawnKey: player.id,
-        enforceEnemyBuffer: false
+        spawnKey: `${player.id}:${Math.floor(now)}`,
+        enforceEnemyBuffer: true,
+        minDistanceToPlayers: GAME_CONFIG.spawn.safeRespawnDistance
       });
       player.x = spawn.x;
       player.y = spawn.y;
