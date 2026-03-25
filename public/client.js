@@ -1489,12 +1489,12 @@ function shouldShowResultsPhase(phase) {
 
 function canSimulateLocalPlayer() {
   const localPlayer = getLocalPlayer();
-  return isMovementPhase(latestMatch?.phase) && localPlayer && !localPlayer.isSpectator && !localPlayer.afk;
+  return isMovementPhase(latestMatch?.phase) && localPlayer && !localPlayer.isSpectator;
 }
 
 function canPredictLocalShots() {
   const localPlayer = getLocalPlayer();
-  return canShootPhase(latestMatch?.phase) && localPlayer && !localPlayer.isSpectator && !localPlayer.afk;
+  return canShootPhase(latestMatch?.phase) && localPlayer && !localPlayer.isSpectator;
 }
 
 function refreshSessionUi(localPlayer = getLocalPlayer(), you = null) {
