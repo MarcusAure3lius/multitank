@@ -72,8 +72,7 @@ const NETWORK_RENDER = Object.freeze({
   historyLimit: 24,
   playerTeleportDistance: 220,
   bulletTeleportDistance: 140,
-  snapDistance: 120,
-  remoteSmoothing: 0.68,
+  snapDistance: 160,
   clockSmoothing: 0.12
 });
 
@@ -499,6 +498,7 @@ function updateLocalRenderState(deltaSeconds) {
 
   if (canSimulateLocalPlayer() && localPlayer.alive) {
     const inputState = getCapturedInputState();
+    const movementActive = inputState.forward || inputState.back || inputState.left || inputState.right;
     const pointerWorldPosition = refreshPointerWorldPosition();
     const targetTurretAngle = Math.atan2(
       pointerWorldPosition.y - renderState.y,
@@ -523,16 +523,21 @@ function updateLocalRenderState(deltaSeconds) {
     const driftY = visualState.y - simulated.y;
     const driftAngle = normalizeAngle(visualState.angle - simulated.angle);
     const driftTurretAngle = normalizeAngle(visualState.turretAngle - simulated.turretAngle);
-
-    renderState.x =
-      simulated.x + (Math.abs(driftX) <= correctionDeadzone ? 0 : driftX * correctionStrength);
-    renderState.y =
-      simulated.y + (Math.abs(driftY) <= correctionDeadzone ? 0 : driftY * correctionStrength);
-    renderState.angle =
-      simulated.angle + (Math.abs(driftAngle) <= 0.01 ? 0 : driftAngle * correctionStrength);
     const correctedTurretAngle =
       simulated.turretAngle +
       (Math.abs(driftTurretAngle) <= 0.01 ? 0 : driftTurretAngle * correctionStrength);
+    const correctedX =
+      simulated.x + (Math.abs(driftX) <= correctionDeadzone ? 0 : driftX * correctionStrength);
+    const correctedY =
+      simulated.y + (Math.abs(driftY) <= correctionDeadzone ? 0 : driftY * correctionStrength);
+    const correctedAngle =
+      simulated.angle + (Math.abs(driftAngle) <= 0.01 ? 0 : driftAngle * correctionStrength);
+    const positionSmoothing = getLocalPositionSmoothing(deltaSeconds, movementActive);
+    const angleSmoothing = getLocalAngleSmoothing(deltaSeconds, movementActive);
+
+    renderState.x = lerp(renderState.x, correctedX, positionSmoothing);
+    renderState.y = lerp(renderState.y, correctedY, positionSmoothing);
+    renderState.angle = lerpAngle(renderState.angle, correctedAngle, angleSmoothing);
     renderState.turretAngle = lerpAngle(
       renderState.turretAngle,
       correctedTurretAngle,
@@ -541,9 +546,13 @@ function updateLocalRenderState(deltaSeconds) {
     return renderState;
   }
 
-  renderState.x = lerp(renderState.x, visualState.x, 0.24);
-  renderState.y = lerp(renderState.y, visualState.y, 0.24);
-  renderState.angle = lerpAngle(renderState.angle, visualState.angle, 0.24);
+  renderState.x = lerp(renderState.x, visualState.x, getLocalPositionSmoothing(deltaSeconds, false));
+  renderState.y = lerp(renderState.y, visualState.y, getLocalPositionSmoothing(deltaSeconds, false));
+  renderState.angle = lerpAngle(
+    renderState.angle,
+    visualState.angle,
+    getLocalAngleSmoothing(deltaSeconds, false)
+  );
   renderState.turretAngle = lerpAngle(
     renderState.turretAngle,
     visualState.turretAngle,
@@ -1092,16 +1101,49 @@ function lerpWrappedUnit(current, target, amount) {
   return (current + delta * amount + 1) % 1;
 }
 
+function getFrameSmoothing(deltaSeconds, sharpness, min = 0, max = 1) {
+  return clamp(1 - Math.exp(-sharpness * deltaSeconds), min, max);
+}
+
+function getLocalPositionSmoothing(deltaSeconds, moving = false) {
+  return getFrameSmoothing(deltaSeconds, moving ? 18 : 12, moving ? 0.18 : 0.12, moving ? 0.38 : 0.28);
+}
+
+function getLocalAngleSmoothing(deltaSeconds, moving = false) {
+  return getFrameSmoothing(deltaSeconds, moving ? 16 : 11, moving ? 0.16 : 0.1, moving ? 0.34 : 0.24);
+}
+
+function getRemotePositionSmoothing(deltaSeconds, speed = 0) {
+  const speedRatio = clamp(speed / Math.max(1, GAME_CONFIG.tank.speed), 0, 1.4);
+  return getFrameSmoothing(deltaSeconds, 10 + speedRatio * 6, 0.1, 0.32);
+}
+
+function getRemoteAngleSmoothing(deltaSeconds) {
+  return getFrameSmoothing(deltaSeconds, 12, 0.12, 0.28);
+}
+
+function getCorrectionFadeSmoothing(deltaSeconds) {
+  return getFrameSmoothing(deltaSeconds, 10, 0.1, 0.24);
+}
+
+function getCameraFollowSmoothing(deltaSeconds, localFocus = false) {
+  return getFrameSmoothing(deltaSeconds, localFocus ? 8.5 : 6.5, 0.08, localFocus ? 0.2 : 0.16);
+}
+
 function getTurretVisualSmoothing(deltaSeconds) {
-  return clamp(1 - Math.exp(-20 * deltaSeconds), 0.2, 0.42);
+  return getFrameSmoothing(deltaSeconds, 14, 0.12, 0.28);
 }
 
 function getRecoilKickSmoothing(deltaSeconds) {
-  return clamp(1 - Math.exp(-28 * deltaSeconds), 0.24, 0.58);
+  return getFrameSmoothing(deltaSeconds, 12, 0.1, 0.24);
 }
 
 function getRecoilRecoverySmoothing(deltaSeconds) {
-  return clamp(1 - Math.exp(-8 * deltaSeconds), 0.08, 0.22);
+  return getFrameSmoothing(deltaSeconds, 4.8, 0.03, 0.12);
+}
+
+function getRecoilTargetFadeSmoothing(deltaSeconds) {
+  return getFrameSmoothing(deltaSeconds, 8, 0.05, 0.18);
 }
 
 function triggerShotRecoil(player, now, options = {}) {
@@ -1110,7 +1152,7 @@ function triggerShotRecoil(player, now, options = {}) {
   }
 
   player.muzzleFlashUntil = now + 90;
-  player.recoilTarget = Math.max(player.recoilTarget ?? 0, options.strength ?? 0.74);
+  player.recoilTarget = Math.max(player.recoilTarget ?? 0, options.strength ?? 0.58);
 
   if (options.predicted) {
     player.lastPredictedRecoilAt = now;
@@ -1122,10 +1164,16 @@ function updateVisualRecoil(player, deltaSeconds) {
     return;
   }
 
-  const currentRecoil = player.predictedRecoil ?? 0;
-  const recoilTarget = player.recoilTarget ?? 0;
-  player.predictedRecoil = lerp(currentRecoil, recoilTarget, getRecoilKickSmoothing(deltaSeconds));
-  player.recoilTarget = lerp(recoilTarget, 0, getRecoilRecoverySmoothing(deltaSeconds));
+  const currentRecoil = clamp(player.predictedRecoil ?? 0, 0, 1);
+  const recoilTarget = clamp(player.recoilTarget ?? 0, 0, 1);
+  const fadedTarget = lerp(recoilTarget, 0, getRecoilTargetFadeSmoothing(deltaSeconds));
+  const followSmoothing =
+    fadedTarget > currentRecoil
+      ? getRecoilKickSmoothing(deltaSeconds)
+      : getRecoilRecoverySmoothing(deltaSeconds);
+
+  player.predictedRecoil = lerp(currentRecoil, fadedTarget, followSmoothing);
+  player.recoilTarget = fadedTarget;
 
   if (Math.abs(player.predictedRecoil) <= 0.001) {
     player.predictedRecoil = 0;
@@ -1426,7 +1474,7 @@ function getCameraFocusTarget() {
   };
 }
 
-function updateCamera() {
+function updateCamera(deltaSeconds) {
   const focus = getCameraFocusTarget();
   const viewport = getVisibleViewportSize();
   const target = clampCameraPosition(focus.x - viewport.width / 2, focus.y - viewport.height / 2);
@@ -1438,14 +1486,9 @@ function updateCamera() {
     return;
   }
 
-  if (localRenderState) {
-    camera.x = target.x;
-    camera.y = target.y;
-    return;
-  }
-
-  camera.x = lerp(camera.x, target.x, 0.18);
-  camera.y = lerp(camera.y, target.y, 0.18);
+  const followSmoothing = getCameraFollowSmoothing(deltaSeconds, Boolean(localRenderState));
+  camera.x = lerp(camera.x, target.x, followSmoothing);
+  camera.y = lerp(camera.y, target.y, followSmoothing);
   const clamped = clampCameraPosition(camera.x, camera.y);
   camera.x = clamped.x;
   camera.y = clamped.y;
@@ -2824,8 +2867,11 @@ function updateVisualAnimationState(player, fallbackMoveBlend = 0) {
 }
 
 function updateRenderState(deltaSeconds, frameAt) {
-  const smoothing = players.size > 1 ? 0.22 : 0.35;
   const renderServerTime = estimateServerTime(frameAt) - getRemoteInterpolationBackTimeMs();
+  const localMoving = hasMovementInputActive();
+  const localPositionSmoothing = getLocalPositionSmoothing(deltaSeconds, localMoving);
+  const localAngleSmoothing = getLocalAngleSmoothing(deltaSeconds, localMoving);
+  const correctionFadeSmoothing = getCorrectionFadeSmoothing(deltaSeconds);
 
   for (const player of players.values()) {
     const previousDisplayX = getPlayerVisualX(player);
@@ -2837,25 +2883,25 @@ function updateRenderState(deltaSeconds, frameAt) {
       player.targetAngle = player.renderAngle ?? player.angle;
       player.targetTurretAngle = player.renderTurretAngle ?? player.turretAngle;
 
-      player.renderX = lerp(player.renderX ?? player.x, player.targetX ?? player.x, smoothing);
-      player.renderY = lerp(player.renderY ?? player.y, player.targetY ?? player.y, smoothing);
+      player.renderX = lerp(player.renderX ?? player.x, player.targetX ?? player.x, localPositionSmoothing);
+      player.renderY = lerp(player.renderY ?? player.y, player.targetY ?? player.y, localPositionSmoothing);
       player.renderAngle = lerpAngle(
         player.renderAngle ?? player.angle,
         player.targetAngle ?? player.angle,
-        smoothing
+        localAngleSmoothing
       );
       player.renderTurretAngle = lerpAngle(
         player.renderTurretAngle ?? player.turretAngle,
         player.targetTurretAngle ?? player.turretAngle,
-        smoothing
+        getTurretVisualSmoothing(deltaSeconds)
       );
-      player.correctionOffsetX = lerp(player.correctionOffsetX ?? 0, 0, 0.22);
-      player.correctionOffsetY = lerp(player.correctionOffsetY ?? 0, 0, 0.22);
-      player.correctionOffsetAngle = lerpAngle(player.correctionOffsetAngle ?? 0, 0, 0.22);
+      player.correctionOffsetX = lerp(player.correctionOffsetX ?? 0, 0, correctionFadeSmoothing);
+      player.correctionOffsetY = lerp(player.correctionOffsetY ?? 0, 0, correctionFadeSmoothing);
+      player.correctionOffsetAngle = lerpAngle(player.correctionOffsetAngle ?? 0, 0, correctionFadeSmoothing);
       player.correctionOffsetTurretAngle = lerpAngle(
         player.correctionOffsetTurretAngle ?? 0,
         0,
-        0.22
+        correctionFadeSmoothing
       );
       player.displayX = player.renderX + (player.correctionOffsetX ?? 0);
       player.displayY = player.renderY + (player.correctionOffsetY ?? 0);
@@ -2875,6 +2921,8 @@ function updateRenderState(deltaSeconds, frameAt) {
       const shouldSnap =
         (player.teleportFrames ?? 0) > 0 ||
         dx * dx + dy * dy > NETWORK_RENDER.snapDistance * NETWORK_RENDER.snapDistance;
+      const positionSmoothing = getRemotePositionSmoothing(deltaSeconds, sample.speed);
+      const angleSmoothing = getRemoteAngleSmoothing(deltaSeconds);
 
       if (shouldSnap) {
         player.renderX = sample.x;
@@ -2882,17 +2930,17 @@ function updateRenderState(deltaSeconds, frameAt) {
         player.renderAngle = sample.angle;
         player.renderTurretAngle = sample.turretAngle;
       } else {
-        player.renderX = lerp(player.renderX ?? sample.x, sample.x, NETWORK_RENDER.remoteSmoothing);
-        player.renderY = lerp(player.renderY ?? sample.y, sample.y, NETWORK_RENDER.remoteSmoothing);
+        player.renderX = lerp(player.renderX ?? sample.x, sample.x, positionSmoothing);
+        player.renderY = lerp(player.renderY ?? sample.y, sample.y, positionSmoothing);
         player.renderAngle = lerpAngle(
           player.renderAngle ?? sample.angle,
           sample.angle,
-          NETWORK_RENDER.remoteSmoothing
+          angleSmoothing
         );
         player.renderTurretAngle = lerpAngle(
           player.renderTurretAngle ?? sample.turretAngle,
           sample.turretAngle,
-          NETWORK_RENDER.remoteSmoothing
+          getTurretVisualSmoothing(deltaSeconds)
         );
       }
 
@@ -3072,7 +3120,9 @@ function drawTank(player) {
   const bodyRadius = GAME_CONFIG.tank.radius;
   const turretBaseRadius = 10;
   const barrelHalfWidth = 6;
-  const barrelLength = bodyRadius + 28 - Math.min(8, (player.predictedRecoil ?? 0) * 8);
+  const recoil = clamp(player.predictedRecoil ?? 0, 0, 1);
+  const recoilOffset = Math.min(7, recoil * 9);
+  const barrelLength = bodyRadius + 28 - recoilOffset * 0.8;
   const isLocalPlayer = player.id === localPlayerId;
   const bodyColor = isLocalPlayer ? "#2563eb" : (player.color ?? "#ff4d00");
   const alpha = player.connected === false ? 0.42 : 1;
@@ -3081,6 +3131,7 @@ function drawTank(player) {
   context.globalAlpha = alpha;
   context.translate(x, y);
   context.rotate(turretAngle);
+  context.translate(-recoilOffset * 0.6, 0);
   context.fillStyle = "#111111";
   context.fillRect(-2, -barrelHalfWidth, barrelLength + 2, barrelHalfWidth * 2);
 
@@ -3212,7 +3263,7 @@ function render(frameAt = performance.now()) {
 
     updateRenderState(deltaSeconds, frameAt);
     updateLocalRenderState(deltaSeconds);
-    updateCamera();
+    updateCamera(deltaSeconds);
     updateFallbackVisuals();
     drawBackground();
 
