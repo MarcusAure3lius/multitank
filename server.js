@@ -4438,6 +4438,10 @@ function getConnectedHumanMatchPlayers(room) {
   return getConnectedMatchPlayers(room).filter(isHumanPlayer);
 }
 
+function isSoloBotDuelRoom(room) {
+  return getConnectedHumanMatchPlayers(room).length === 1 && getBotPlayers(room).length > 0;
+}
+
 function getRecoverableDisconnectedHumanPlayers(room, now) {
   return getRecoverableDisconnectedPlayers(room, now).filter(isHumanPlayer);
 }
@@ -8043,8 +8047,10 @@ function findBotFlankGoal(player, target) {
 }
 
 function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfSight) {
+  const objectivePlayEnabled = !isSoloBotDuelRoom(room);
   const shouldCaptureObjective =
-    !room.objective.ownerId || room.objective.ownerId !== player.id || room.objective.contested;
+    objectivePlayEnabled &&
+    (!room.objective.ownerId || room.objective.ownerId !== player.id || room.objective.contested);
 
   if (target && targetDistance < GAME_CONFIG.ai.preferredRange * 0.55) {
     return {
@@ -8083,7 +8089,7 @@ function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfS
 
   return {
     intent: BOT_AI_INTENTS.IDLE,
-    goal: { x: GAME_CONFIG.objective.x, y: GAME_CONFIG.objective.y }
+    goal: objectivePlayEnabled ? { x: GAME_CONFIG.objective.x, y: GAME_CONFIG.objective.y } : { x: player.x, y: player.y }
   };
 }
 
@@ -8246,6 +8252,11 @@ function movePlayerWithCollision(player, distance) {
 
 function updateObjective(room, deltaSeconds, now) {
   if (!isCombatPhase(room.match.phase)) {
+    return;
+  }
+
+  if (isSoloBotDuelRoom(room)) {
+    resetObjectiveState(room);
     return;
   }
 

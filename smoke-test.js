@@ -952,8 +952,32 @@ try {
     throw new Error("Expected a solo room with a bot to publish both combatants in the leaderboard");
   }
 
+  const soloIdleCheckStartedAt = Date.now();
+  const soloIdleState = await waitForState(
+    solo,
+    (payload) => {
+      if (Date.now() - soloIdleCheckStartedAt < 5500) {
+        return false;
+      }
+
+      const idleSoloPlayer = getPlayerState(payload, soloJoined.playerId);
+      const idleEnemyBot = (payload.players ?? []).find((player) => player.isBot);
+      return (
+        payload.match?.phase === MATCH_PHASES.IN_PROGRESS &&
+        idleSoloPlayer?.hp === GAME_CONFIG.tank.hitPoints &&
+        idleEnemyBot?.score === 0
+      );
+    },
+    "solo bot idle no objective reset"
+  );
+
+  const soloIdlePlayer = getPlayerState(soloIdleState, soloJoined.playerId);
+  if (!soloIdlePlayer) {
+    throw new Error("Expected an authoritative local player state while validating idle solo bot flow");
+  }
+
   let soloInputSeq = 1;
-  const soloMoveInput = findClearMovementInput(soloLivePlayer);
+  const soloMoveInput = findClearMovementInput(soloIdlePlayer);
   const soloMoveSeqStart = soloInputSeq;
   for (let attempt = 0; attempt < 4; attempt += 1) {
     sendInput(solo, {
@@ -977,7 +1001,7 @@ try {
       return (
         payload.you?.lastProcessedInputSeq >= soloMoveSeqEnd &&
         Boolean(movedSoloPlayer) &&
-        Math.hypot(movedSoloPlayer.x - soloLivePlayer.x, movedSoloPlayer.y - soloLivePlayer.y) >= 6
+        Math.hypot(movedSoloPlayer.x - soloIdlePlayer.x, movedSoloPlayer.y - soloIdlePlayer.y) >= 6
       );
     },
     "solo bot movement state"
