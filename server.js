@@ -4454,6 +4454,19 @@ function shouldAutoRestartRound(room) {
   return GAME_CONFIG.match.autoRestartRound && !isRoomContinuousMode(room);
 }
 
+function applyRoomSpawnProtection(room, player, now = Date.now()) {
+  if (!player) {
+    return;
+  }
+
+  if (isSoloBotDuelRoom(room)) {
+    player.spawnProtectedUntil = now;
+    return;
+  }
+
+  grantSpawnProtection(player, now);
+}
+
 function getRecoverableDisconnectedHumanPlayers(room, now) {
   return getRecoverableDisconnectedPlayers(room, now).filter(isHumanPlayer);
 }
@@ -6890,7 +6903,7 @@ function resetPlayerForRound(room, player) {
   player.alive = true;
   player.nextAiThinkAt = 0;
   player.respawnAt = 0;
-  grantSpawnProtection(player, now);
+  applyRoomSpawnProtection(room, player, now);
   player.lastShotAt = 0;
   player.lastProcessedInputTick = 0;
   player.lastProcessedInputClientSentAt = 0;
@@ -6961,7 +6974,7 @@ function clearRoomCombatState(room) {
     player.alive = true;
     player.nextAiThinkAt = 0;
     player.respawnAt = 0;
-    grantSpawnProtection(player, now);
+    applyRoomSpawnProtection(room, player, now);
     player.lastShotAt = 0;
     player.lastProcessedInputTick = 0;
     player.lastProcessedInputClientSentAt = 0;
@@ -8059,12 +8072,13 @@ function findBotFlankGoal(player, target) {
 }
 
 function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfSight) {
+  const soloBotDuel = isSoloBotDuelRoom(room);
   const objectivePlayEnabled = !isSoloBotDuelRoom(room);
   const shouldCaptureObjective =
     objectivePlayEnabled &&
     (!room.objective.ownerId || room.objective.ownerId !== player.id || room.objective.contested);
 
-  if (target && targetDistance < GAME_CONFIG.ai.preferredRange * 0.55) {
+  if (!soloBotDuel && target && targetDistance < GAME_CONFIG.ai.preferredRange * 0.55) {
     return {
       intent: BOT_AI_INTENTS.RETREAT,
       goal: findBotRetreatGoal(player, target) ?? { x: GAME_CONFIG.objective.x, y: GAME_CONFIG.objective.y }
@@ -8078,7 +8092,7 @@ function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfS
     };
   }
 
-  if (target && targetDistance > GAME_CONFIG.ai.preferredRange) {
+  if (target && targetDistance > (soloBotDuel ? GAME_CONFIG.ai.shootRange * 0.85 : GAME_CONFIG.ai.preferredRange)) {
     return {
       intent: BOT_AI_INTENTS.ENGAGE,
       goal: { x: target.x, y: target.y }
@@ -8095,7 +8109,7 @@ function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfS
   if (target) {
     return {
       intent: BOT_AI_INTENTS.ENGAGE,
-      goal: { x: target.x, y: target.y }
+      goal: soloBotDuel && hasLineOfSight ? { x: player.x, y: player.y } : { x: target.x, y: target.y }
     };
   }
 
@@ -8669,7 +8683,7 @@ function updatePlayer(room, player, deltaSeconds, now) {
       player.hp = GAME_CONFIG.tank.hitPoints;
       normalizePlayerInventory(player);
       player.alive = true;
-      grantSpawnProtection(player, now);
+      applyRoomSpawnProtection(room, player, now);
       player.credits += GAME_CONFIG.economy.respawnCredits;
       player.combat = createPlayerCombatState(player, now);
       clearCombatContributors(player);
