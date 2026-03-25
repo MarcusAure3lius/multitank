@@ -8200,6 +8200,7 @@ function updateBotInputs(room, player, now) {
   player.nextAiThinkAt = Math.max(player.nextAiThinkAt + thinkIntervalMs, now + Math.round(thinkIntervalMs * 0.75));
 
   const ai = player.ai;
+  const soloBotDuel = isSoloBotDuelRoom(room);
   const target = selectBotTarget(room, player, now);
   const targetDistance = target ? Math.hypot(target.x - player.x, target.y - player.y) : Infinity;
   const hasLineOfSight = target
@@ -8245,12 +8246,14 @@ function updateBotInputs(room, player, now) {
   const turretTarget = target ?? { x: GAME_CONFIG.objective.x, y: GAME_CONFIG.objective.y };
   player.input.turretAngle = Math.atan2(turretTarget.y - player.y, turretTarget.x - player.x);
   const aimDelta = normalizeAngle(player.input.turretAngle - player.turretAngle);
+  const shootAimTolerance = soloBotDuel ? Math.max(GAME_CONFIG.ai.aimToleranceRadians, 1.05) : GAME_CONFIG.ai.aimToleranceRadians;
+  const canShootAtRange = soloBotDuel || targetDistance <= GAME_CONFIG.ai.shootRange;
 
   player.input.shoot =
     Boolean(target) &&
-    targetDistance <= GAME_CONFIG.ai.shootRange &&
+    canShootAtRange &&
     hasLineOfSight &&
-    Math.abs(aimDelta) <= GAME_CONFIG.ai.aimToleranceRadians &&
+    Math.abs(aimDelta) <= shootAimTolerance &&
     !ai.stuck;
 }
 
