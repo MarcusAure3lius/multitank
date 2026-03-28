@@ -12,6 +12,8 @@ import {
   STATUS_EFFECTS,
   VFX_CUES,
   deserializePacket,
+  getTeamConfig,
+  getTeamSpawnZone,
   normalizeAngle,
   serializePacket
 } from "/shared/protocol.js";
@@ -1667,7 +1669,7 @@ function refreshLobbyUi(localPlayer = getLocalPlayer(), you = latestYou) {
     }
 
     const item = document.createElement("li");
-    item.innerHTML = `<div class="results-title">${escapeHtml(player.name)}</div><div class="results-meta">${escapeHtml(player.teamId)} / ${escapeHtml(player.classId)} | ${player.score} score | ${player.assists ?? 0} assists | ${player.deaths} deaths | ${player.credits} credits${player.ready ? " | ready" : ""}</div>`;
+    item.innerHTML = `<div class="results-title">${escapeHtml(player.name)}</div><div class="results-meta">${escapeHtml(getTeamName(player.teamId))} / ${escapeHtml(player.classId)} | ${player.score} score | ${player.assists ?? 0} assists | ${player.deaths} deaths | ${player.credits} credits${player.ready ? " | ready" : ""}</div>`;
     resultsListElement.append(item);
   }
 }
@@ -2391,7 +2393,7 @@ function applySnapshot(payload) {
     }
 
     playerLabelElement.textContent =
-      `${localPlayer.name}${localPlayer.isSpectator ? " [SPEC]" : ""} (HP ${localPlayer.hp}/${GAME_CONFIG.tank.hitPoints} | ${localPlayer.teamId}/${localPlayer.classId} | ${localPlayer.score}/${localPlayer.assists ?? 0}/${localPlayer.deaths} | ${localPlayer.credits} cr)`;
+      `${localPlayer.name}${localPlayer.isSpectator ? " [SPEC]" : ""} (HP ${localPlayer.hp}/${GAME_CONFIG.tank.hitPoints} | ${getTeamName(localPlayer.teamId)}/${localPlayer.classId} | ${localPlayer.score}/${localPlayer.assists ?? 0}/${localPlayer.deaths} | ${localPlayer.credits} cr)`;
 
     if (payload.you) {
       refreshSessionUi(localPlayer, payload.you);
@@ -2421,7 +2423,7 @@ function applySnapshot(payload) {
   scoreboardElement.innerHTML = "";
   for (const player of payload.leaderboard ?? []) {
     const item = document.createElement("li");
-    item.innerHTML = `<strong>${player.name}${player.isBot ? " [BOT]" : ""}${player.isSpectator ? " [SPEC]" : ""}</strong><span>${player.teamId} / ${player.classId} | ${player.score} / ${player.assists ?? 0} / ${player.deaths} | ${player.credits}cr${player.ready ? " / ready" : ""}${player.afk ? " / afk" : ""}${player.slotReserved ? " / reserved" : ""}${player.queuedForSlot ? " / queued" : ""}${player.connected ? "" : " / dc"}</span>`;
+    item.innerHTML = `<strong>${player.name}${player.isBot ? " [BOT]" : ""}${player.isSpectator ? " [SPEC]" : ""}</strong><span>${getTeamName(player.teamId)} / ${player.classId} | ${player.score} / ${player.assists ?? 0} / ${player.deaths} | ${player.credits}cr${player.ready ? " / ready" : ""}${player.afk ? " / afk" : ""}${player.slotReserved ? " / reserved" : ""}${player.queuedForSlot ? " / queued" : ""}${player.connected ? "" : " / dc"}</span>`;
     scoreboardElement.append(item);
   }
 }
@@ -3040,6 +3042,18 @@ function drawBackground() {
 function drawMapSquare() {
   context.fillStyle = "#f3f7ff";
   context.fillRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
+
+  for (const team of GAME_CONFIG.lobby.teams) {
+    const zone = getTeamSpawnZone(team.id);
+    context.fillStyle = zone.zoneColor;
+    context.fillRect(
+      zone.spawnSide === "left" ? 0 : zone.left,
+      0,
+      zone.spawnSide === "left" ? zone.right : GAME_CONFIG.world.width - zone.left,
+      GAME_CONFIG.world.height
+    );
+  }
+
   context.lineWidth = 18 / cameraZoom;
   context.strokeStyle = "#1f3f7a";
   context.strokeRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
@@ -3152,6 +3166,10 @@ function getTankRenderPose(player) {
   };
 }
 
+function getTeamName(teamId) {
+  return getTeamConfig(teamId)?.name ?? (typeof teamId === "string" && teamId ? teamId : "Team");
+}
+
 function drawTank(player) {
   if (!player || player.isSpectator || !player.alive) {
     return;
@@ -3168,7 +3186,7 @@ function drawTank(player) {
   const barrelHalfWidth = 6;
   const barrelLength = bodyRadius + 28 - Math.min(8, (player.predictedRecoil ?? 0) * 8);
   const isLocalPlayer = player.id === localPlayerId;
-  const bodyColor = isLocalPlayer ? "#2563eb" : (player.color ?? "#ff4d00");
+  const bodyColor = player.color ?? getTeamConfig(player.teamId)?.color ?? "#ff4d00";
   const alpha = player.connected === false ? 0.42 : 1;
 
   context.save();

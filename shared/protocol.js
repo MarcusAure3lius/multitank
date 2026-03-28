@@ -162,6 +162,7 @@ export const GAME_CONFIG = Object.freeze({
     width: 9600,
     height: 5400,
     padding: 80,
+    teamZoneWidth: 1760,
     obstacles: Object.freeze([])
   }),
   objective: Object.freeze({
@@ -249,8 +250,20 @@ export const GAME_CONFIG = Object.freeze({
       Object.freeze({ id: "citadel", name: "Citadel", summary: "Tighter lanes for close fights" })
     ]),
     teams: Object.freeze([
-      Object.freeze({ id: "alpha", name: "Alpha" }),
-      Object.freeze({ id: "bravo", name: "Bravo" })
+      Object.freeze({
+        id: "alpha",
+        name: "Blue Team",
+        color: "#2563eb",
+        zoneColor: "rgba(37, 99, 235, 0.16)",
+        spawnSide: "left"
+      }),
+      Object.freeze({
+        id: "bravo",
+        name: "Red Team",
+        color: "#dc2626",
+        zoneColor: "rgba(220, 38, 38, 0.16)",
+        spawnSide: "right"
+      })
     ]),
     classes: Object.freeze([
       Object.freeze({ id: "striker", name: "Striker", summary: "Balanced all-round tank" }),
@@ -320,6 +333,40 @@ export const GAME_CONFIG = Object.freeze({
 
 export function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+export function getTeamConfig(teamId) {
+  return GAME_CONFIG.lobby.teams.find((team) => team.id === teamId) ?? GAME_CONFIG.lobby.teams[0] ?? null;
+}
+
+export function getTeamSpawnZone(teamId) {
+  const team = getTeamConfig(teamId);
+  const { width, height, padding, teamZoneWidth } = GAME_CONFIG.world;
+  const usableWidth = Math.max(0, width - padding * 2);
+  const usableHeight = Math.max(0, height - padding * 2);
+  const resolvedZoneWidth = clamp(
+    Number.isFinite(Number(teamZoneWidth)) ? Number(teamZoneWidth) : usableWidth / 4,
+    GAME_CONFIG.tank.radius * 6,
+    Math.max(GAME_CONFIG.tank.radius * 6, usableWidth / 2)
+  );
+  const spawnSide = team?.spawnSide === "right" ? "right" : "left";
+  const left = spawnSide === "left" ? padding : width - padding - resolvedZoneWidth;
+
+  return {
+    teamId: team?.id ?? GAME_CONFIG.lobby.teams[0]?.id ?? "alpha",
+    name: team?.name ?? "Blue Team",
+    color: team?.color ?? "#2563eb",
+    zoneColor: team?.zoneColor ?? "rgba(37, 99, 235, 0.16)",
+    spawnSide,
+    left,
+    right: left + resolvedZoneWidth,
+    top: padding,
+    bottom: height - padding,
+    width: resolvedZoneWidth,
+    height: usableHeight,
+    centerX: left + resolvedZoneWidth / 2,
+    centerY: padding + usableHeight / 2
+  };
 }
 
 export function createNetworkId(kind, id) {

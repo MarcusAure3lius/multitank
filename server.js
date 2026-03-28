@@ -40,6 +40,8 @@ import {
   createSpawnEvent,
   createStatePayload,
   deserializePacket,
+  getTeamConfig,
+  getTeamSpawnZone,
   normalizeAngle,
   sanitizeAuthToken,
   sanitizeMessageId,
@@ -849,29 +851,21 @@ function updateBotProgressState(player, now) {
 }
 
 function getSpawnAnchorCandidates(teamId) {
-  const primaryTeamId = GAME_CONFIG.lobby.teams[0]?.id ?? "alpha";
-  const direction = teamId === primaryTeamId ? -1 : 1;
+  const zone = getTeamSpawnZone(teamId);
+  const xFractions = zone.spawnSide === "left" ? [0.3, 0.5, 0.7] : [0.7, 0.5, 0.3];
+  const yFractions = [0.14, 0.32, 0.5, 0.68, 0.86];
+  const anchors = [];
 
-  return [
-    {
-      x: GAME_CONFIG.objective.x + direction * 1420,
-      y: GAME_CONFIG.objective.y,
-      radiusX: 120,
-      radiusY: 200
-    },
-    {
-      x: GAME_CONFIG.objective.x + direction * 1320,
-      y: GAME_CONFIG.objective.y - 340,
-      radiusX: 100,
-      radiusY: 130
-    },
-    {
-      x: GAME_CONFIG.objective.x + direction * 1320,
-      y: GAME_CONFIG.objective.y + 340,
-      radiusX: 100,
-      radiusY: 130
+  for (const yFraction of yFractions) {
+    for (const xFraction of xFractions) {
+      anchors.push({
+        x: zone.left + zone.width * xFraction,
+        y: zone.top + zone.height * yFraction
+      });
     }
-  ];
+  }
+
+  return anchors;
 }
 
 function buildSpawnSlotCandidates(teamId, spawnKey = "") {
@@ -988,15 +982,16 @@ function createSpawnPoint(room = null, options = {}) {
   const minDistanceToPlayers = Number.isFinite(Number(options.minDistanceToPlayers))
     ? Number(options.minDistanceToPlayers)
     : null;
-  const { width, height, padding } = GAME_CONFIG.world;
+  const spawnZone = getTeamSpawnZone(teamId);
+  const { padding } = GAME_CONFIG.world;
   const spawnSlotCandidates = buildSpawnSlotCandidates(teamId, spawnKey);
 
   for (const candidate of spawnSlotCandidates) {
     if (
-      candidate.x < padding ||
-      candidate.x > width - padding ||
-      candidate.y < padding ||
-      candidate.y > height - padding
+      candidate.x < spawnZone.left ||
+      candidate.x > spawnZone.right ||
+      candidate.y < spawnZone.top ||
+      candidate.y > spawnZone.bottom
     ) {
       continue;
     }
@@ -1008,30 +1003,10 @@ function createSpawnPoint(room = null, options = {}) {
 
   const fallbackRng = createSeededRng(hashSeed(`${room?.id ?? "room"}:${teamId}:${spawnKey}:spawn`));
 
-  for (let attempt = 0; attempt < 48; attempt += 1) {
+  for (let attempt = 0; attempt < 96; attempt += 1) {
     const candidate = {
-      x: GAME_CONFIG.objective.x + (fallbackRng.nextFloat() * 2 - 1) * 1500,
-      y: GAME_CONFIG.objective.y + (fallbackRng.nextFloat() * 2 - 1) * 1050
-    };
-
-    if (
-      candidate.x < padding ||
-      candidate.x > width - padding ||
-      candidate.y < padding ||
-      candidate.y > height - padding
-    ) {
-      continue;
-    }
-
-    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer, minDistanceToPlayers })) {
-      return candidate;
-    }
-  }
-
-  for (let attempt = 0; attempt < 48; attempt += 1) {
-    const candidate = {
-      x: padding + fallbackRng.nextFloat() * (width - padding * 2),
-      y: padding + fallbackRng.nextFloat() * (height - padding * 2)
+      x: spawnZone.left + fallbackRng.nextFloat() * spawnZone.width,
+      y: spawnZone.top + fallbackRng.nextFloat() * spawnZone.height
     };
 
     if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer, minDistanceToPlayers })) {
@@ -1040,18 +1015,26 @@ function createSpawnPoint(room = null, options = {}) {
   }
 
   const fallbackPoints = [
-    { x: padding + 60, y: padding + 60 },
-    { x: width - padding - 60, y: padding + 60 },
-    { x: padding + 60, y: height - padding - 60 },
-    { x: width - padding - 60, y: height - padding - 60 }
+    {
+      x: spawnZone.left + Math.min(spawnZone.width - padding, spawnZone.width * 0.22),
+      y: spawnZone.top + spawnZone.height * 0.2
+    },
+    {
+      x: spawnZone.centerX,
+      y: spawnZone.centerY
+    },
+    {
+      x: spawnZone.right - Math.min(spawnZone.width - padding, spawnZone.width * 0.22),
+      y: spawnZone.top + spawnZone.height * 0.8
+    }
   ];
 
   return (
     fallbackPoints.find((candidate) =>
       isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer, minDistanceToPlayers })
     ) ?? {
-      x: padding + 60,
-      y: padding + 60
+      x: spawnZone.centerX,
+      y: spawnZone.centerY
     }
   );
 }
@@ -1099,6 +1082,20 @@ function assignPlayerHomeSpawn(room, player, options = {}) {
   }
 
   return cloneSpawnPoint(homeSpawn, teamId);
+}
+
+function applyPlayerTeamIdentity(player) {
+  if (!player) {
+    return;
+  }
+
+  const teamConfig = getTeamConfig(player.teamId);
+  if (!teamConfig) {
+    return;
+  }
+
+  player.teamId = teamConfig.id;
+  player.color = teamConfig.color ?? player.color ?? "#2563eb";
 }
 
 function getStableSpawnPoint(room, player, options = {}) {
@@ -1493,11 +1490,11 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
   const normalizedTeamId = isValidLobbyOptionId(teamId, GAME_CONFIG.lobby.teams)
     ? teamId
     : GAME_CONFIG.lobby.teams[0].id;
+  const teamConfig = getTeamConfig(normalizedTeamId);
   const spawn = createSpawnPoint(room, {
     teamId: normalizedTeamId,
     spawnKey: id
   });
-  const palette = ["#f25f5c", "#247ba0", "#70c1b3", "#f7b267", "#ffe066", "#7f5af0"];
   const now = Date.now();
   const botAiState = isBot ? createBotAiState(id, now) : null;
 
@@ -1506,7 +1503,7 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     profileId,
     sessionId,
     name,
-    color: typeof color === "string" && color ? color : randomChoice(palette, room),
+    color: typeof color === "string" && color ? color : (teamConfig?.color ?? "#2563eb"),
     x: spawn.x,
     y: spawn.y,
     angle: 0,
@@ -1619,7 +1616,7 @@ function syncBotLoadout(bot, anchorPlayer, now) {
     bot.homeSpawn = null;
   }
 
-  bot.color = "#dc2626";
+  applyPlayerTeamIdentity(bot);
   bot.hp = clamp(
     Number.isFinite(Number(bot.hp)) ? Number(bot.hp) : GAME_CONFIG.tank.hitPoints,
     0,
@@ -1636,10 +1633,11 @@ function createBotState(room, anchorPlayer = null, now = Date.now()) {
   const botClassId = isValidLobbyOptionId(anchorPlayer?.classId, GAME_CONFIG.lobby.classes)
     ? anchorPlayer.classId
     : GAME_CONFIG.lobby.classes[0].id;
+  const botTeamConfig = getTeamConfig(botTeamId);
   return createPlayerState(`bot-${room.id}-${botNumber}`, profileId, name, sanitizeStats(), {
     isBot: true,
     room,
-    color: "#dc2626",
+    color: botTeamConfig?.color ?? "#dc2626",
     teamId: botTeamId,
     classId: botClassId,
     joinedRoomAt: now
@@ -4417,6 +4415,12 @@ function ensurePlayerLobbySelections(room, player) {
   if (!isValidLobbyOptionId(player.classId, GAME_CONFIG.lobby.classes)) {
     player.classId = GAME_CONFIG.lobby.classes[0].id;
   }
+
+  if (player.homeSpawn?.teamId !== player.teamId) {
+    player.homeSpawn = null;
+  }
+
+  applyPlayerTeamIdentity(player);
 }
 
 function getConnectedMatchPlayers(room) {
@@ -7855,6 +7859,8 @@ function handleLobby(socket, payload) {
         player.homeSpawn = null;
       }
       player.teamId = payload.teamId;
+      ensurePlayerLobbySelections(room, player);
+      syncRoomBots(room, now);
       return;
     case "class":
       if (!isValidLobbyOptionId(payload.classId, GAME_CONFIG.lobby.classes)) {
