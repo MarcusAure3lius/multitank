@@ -1955,6 +1955,10 @@ function spawnPredictedProjectile(localPlayer, inputFrame) {
     angle: inputFrame.turretAngle,
     renderX: muzzleX,
     renderY: muzzleY,
+    previousRenderX: muzzleX,
+    previousRenderY: muzzleY,
+    renderAngle: inputFrame.turretAngle,
+    renderSpeed: GAME_CONFIG.bullet.speed,
     bornAt: now,
     expiresAt: now + Math.min(450, GAME_CONFIG.bullet.lifeMs)
   });
@@ -2250,10 +2254,14 @@ function simulatePredictedProjectiles(deltaSeconds) {
   const now = performance.now();
 
   for (const projectile of Array.from(predictedProjectiles.values())) {
+    projectile.previousRenderX = projectile.renderX ?? projectile.x;
+    projectile.previousRenderY = projectile.renderY ?? projectile.y;
     projectile.x += Math.cos(projectile.angle) * GAME_CONFIG.bullet.speed * deltaSeconds;
     projectile.y += Math.sin(projectile.angle) * GAME_CONFIG.bullet.speed * deltaSeconds;
     projectile.renderX = projectile.x;
     projectile.renderY = projectile.y;
+    projectile.renderAngle = projectile.angle;
+    projectile.renderSpeed = GAME_CONFIG.bullet.speed;
 
     if (
       now >= projectile.expiresAt ||
@@ -2994,25 +3002,30 @@ function updateRenderState(deltaSeconds, frameAt) {
     const sample = sampleNetworkHistory(bullet, "bullet", renderServerTime) ?? {
       x: bullet.x,
       y: bullet.y,
-      angle: bullet.angle
+      angle: bullet.angle,
+      speed: GAME_CONFIG.bullet.speed
     };
     const currentBulletX = bullet.renderX ?? bullet.x;
     const currentBulletY = bullet.renderY ?? bullet.y;
     const dx = sample.x - currentBulletX;
     const dy = sample.y - currentBulletY;
+    const bulletFollowAmount = 0.82;
     const shouldSnap =
       (bullet.teleportFrames ?? 0) > 0 ||
       dx * dx + dy * dy > NETWORK_RENDER.snapDistance * NETWORK_RENDER.snapDistance;
 
+    bullet.previousRenderX = currentBulletX;
+    bullet.previousRenderY = currentBulletY;
     if (shouldSnap) {
       bullet.renderX = sample.x;
       bullet.renderY = sample.y;
       bullet.renderAngle = sample.angle;
     } else {
-      bullet.renderX = lerp(currentBulletX, sample.x, 0.55);
-      bullet.renderY = lerp(currentBulletY, sample.y, 0.55);
-      bullet.renderAngle = lerpAngle(bullet.renderAngle ?? bullet.angle, sample.angle, 0.55);
+      bullet.renderX = lerp(currentBulletX, sample.x, bulletFollowAmount);
+      bullet.renderY = lerp(currentBulletY, sample.y, bulletFollowAmount);
+      bullet.renderAngle = lerpAngle(bullet.renderAngle ?? bullet.angle, sample.angle, bulletFollowAmount);
     }
+    bullet.renderSpeed = sample.speed ?? GAME_CONFIG.bullet.speed;
 
     bullet.teleportFrames = Math.max(0, (bullet.teleportFrames ?? 0) - 1);
   }
@@ -3205,23 +3218,69 @@ function drawTank(player) {
   context.restore();
 }
 
-function drawBullet(bullet) {
+function getProjectileTrailLength(projectile) {
+  const previousX = projectile.previousRenderX ?? projectile.renderX ?? projectile.x ?? 0;
+  const previousY = projectile.previousRenderY ?? projectile.renderY ?? projectile.y ?? 0;
+  const currentX = projectile.renderX ?? projectile.x ?? 0;
+  const currentY = projectile.renderY ?? projectile.y ?? 0;
+  const distanceMoved = Math.hypot(currentX - previousX, currentY - previousY);
+  const speedLength = (projectile.renderSpeed ?? GAME_CONFIG.bullet.speed) * 0.028;
+  return clamp(
+    Math.max(distanceMoved * 1.9, speedLength, GAME_CONFIG.bullet.radius * 2.4),
+    GAME_CONFIG.bullet.radius * 2.4,
+    GAME_CONFIG.bullet.radius * 5.6
+  );
+}
+
+function drawProjectile(projectile, options = {}) {
+  if (!projectile) {
+    return;
+  }
+
+  const {
+    alpha = 1,
+    headColor = "rgba(17, 17, 17, 0.98)",
+    tailColor = "rgba(17, 17, 17, 0.08)"
+  } = options;
+  const x = projectile.renderX ?? projectile.x;
+  const y = projectile.renderY ?? projectile.y;
+  const angle = projectile.renderAngle ?? projectile.angle ?? 0;
+  const trailLength = getProjectileTrailLength(projectile);
+  const tailX = x - Math.cos(angle) * trailLength;
+  const tailY = y - Math.sin(angle) * trailLength;
+  const gradient = context.createLinearGradient(tailX, tailY, x, y);
+  const strokeWidth = GAME_CONFIG.bullet.radius * 1.08;
+
+  gradient.addColorStop(0, tailColor);
+  gradient.addColorStop(0.62, "rgba(17, 17, 17, 0.45)");
+  gradient.addColorStop(1, headColor);
+
   context.save();
-  context.fillStyle = "#111111";
+  context.globalAlpha = alpha;
+  context.lineCap = "round";
+  context.lineWidth = strokeWidth;
+  context.strokeStyle = gradient;
   context.beginPath();
-  context.arc(bullet.renderX, bullet.renderY, GAME_CONFIG.bullet.radius, 0, Math.PI * 2);
+  context.moveTo(tailX, tailY);
+  context.lineTo(x, y);
+  context.stroke();
+  context.fillStyle = headColor;
+  context.beginPath();
+  context.arc(x, y, GAME_CONFIG.bullet.radius * 0.56, 0, Math.PI * 2);
   context.fill();
   context.restore();
 }
 
+function drawBullet(bullet) {
+  drawProjectile(bullet);
+}
+
 function drawPredictedProjectile(projectile) {
-  context.save();
-  context.globalAlpha = 0.45;
-  context.fillStyle = "#111111";
-  context.beginPath();
-  context.arc(projectile.renderX, projectile.renderY, GAME_CONFIG.bullet.radius, 0, Math.PI * 2);
-  context.fill();
-  context.restore();
+  drawProjectile(projectile, {
+    alpha: 0.52,
+    headColor: "rgba(17, 17, 17, 0.86)",
+    tailColor: "rgba(17, 17, 17, 0.04)"
+  });
 }
 
 function drawCombatEffects() {
