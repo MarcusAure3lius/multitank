@@ -254,14 +254,14 @@ export const GAME_CONFIG = Object.freeze({
         id: "alpha",
         name: "Blue Team",
         color: "#2563eb",
-        zoneColor: "rgba(37, 99, 235, 0.16)",
+        zoneColor: "rgba(37, 99, 235, 0.28)",
         spawnSide: "left"
       }),
       Object.freeze({
         id: "bravo",
         name: "Red Team",
         color: "#dc2626",
-        zoneColor: "rgba(220, 38, 38, 0.16)",
+        zoneColor: "rgba(220, 38, 38, 0.28)",
         spawnSide: "right"
       })
     ]),
