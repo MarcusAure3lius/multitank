@@ -300,7 +300,8 @@ export const GAME_CONFIG = Object.freeze({
   }),
   ai: Object.freeze({
     fillToMinPlayers: false,
-    maxBotsPerRoom: 1,
+    botsPerTeam: 2,
+    maxBotsPerRoom: 4,
     thinkRate: 10,
     preferredRange: 300,
     shootRange: 520,
@@ -632,7 +633,8 @@ export function createRoundSnapshot(match, roundNumber = 0) {
     roundNumber: Math.max(0, readInteger(roundNumber ?? match?.roundNumber, 0)),
     message: sanitizeText(match?.message ?? "Waiting for players", "Waiting for players", 96),
     minPlayers: Math.max(1, readInteger(match?.minPlayers ?? GAME_CONFIG.match.minPlayers, GAME_CONFIG.match.minPlayers)),
-    scoreToWin: Math.max(1, readInteger(match?.scoreToWin ?? GAME_CONFIG.match.scoreToWin, GAME_CONFIG.match.scoreToWin))
+    scoreToWin: Math.max(1, readInteger(match?.scoreToWin ?? GAME_CONFIG.match.scoreToWin, GAME_CONFIG.match.scoreToWin)),
+    respawnsEnabled: readBoolean(match?.respawnsEnabled, false)
   };
 }
 

@@ -1581,36 +1581,53 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
   };
 }
 
-function getPreferredBotAnchorPlayer(room) {
-  return Array.from(room?.players.values() ?? [])
-    .filter((player) => !player.isBot && !player.isSpectator)
-    .sort((left, right) => left.joinedRoomAt - right.joinedRoomAt || left.name.localeCompare(right.name))[0] ?? null;
+function getBotAssignmentKey(teamId, slotIndex) {
+  return `${teamId}:${slotIndex}`;
 }
 
-function getOpposingTeamId(teamId) {
-  const fallbackTeamId = GAME_CONFIG.lobby.teams[0]?.id ?? "alpha";
-  if (!isValidLobbyOptionId(teamId, GAME_CONFIG.lobby.teams)) {
-    return fallbackTeamId;
+function getBotTeamLabel(teamId) {
+  const rawLabel = getTeamConfig(teamId)?.name ?? teamId ?? "Team";
+  const compactLabel = rawLabel.replace(/\s+team$/i, "").trim();
+  return compactLabel || "Team";
+}
+
+function getBotClassIdForSlot(slotIndex) {
+  const classes = GAME_CONFIG.lobby.classes;
+  if (classes.length === 0) {
+    return "striker";
   }
 
-  return GAME_CONFIG.lobby.teams.find((team) => team.id !== teamId)?.id ?? fallbackTeamId;
+  const normalizedSlotIndex = Number.isFinite(Number(slotIndex)) ? Math.max(0, Math.floor(Number(slotIndex))) : 0;
+  return classes[normalizedSlotIndex % classes.length].id;
 }
 
-function syncBotLoadout(bot, anchorPlayer, now) {
+function getBotIdentity(teamId, slotIndex) {
+  const normalizedTeamId = isValidLobbyOptionId(teamId, GAME_CONFIG.lobby.teams)
+    ? teamId
+    : GAME_CONFIG.lobby.teams[0]?.id ?? "alpha";
+  const normalizedSlotIndex = Number.isFinite(Number(slotIndex)) ? Math.max(0, Math.floor(Number(slotIndex))) : 0;
+  return {
+    key: getBotAssignmentKey(normalizedTeamId, normalizedSlotIndex),
+    teamId: normalizedTeamId,
+    slotIndex: normalizedSlotIndex,
+    classId: getBotClassIdForSlot(normalizedSlotIndex),
+    name: sanitizePlayerName(`${getBotTeamLabel(normalizedTeamId)} Bot ${normalizedSlotIndex + 1}`)
+  };
+}
+
+function syncBotLoadout(bot, now) {
   if (!bot || !bot.isBot) {
     return;
   }
 
+  const identity = getBotIdentity(bot.botTeamId ?? bot.teamId, bot.botSlotIndex ?? 0);
   const previousTeamId = bot.teamId;
-  if (anchorPlayer) {
-    bot.teamId = getOpposingTeamId(anchorPlayer.teamId);
-    bot.classId = isValidLobbyOptionId(anchorPlayer.classId, GAME_CONFIG.lobby.classes)
-      ? anchorPlayer.classId
-      : GAME_CONFIG.lobby.classes[0].id;
-  } else {
-    bot.teamId = getOpposingTeamId(bot.teamId);
-    bot.classId = GAME_CONFIG.lobby.classes[0].id;
-  }
+  bot.botKey = identity.key;
+  bot.botTeamId = identity.teamId;
+  bot.botSlotIndex = identity.slotIndex;
+  bot.name = identity.name;
+  bot.teamId = identity.teamId;
+  bot.classId = identity.classId;
 
   if (previousTeamId !== bot.teamId) {
     bot.homeSpawn = null;
@@ -1625,23 +1642,23 @@ function syncBotLoadout(bot, anchorPlayer, now) {
   syncPlayerCombatProfile(bot, now);
 }
 
-function createBotState(room, anchorPlayer = null, now = Date.now()) {
+function createBotState(room, teamId, slotIndex, now = Date.now()) {
   const botNumber = room.nextBotId++;
   const profileId = `bot-${room.id}-${botNumber}`;
-  const name = botNumber === 1 ? "Enemy Bot" : `Enemy Bot ${botNumber}`;
-  const botTeamId = getOpposingTeamId(anchorPlayer?.teamId ?? GAME_CONFIG.lobby.teams[0]?.id);
-  const botClassId = isValidLobbyOptionId(anchorPlayer?.classId, GAME_CONFIG.lobby.classes)
-    ? anchorPlayer.classId
-    : GAME_CONFIG.lobby.classes[0].id;
-  const botTeamConfig = getTeamConfig(botTeamId);
-  return createPlayerState(`bot-${room.id}-${botNumber}`, profileId, name, sanitizeStats(), {
+  const identity = getBotIdentity(teamId, slotIndex);
+  const botTeamConfig = getTeamConfig(identity.teamId);
+  const bot = createPlayerState(`bot-${room.id}-${botNumber}`, profileId, identity.name, sanitizeStats(), {
     isBot: true,
     room,
     color: botTeamConfig?.color ?? "#dc2626",
-    teamId: botTeamId,
-    classId: botClassId,
+    teamId: identity.teamId,
+    classId: identity.classId,
     joinedRoomAt: now
   });
+  bot.botKey = identity.key;
+  bot.botTeamId = identity.teamId;
+  bot.botSlotIndex = identity.slotIndex;
+  return bot;
 }
 
 function createRoom(roomId) {
@@ -4453,8 +4470,12 @@ function getConnectedHumanMatchPlayers(room) {
   return getConnectedMatchPlayers(room).filter(isHumanPlayer);
 }
 
+function isRoomBotMatch(room) {
+  return getBotPlayers(room).length > 0;
+}
+
 function isSoloBotDuelRoom(room) {
-  return getConnectedHumanMatchPlayers(room).length === 1 && getBotPlayers(room).length > 0;
+  return getConnectedHumanMatchPlayers(room).length === 1 && getBotPlayers(room).length === 1;
 }
 
 function isRoomContinuousMode(room) {
@@ -4462,7 +4483,7 @@ function isRoomContinuousMode(room) {
 }
 
 function isRoomSurvivalMode(room) {
-  return GAME_CONFIG.match.survivalMode && !isSoloBotDuelRoom(room);
+  return GAME_CONFIG.match.survivalMode && !isRoomBotMatch(room);
 }
 
 function shouldAutoRestartRound(room) {
@@ -7244,8 +7265,13 @@ function canAddBotsInPhase(phase) {
 function syncRoomBots(room, now) {
   const humanPlayerCount = getRestorableHumanMatchPlayerCount(room, now);
   const bots = getBotPlayers(room);
-  const anchorPlayer = getPreferredBotAnchorPlayer(room);
-  const desiredBotCount = Math.min(GAME_CONFIG.ai.maxBotsPerRoom, humanPlayerCount === 1 ? 1 : 0);
+  const botsPerTeam = Math.max(0, Math.floor(GAME_CONFIG.ai.botsPerTeam ?? 0));
+  const desiredAssignments = GAME_CONFIG.lobby.teams.flatMap((team) =>
+    Array.from({ length: botsPerTeam }, (_, slotIndex) => getBotIdentity(team.id, slotIndex))
+  );
+  const desiredAssignmentKeys = new Set(desiredAssignments.map((identity) => identity.key));
+  const assignedBots = new Map();
+  const extraBots = [];
 
   if (humanPlayerCount === 0) {
     for (const bot of bots) {
@@ -7255,26 +7281,37 @@ function syncRoomBots(room, now) {
   }
 
   for (const bot of bots) {
+    const assignmentKey = getBotAssignmentKey(bot.botTeamId ?? bot.teamId, bot.botSlotIndex ?? 0);
+    if (!desiredAssignmentKeys.has(assignmentKey) || assignedBots.has(assignmentKey)) {
+      extraBots.push(bot);
+      continue;
+    }
+
+    assignedBots.set(assignmentKey, bot);
+  }
+
+  for (const bot of extraBots) {
+    removePlayerFromRoom(room, bot.id, { now });
+  }
+
+  for (const bot of assignedBots.values()) {
     bot.ready = true;
     bot.connected = true;
     bot.disconnectedAt = null;
     bot.reconnectDeadlineAt = null;
-    syncBotLoadout(bot, anchorPlayer, now);
-  }
-
-  if (bots.length > desiredBotCount) {
-    for (const bot of bots.slice(desiredBotCount)) {
-      removePlayerFromRoom(room, bot.id, { now });
-    }
-    return;
+    syncBotLoadout(bot, now);
   }
 
   if (!canAddBotsInPhase(room.match.phase)) {
     return;
   }
 
-  while (getBotPlayers(room).length < desiredBotCount) {
-    const bot = createBotState(room, anchorPlayer, now);
+  for (const identity of desiredAssignments) {
+    if (assignedBots.has(identity.key)) {
+      continue;
+    }
+
+    const bot = createBotState(room, identity.teamId, identity.slotIndex, now);
     room.players.set(bot.id, bot);
     if (room.match.phase !== MATCH_PHASES.WAITING && !isWarmupPhase(room.match.phase)) {
       queueSpawnStateEvent(room, bot, now);
@@ -8035,7 +8072,7 @@ function isEnemyBotTarget(player, candidate, now = Date.now()) {
     candidate.alive &&
     !hasSpawnProtection(candidate, now) &&
     isActiveParticipant(candidate) &&
-    (!player.isBot ? candidate.teamId !== player.teamId : !candidate.isBot)
+    candidate.teamId !== player.teamId
   );
 }
 
@@ -8923,15 +8960,17 @@ function updateRoomPhase(room, now) {
       return;
     }
 
-    const winner =
-      getPlayersInSimulationOrder(room).find(
-        (player) => isActiveParticipant(player) && player.score >= GAME_CONFIG.match.scoreToWin
-      ) ??
-      null;
+    if (isRoomSurvivalMode(room)) {
+      const winner =
+        getPlayersInSimulationOrder(room).find(
+          (player) => isActiveParticipant(player) && player.score >= GAME_CONFIG.match.scoreToWin
+        ) ??
+        null;
 
-    if (winner) {
-      finishMatch(room, now, winner);
-      return;
+      if (winner) {
+        finishMatch(room, now, winner);
+        return;
+      }
     }
 
     if (now >= room.match.phaseEndsAt) {
@@ -8946,17 +8985,19 @@ function updateRoomPhase(room, now) {
   }
 
   if (room.match.phase === MATCH_PHASES.OVERTIME) {
-    const winner =
-      getPlayersInSimulationOrder(room).find(
-        (player) => isActiveParticipant(player) && player.score >= GAME_CONFIG.match.scoreToWin
-      ) ??
-      null;
+    if (isRoomSurvivalMode(room)) {
+      const winner =
+        getPlayersInSimulationOrder(room).find(
+          (player) => isActiveParticipant(player) && player.score >= GAME_CONFIG.match.scoreToWin
+        ) ??
+        null;
 
-    if (winner) {
-      finishMatch(room, now, winner, {
-        message: `${winner.name} wins in overtime`
-      });
-      return;
+      if (winner) {
+        finishMatch(room, now, winner, {
+          message: `${winner.name} wins in overtime`
+        });
+        return;
+      }
     }
 
     if (!shouldEnterOvertime(room)) {
@@ -9017,7 +9058,8 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq) {
     match: {
       ...room.match,
       minPlayers: GAME_CONFIG.match.minPlayers,
-      scoreToWin: GAME_CONFIG.match.scoreToWin
+      scoreToWin: GAME_CONFIG.match.scoreToWin,
+      respawnsEnabled: !isRoomSurvivalMode(room)
     },
     lobby: getLobbySnapshot(room),
     roundNumber: room.roundNumber,

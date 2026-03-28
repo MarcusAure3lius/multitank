@@ -2516,10 +2516,13 @@ function buildMatchStatusText() {
       : latestObjective?.captureTargetName
         ? ` | capturing: ${latestObjective.captureTargetName}`
         : "";
+    const ruleText = latestMatch.respawnsEnabled
+      ? " | respawns on"
+      : ` | first to ${latestMatch.scoreToWin}`;
     if (latestMatch.phaseEndsAt === null) {
       return `${latestMatch.message}${objectiveText}${spectatorSuffix}`;
     }
-    return `${latestMatch.message} | ${secondsLeft}s left | first to ${latestMatch.scoreToWin}${objectiveText}${spectatorSuffix}`;
+    return `${latestMatch.message} | ${secondsLeft}s left${ruleText}${objectiveText}${spectatorSuffix}`;
   }
 
   if (latestMatch.phase === MATCH_PHASES.OVERTIME) {
@@ -3236,20 +3239,6 @@ function drawTank(player) {
   context.restore();
 }
 
-function getProjectileTrailLength(projectile) {
-  const previousX = projectile.previousRenderX ?? projectile.renderX ?? projectile.x ?? 0;
-  const previousY = projectile.previousRenderY ?? projectile.renderY ?? projectile.y ?? 0;
-  const currentX = projectile.renderX ?? projectile.x ?? 0;
-  const currentY = projectile.renderY ?? projectile.y ?? 0;
-  const distanceMoved = Math.hypot(currentX - previousX, currentY - previousY);
-  const speedLength = (projectile.renderSpeed ?? GAME_CONFIG.bullet.speed) * 0.028;
-  return clamp(
-    Math.max(distanceMoved * 1.9, speedLength, GAME_CONFIG.bullet.radius * 2.4),
-    GAME_CONFIG.bullet.radius * 2.4,
-    GAME_CONFIG.bullet.radius * 5.6
-  );
-}
-
 function drawProjectile(projectile, options = {}) {
   if (!projectile) {
     return;
@@ -3257,38 +3246,16 @@ function drawProjectile(projectile, options = {}) {
 
   const {
     alpha = 1,
-    headColor = "#111111",
-    trailColor = "#111111"
+    headColor = "#111111"
   } = options;
   const x = projectile.renderX ?? projectile.x;
   const y = projectile.renderY ?? projectile.y;
-  const angle = projectile.renderAngle ?? projectile.angle ?? 0;
-  const trailLength = getProjectileTrailLength(projectile);
-  const tailX = x - Math.cos(angle) * trailLength;
-  const tailY = y - Math.sin(angle) * trailLength;
-  const innerTrailX = x - Math.cos(angle) * trailLength * 0.58;
-  const innerTrailY = y - Math.sin(angle) * trailLength * 0.58;
-  const strokeWidth = GAME_CONFIG.bullet.radius * 1.08;
 
   context.save();
-  context.lineCap = "round";
-  context.strokeStyle = trailColor;
-  context.globalAlpha = alpha * 0.22;
-  context.lineWidth = strokeWidth;
-  context.beginPath();
-  context.moveTo(tailX, tailY);
-  context.lineTo(x, y);
-  context.stroke();
-  context.globalAlpha = alpha * 0.52;
-  context.lineWidth = strokeWidth * 0.74;
-  context.beginPath();
-  context.moveTo(innerTrailX, innerTrailY);
-  context.lineTo(x, y);
-  context.stroke();
   context.globalAlpha = alpha;
   context.fillStyle = headColor;
   context.beginPath();
-  context.arc(x, y, GAME_CONFIG.bullet.radius * 0.56, 0, Math.PI * 2);
+  context.arc(x, y, GAME_CONFIG.bullet.radius, 0, Math.PI * 2);
   context.fill();
   context.restore();
 }
@@ -3300,8 +3267,7 @@ function drawBullet(bullet) {
 function drawPredictedProjectile(projectile) {
   drawProjectile(projectile, {
     alpha: 0.52,
-    headColor: "#111111",
-    trailColor: "#111111"
+    headColor: "#111111"
   });
 }
 

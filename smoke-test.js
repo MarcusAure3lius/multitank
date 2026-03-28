@@ -135,6 +135,7 @@ function waitForServer() {
 
 async function connectClient(name) {
   const socket = new WebSocket(baseWsUrl);
+  socket.playerCache = new Map();
   await once(socket, "open");
 
   return socket;
@@ -231,13 +232,42 @@ function sendLobbyUpdate(socket, action, fields, messageId) {
 
 async function waitForMessage(socket, predicate, timeoutMs = 12000, label = "message") {
   return new Promise((resolve, reject) => {
+    const stateChunks = new Map();
+
     const onMessage = (raw) => {
       const parsed = deserializePacket(String(raw));
       if (!parsed.ok) {
         return;
       }
 
-      const payload = parsed.packet;
+      let payload = parsed.packet;
+
+      if (payload.type === MESSAGE_TYPES.STATE_CHUNK) {
+        const key = `${payload.roomId ?? ""}:${payload.snapshotSeq}`;
+        const chunkState = stateChunks.get(key) ?? {
+          chunkCount: payload.chunkCount,
+          chunks: new Array(payload.chunkCount).fill(null)
+        };
+        chunkState.chunkCount = payload.chunkCount;
+        if (chunkState.chunks.length !== payload.chunkCount) {
+          chunkState.chunks = new Array(payload.chunkCount).fill(null);
+        }
+        chunkState.chunks[payload.chunkIndex] = payload.chunk;
+        stateChunks.set(key, chunkState);
+
+        if (chunkState.chunks.every((chunk) => typeof chunk === "string")) {
+          stateChunks.delete(key);
+          const fullParsed = deserializePacket(chunkState.chunks.join(""));
+          if (!fullParsed.ok) {
+            return;
+          }
+          payload = fullParsed.packet;
+        } else {
+          return;
+        }
+      }
+
+      applyStateToPlayerCache(socket, payload);
 
       if (predicate(payload)) {
         clearTimeout(timeout);
@@ -280,6 +310,64 @@ function sendInput(socket, input) {
       ...input
     })
   );
+}
+
+function applyStateToPlayerCache(socket, payload) {
+  if (!socket || payload?.type !== MESSAGE_TYPES.STATE) {
+    return;
+  }
+
+  const cache = socket.playerCache instanceof Map ? socket.playerCache : new Map();
+  socket.playerCache = cache;
+
+  if (payload.replication?.mode === "full" && Array.isArray(payload.players) && payload.players.length > 0) {
+    cache.clear();
+  }
+
+  for (const player of payload.players ?? []) {
+    if (!player?.id) {
+      continue;
+    }
+
+    cache.set(player.id, {
+      ...(cache.get(player.id) ?? {}),
+      ...player
+    });
+  }
+
+  for (const record of payload.replication?.spawns ?? []) {
+    if (record.kind !== REPLICATION_KINDS.PLAYER || !record.id || !record.state) {
+      continue;
+    }
+
+    cache.set(record.id, {
+      ...(cache.get(record.id) ?? {}),
+      id: record.id,
+      ...record.state
+    });
+  }
+
+  for (const record of payload.replication?.updates ?? []) {
+    if (record.kind !== REPLICATION_KINDS.PLAYER || !record.id || !record.state) {
+      continue;
+    }
+
+    cache.set(record.id, {
+      ...(cache.get(record.id) ?? {}),
+      id: record.id,
+      ...record.state
+    });
+  }
+
+  for (const record of payload.replication?.despawns ?? []) {
+    if (record.kind !== REPLICATION_KINDS.PLAYER || !record.id) {
+      continue;
+    }
+
+    cache.delete(record.id);
+  }
+
+  payload._mergedPlayers = Array.from(cache.values());
 }
 
 function requestResync(socket, snapshotSeq, messageId, reason = "smoke_resync") {
@@ -349,6 +437,10 @@ function segmentIntersectsRect(startX, startY, endX, endY, rect, padding = 0) {
 }
 
 function getPlayerState(payload, playerId) {
+  if (Array.isArray(payload?._mergedPlayers)) {
+    return payload._mergedPlayers.find((player) => player.id === playerId) ?? null;
+  }
+
   return (
     payload.players?.find((player) => player.id === playerId) ??
     payload.replication?.spawns
@@ -359,8 +451,42 @@ function getPlayerState(payload, playerId) {
       ?.filter((record) => record.kind === REPLICATION_KINDS.PLAYER)
       .map((record) => ({ id: record.id, ...record.state }))
       .find((player) => player.id === playerId) ??
-    null
+      null
   );
+}
+
+function getReplicatedPlayers(payload) {
+  if (Array.isArray(payload?._mergedPlayers)) {
+    return payload._mergedPlayers;
+  }
+
+  const players = new Map((payload.players ?? []).map((player) => [player.id, player]));
+
+  for (const record of payload.replication?.spawns ?? []) {
+    if (record.kind !== REPLICATION_KINDS.PLAYER || !record.state) {
+      continue;
+    }
+
+    players.set(record.id, {
+      ...(players.get(record.id) ?? {}),
+      id: record.id,
+      ...record.state
+    });
+  }
+
+  for (const record of payload.replication?.updates ?? []) {
+    if (record.kind !== REPLICATION_KINDS.PLAYER || !record.state) {
+      continue;
+    }
+
+    players.set(record.id, {
+      ...(players.get(record.id) ?? {}),
+      id: record.id,
+      ...record.state
+    });
+  }
+
+  return Array.from(players.values());
 }
 
 function getFullPlayerState(payload, playerId) {
@@ -916,36 +1042,43 @@ try {
     solo,
     (payload) => {
       const localPlayer = getPlayerState(payload, soloJoined.playerId);
-      const enemyBot = (payload.players ?? []).find((player) => player.isBot);
+      const bots = getReplicatedPlayers(payload).filter((player) => player.isBot);
       return (
         payload.match?.phase === MATCH_PHASES.WARMUP &&
         Boolean(localPlayer) &&
-        Boolean(enemyBot)
+        bots.length === 4
       );
     },
     "solo bot warmup state"
   );
 
   const soloPlayer = getPlayerState(soloWarmupState, soloJoined.playerId);
-  const enemyBot = (soloWarmupState.players ?? []).find((player) => player.isBot);
+  const warmupBots = getReplicatedPlayers(soloWarmupState).filter((player) => player.isBot);
+  const alphaBots = warmupBots.filter((player) => player.teamId === "alpha");
+  const bravoBots = warmupBots.filter((player) => player.teamId === "bravo");
 
-  if (!soloPlayer || !enemyBot) {
-    throw new Error("Expected a solo room to spawn a replicated enemy bot");
+  if (!soloPlayer || warmupBots.length !== 4) {
+    throw new Error("Expected a solo room to spawn four replicated AI bots");
   }
 
-  if (enemyBot.teamId === soloPlayer.teamId || enemyBot.classId !== soloPlayer.classId) {
-    throw new Error("Expected the solo enemy bot to mirror the player's class on the opposing team");
+  if (alphaBots.length !== 2 || bravoBots.length !== 2) {
+    throw new Error("Expected solo bot rooms to keep two AI bots on each team");
   }
 
-  if (enemyBot.color !== "#dc2626" || enemyBot.hp !== GAME_CONFIG.tank.hitPoints || enemyBot.alive !== true) {
-    throw new Error("Expected the solo enemy bot to spawn as a red full-health combatant");
+  if (
+    warmupBots.some((bot) => bot.hp !== GAME_CONFIG.tank.hitPoints || bot.alive !== true) ||
+    soloWarmupState.match?.respawnsEnabled !== true
+  ) {
+    throw new Error("Expected solo bot rooms to stage full-health respawn-enabled AI squads");
   }
 
   const soloLiveState = await waitForState(
     solo,
     (payload) =>
       payload.match?.phase === MATCH_PHASES.IN_PROGRESS &&
-      (payload.players ?? []).some((player) => player.isBot && player.hp === GAME_CONFIG.tank.hitPoints),
+      payload.match?.respawnsEnabled === true &&
+      getReplicatedPlayers(payload).filter((player) => player.isBot).length === 4 &&
+      getReplicatedPlayers(payload).some((player) => player.isBot && player.hp === GAME_CONFIG.tank.hitPoints),
     "solo bot live state"
   );
 
@@ -957,36 +1090,12 @@ try {
     throw new Error("Expected solo bot rooms to enter live play without resetting the human player's spawn position");
   }
 
-  if ((soloLiveState.leaderboard?.length ?? 0) < 2) {
-    throw new Error("Expected a solo room with a bot to publish both combatants in the leaderboard");
-  }
-
-  const soloIdleCheckStartedAt = Date.now();
-  const soloIdleState = await waitForState(
-    solo,
-    (payload) => {
-      if (Date.now() - soloIdleCheckStartedAt < 5500) {
-        return false;
-      }
-
-      const idleSoloPlayer = getPlayerState(payload, soloJoined.playerId);
-      const idleEnemyBot = (payload.players ?? []).find((player) => player.isBot);
-      return (
-        payload.match?.phase === MATCH_PHASES.IN_PROGRESS &&
-        idleSoloPlayer?.hp === GAME_CONFIG.tank.hitPoints &&
-        idleEnemyBot?.score === 0
-      );
-    },
-    "solo bot idle no objective reset"
-  );
-
-  const soloIdlePlayer = getPlayerState(soloIdleState, soloJoined.playerId);
-  if (!soloIdlePlayer) {
-    throw new Error("Expected an authoritative local player state while validating idle solo bot flow");
+  if ((soloLiveState.leaderboard?.length ?? 0) < 5) {
+    throw new Error("Expected a solo room with team bots to publish all combatants in the leaderboard");
   }
 
   let soloInputSeq = 1;
-  const soloMoveInput = findClearMovementInput(soloIdlePlayer);
+  const soloMoveInput = findClearMovementInput(soloLivePlayer);
   const soloMoveSeqStart = soloInputSeq;
   for (let attempt = 0; attempt < 4; attempt += 1) {
     sendInput(solo, {
@@ -1010,14 +1119,91 @@ try {
       return (
         payload.you?.lastProcessedInputSeq >= soloMoveSeqEnd &&
         Boolean(movedSoloPlayer) &&
-        Math.hypot(movedSoloPlayer.x - soloIdlePlayer.x, movedSoloPlayer.y - soloIdlePlayer.y) >= 6
+        Math.hypot(movedSoloPlayer.x - soloLivePlayer.x, movedSoloPlayer.y - soloLivePlayer.y) >= 6
       );
     },
     "solo bot movement state"
   );
 
   if (soloMovedState.you?.lastProcessedInputSeq < soloMoveSeqStart) {
-    throw new Error("Expected solo bot rooms to keep processing human movement inputs after the enemy spawns");
+    throw new Error("Expected solo bot rooms to keep processing human movement inputs after the team bots spawn");
+  }
+
+  const getCurrentSoloTarget = () => {
+    const replicatedPlayers = Array.from(solo.playerCache.values());
+    const localPlayer =
+      replicatedPlayers.find((player) => player.id === soloJoined.playerId) ??
+      getPlayerState(soloMovedState, soloJoined.playerId) ??
+      soloLivePlayer;
+    if (!localPlayer) {
+      return { localPlayer: null, targetBot: null };
+    }
+
+    const targetBot =
+      replicatedPlayers
+        .filter((player) => player.isBot && player.teamId === localPlayer.teamId && player.alive)
+        .sort(
+          (left, right) =>
+            Math.hypot(left.x - localPlayer.x, left.y - localPlayer.y) -
+            Math.hypot(right.x - localPlayer.x, right.y - localPlayer.y)
+        )[0] ?? null;
+
+    return { localPlayer, targetBot };
+  };
+
+  const soloBotRespawnPromise = waitForMessage(
+    solo,
+    (payload) =>
+      payload.type === MESSAGE_TYPES.STATE &&
+      payload.match?.phase === MATCH_PHASES.IN_PROGRESS &&
+      payload.match?.respawnsEnabled === true &&
+      getReplicatedPlayers(payload).some(
+        (player) =>
+          player.isBot &&
+          player.deaths > 0 &&
+          player.alive === true &&
+          player.hp === GAME_CONFIG.tank.hitPoints
+      ),
+    30000,
+    "solo bot respawn state"
+  );
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const { localPlayer, targetBot } = getCurrentSoloTarget();
+    if (!localPlayer || !targetBot) {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      continue;
+    }
+
+    const turretAngle = Math.atan2(targetBot.y - localPlayer.y, targetBot.x - localPlayer.x);
+    sendInput(solo, {
+      seq: soloInputSeq++,
+      clientSentAt: Date.now(),
+      forward: false,
+      back: false,
+      left: false,
+      right: false,
+      shoot: true,
+      turretAngle
+    });
+    await new Promise((resolve) => setTimeout(resolve, GAME_CONFIG.tank.shootCooldownMs + 40));
+    sendInput(solo, {
+      seq: soloInputSeq++,
+      clientSentAt: Date.now(),
+      forward: false,
+      back: false,
+      left: false,
+      right: false,
+      shoot: false,
+      turretAngle
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+
+  const soloBotRespawnState = await soloBotRespawnPromise;
+
+  if (!getPlayerState(soloBotRespawnState, soloJoined.playerId)) {
+    throw new Error("Expected an authoritative local player state while validating bot respawn flow");
   }
 
   const soloRespawnAckPromise = waitForMessage(
@@ -1223,11 +1409,16 @@ try {
     stateA.match?.phase !== MATCH_PHASES.IN_PROGRESS ||
     stateB.match?.phase !== MATCH_PHASES.IN_PROGRESS
   ) {
-    throw new Error("Expected both clients to observe an active match with two players");
+    throw new Error("Expected both clients to observe an active match with team bots");
   }
 
-  if ((stateA.leaderboard?.length ?? 0) < 2 || (stateB.leaderboard?.length ?? 0) < 2) {
-    throw new Error("Expected leaderboard replication for both active players");
+  if (
+    stateA.match?.respawnsEnabled !== true ||
+    stateB.match?.respawnsEnabled !== true ||
+    (stateA.leaderboard?.length ?? 0) < 6 ||
+    (stateB.leaderboard?.length ?? 0) < 6
+  ) {
+    throw new Error("Expected leaderboard replication for all active players and bots");
   }
 
   if (!stateA.objective || typeof stateA.objective.captureProgress !== "number") {
