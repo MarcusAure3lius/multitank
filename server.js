@@ -62,7 +62,8 @@ const backendPath = path.join(dataDir, "backend.json");
 const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? "0.0.0.0";
 const environment = process.env.NODE_ENV ?? "development";
-const gameVersion = process.env.GAME_VERSION ?? process.env.npm_package_version ?? GAME_BUILD_VERSION;
+const configuredGameVersion = sanitizeLooseText(process.env.GAME_VERSION ?? "", "", 32) || null;
+const gameVersion = GAME_BUILD_VERSION;
 const assetVersion = ASSET_BUNDLE_VERSION;
 const publicOrigin = normalizePublicOrigin(process.env.PUBLIC_ORIGIN);
 const allowedOrigins = buildAllowedOrigins(process.env.ALLOWED_ORIGINS, publicOrigin);
@@ -107,6 +108,12 @@ const deployRegion = sanitizeLooseText(
 const initialMaintenanceMode = /^(1|true|yes|on)$/i.test(String(process.env.START_IN_MAINTENANCE ?? ""));
 const initialDrainMode = /^(1|true|yes|on)$/i.test(String(process.env.START_IN_DRAIN_MODE ?? ""));
 const initialMaintenanceReason = sanitizeLooseText(process.env.MAINTENANCE_REASON ?? "", "", 160) || null;
+
+if (configuredGameVersion && configuredGameVersion !== GAME_BUILD_VERSION) {
+  console.warn(
+    `Ignoring stale GAME_VERSION=${configuredGameVersion}; using bundled version ${GAME_BUILD_VERSION} instead`
+  );
+}
 const purchaseCatalog = new Map([
   ["cosmetic-desert-camo", Object.freeze({ sku: "cosmetic-desert-camo", name: "Desert Camo", price: 180, kind: "cosmetic", entitlementId: "cosmetic:desert-camo" })],
   ["cosmetic-signal-flare", Object.freeze({ sku: "cosmetic-signal-flare", name: "Signal Flare", price: 240, kind: "cosmetic", entitlementId: "cosmetic:signal-flare" })],

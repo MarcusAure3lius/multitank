@@ -5,7 +5,6 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 3000
-      GAME_VERSION: ${GAME_VERSION:-0.1.0}
       PUBLIC_ORIGIN: https://${CADDY_DOMAIN}
       ALLOWED_ORIGINS: https://${CADDY_DOMAIN}
       DEPLOY_REGION: ${DEPLOY_REGION:-public}

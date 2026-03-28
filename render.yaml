@@ -20,8 +20,6 @@ services:
         value: 10000
       - key: DATA_DIR
         value: /var/data
-      - key: GAME_VERSION
-        value: 0.1.0
       - key: DEPLOY_REGION
         value: render
       - key: INSTANCE_GROUP
