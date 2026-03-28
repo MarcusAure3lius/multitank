@@ -161,15 +161,7 @@ export const GAME_CONFIG = Object.freeze({
     width: 9600,
     height: 5400,
     padding: 80,
-    obstacles: Object.freeze([
-      Object.freeze({ id: "depot-nw", x: 420, y: 250, width: 260, height: 120 }),
-      Object.freeze({ id: "depot-ne", x: 2480, y: 240, width: 320, height: 140 }),
-      Object.freeze({ id: "yard-west", x: 920, y: 730, width: 220, height: 260 }),
-      Object.freeze({ id: "command-core", x: 1460, y: 730, width: 280, height: 280 }),
-      Object.freeze({ id: "yard-east", x: 2060, y: 730, width: 220, height: 260 }),
-      Object.freeze({ id: "depot-sw", x: 520, y: 1380, width: 300, height: 120 }),
-      Object.freeze({ id: "depot-se", x: 2440, y: 1360, width: 340, height: 140 })
-    ])
+    obstacles: Object.freeze([])
   }),
   objective: Object.freeze({
     x: 1600,
