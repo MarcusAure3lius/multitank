@@ -280,6 +280,61 @@ canvas {
   z-index: 2;
 }
 
+.death-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(76, 76, 76, 0.42);
+  backdrop-filter: blur(3px);
+}
+
+.death-overlay-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.death-overlay-tab {
+  min-width: 180px;
+  min-height: 74px;
+  padding: 18px 24px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 18px;
+  background: rgba(88, 88, 88, 0.82);
+  color: #f5f5f5;
+  font-size: 1.2rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-align: center;
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.24);
+}
+
+.death-overlay-label {
+  display: grid;
+  place-items: center;
+  cursor: default;
+}
+
+.death-overlay-action {
+  width: auto;
+  background: rgba(125, 125, 125, 0.92);
+  color: #ffffff;
+}
+
+.death-overlay-action:hover:not(:disabled) {
+  background: rgba(146, 146, 146, 0.96);
+}
+
+.death-overlay-action:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
 .diagnostic-banner {
   position: absolute;
   bottom: 18px;
@@ -478,6 +533,15 @@ body.in-session .hud {
 }
 
 @media (max-width: 640px) {
+  .death-overlay-tabs {
+    width: 100%;
+  }
+
+  .death-overlay-tab {
+    min-width: 0;
+    width: 100%;
+  }
+
   .room-browser-actions {
     flex-direction: column;
   }

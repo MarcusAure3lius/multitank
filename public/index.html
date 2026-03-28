@@ -52,6 +52,12 @@
 
       <section class="play-area">
         <div id="diagnostic-banner" class="diagnostic-banner" aria-live="polite"></div>
+        <div id="death-overlay" class="death-overlay" hidden>
+          <div class="death-overlay-tabs" role="group" aria-label="Respawn">
+            <div class="death-overlay-tab death-overlay-label">You Died</div>
+            <button id="respawn-button" class="death-overlay-tab death-overlay-action" type="button">Respawn</button>
+          </div>
+        </div>
         <div id="fallback-visual-layer" class="fallback-visual-layer" aria-hidden="true">
           <div id="fallback-center-marker" class="fallback-center-marker">MAP CENTER</div>
           <div id="fallback-player-marker" class="fallback-player-marker" hidden>

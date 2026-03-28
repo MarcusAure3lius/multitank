@@ -264,6 +264,15 @@ function setReady(socket, ready, messageId) {
   );
 }
 
+function sendRespawn(socket, messageId) {
+  socket.send(
+    serializePacket({
+      type: MESSAGE_TYPES.RESPAWN,
+      messageId
+    })
+  );
+}
+
 function sendInput(socket, input) {
   socket.send(
     serializePacket({
@@ -1010,6 +1019,13 @@ try {
   if (soloMovedState.you?.lastProcessedInputSeq < soloMoveSeqStart) {
     throw new Error("Expected solo bot rooms to keep processing human movement inputs after the enemy spawns");
   }
+
+  const soloRespawnAckPromise = waitForMessage(
+    solo,
+    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "solo-respawn-alive"
+  );
+  sendRespawn(solo, "solo-respawn-alive");
+  await soloRespawnAckPromise;
 
   solo.close();
 

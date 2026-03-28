@@ -10,6 +10,7 @@ export const MESSAGE_TYPES = Object.freeze({
   LOBBY: "lobby",
   INPUT: "input",
   READY: "ready",
+  RESPAWN: "respawn",
   RESYNC: "resync",
   STATE: "state",
   STATE_CHUNK: "state_chunk",
@@ -716,6 +717,7 @@ export function createPlayerSnapshot(player) {
     combat: createPlayerCombatState(player?.combat),
     ai: readBoolean(player?.isBot, false) ? createBotAiSnapshot(player?.ai) : null,
     seq: Math.max(0, readInteger(player?.seq ?? player?.lastProcessedInputSeq, 0)),
+    respawnAt: Number.isFinite(Number(player?.respawnAt)) ? Number(player.respawnAt) : null,
     disconnectedAt: Number.isFinite(Number(player?.disconnectedAt)) ? Number(player.disconnectedAt) : null,
     reconnectDeadlineAt:
       Number.isFinite(Number(player?.reconnectDeadlineAt)) ? Number(player.reconnectDeadlineAt) : null
@@ -995,6 +997,8 @@ export function createStatePayload({
             readInteger(you.lastProcessedInputClientSentAt, 0)
           ),
           pendingInputCount: Math.max(0, readInteger(you.pendingInputCount, 0)),
+          alive: readBoolean(you.alive, true),
+          respawnAt: Number.isFinite(Number(you.respawnAt)) ? Number(you.respawnAt) : null,
           ready: readBoolean(you.ready, false),
           assists: Math.max(0, readInteger(you.assists, 0)),
           isSpectator: readBoolean(you.isSpectator, false),
@@ -1067,6 +1071,14 @@ function normalizeReadyPacket(packet, version) {
     v: version,
     type: MESSAGE_TYPES.READY,
     ready: readBoolean(packet.ready ?? packet.r, false),
+    messageId: sanitizeMessageId(packet.messageId ?? packet.m)
+  };
+}
+
+function normalizeRespawnPacket(packet, version) {
+  return {
+    v: version,
+    type: MESSAGE_TYPES.RESPAWN,
     messageId: sanitizeMessageId(packet.messageId ?? packet.m)
   };
 }
@@ -1221,6 +1233,8 @@ function normalizePacketObject(packet) {
       return { ok: true, packet: normalizeLobbyPacket(packet, version) };
     case MESSAGE_TYPES.READY:
       return { ok: true, packet: normalizeReadyPacket(packet, version) };
+    case MESSAGE_TYPES.RESPAWN:
+      return { ok: true, packet: normalizeRespawnPacket(packet, version) };
     case MESSAGE_TYPES.RESYNC:
       return { ok: true, packet: normalizeResyncPacket(packet, version) };
     case MESSAGE_TYPES.INPUT: {
@@ -1274,6 +1288,12 @@ function encodePacketObject(packet) {
         v: version,
         type: MESSAGE_TYPES.READY,
         r: readBoolean(packet.ready, false),
+        m: sanitizeMessageId(packet.messageId)
+      };
+    case MESSAGE_TYPES.RESPAWN:
+      return {
+        v: version,
+        type: MESSAGE_TYPES.RESPAWN,
         m: sanitizeMessageId(packet.messageId)
       };
     case MESSAGE_TYPES.LOBBY:

@@ -2165,6 +2165,7 @@ function createViewerPlayerState(candidate, viewer) {
     combat: candidate.combat,
     ai: candidate.ai,
     seq: viewer?.id === candidate.id ? candidate.lastProcessedInputSeq : 0,
+    respawnAt: viewer?.id === candidate.id ? candidate.respawnAt : null,
     disconnectedAt: viewer?.id === candidate.id ? candidate.disconnectedAt : null,
     reconnectDeadlineAt: viewer?.id === candidate.id ? candidate.reconnectDeadlineAt : null
   };
@@ -7761,6 +7762,66 @@ function handleReady(socket, payload) {
   maybeStartCountdown(room, now);
 }
 
+function canPlayerRespawn(room, player, now = Date.now()) {
+  return Boolean(
+    room &&
+    player &&
+    !player.isSpectator &&
+    !player.alive &&
+    Number.isFinite(Number(player.respawnAt)) &&
+    now >= Number(player.respawnAt)
+  );
+}
+
+function respawnPlayer(room, player, now = Date.now()) {
+  if (!canPlayerRespawn(room, player, now)) {
+    return false;
+  }
+
+  const spawn = createSpawnPoint(room, {
+    teamId: player.teamId,
+    spawnKey: `${player.id}:${Math.floor(now)}`,
+    enforceEnemyBuffer: true,
+    minDistanceToPlayers: GAME_CONFIG.spawn.safeRespawnDistance
+  });
+  player.x = spawn.x;
+  player.y = spawn.y;
+  player.angle = 0;
+  player.turretAngle = 0;
+  player.hp = GAME_CONFIG.tank.hitPoints;
+  normalizePlayerInventory(player);
+  player.alive = true;
+  player.respawnAt = 0;
+  applyRoomSpawnProtection(room, player, now);
+  player.credits += GAME_CONFIG.economy.respawnCredits;
+  player.combat = createPlayerCombatState(player, now);
+  clearCombatContributors(player);
+  resetPlayerHistory(player);
+  rememberSafePlayerState(player);
+  if (player.isBot) {
+    resetBotAiState(player, now);
+  }
+  queueAnimationStateEvent(room, player, ANIMATION_ACTIONS.SPAWN, now);
+  queueSpawnStateEvent(room, player, now);
+  queueHealthStateEvent(room, player, GAME_CONFIG.tank.hitPoints, now);
+  queueInventoryStateEvent(room, player, now);
+  return true;
+}
+
+function handleRespawn(socket) {
+  const room = rooms.get(socket.data?.roomId);
+  const player = room?.players.get(socket.data?.playerId);
+
+  if (!room || !player || player.isBot) {
+    return;
+  }
+
+  const now = Date.now();
+  markPlayerActive(player, now);
+  markRoomActive(room, now);
+  respawnPlayer(room, player, now);
+}
+
 function handleLobby(socket, payload) {
   const room = rooms.get(socket.data?.roomId);
   const player = room?.players.get(socket.data?.playerId);
@@ -8692,33 +8753,8 @@ function updatePlayer(room, player, deltaSeconds, now) {
   clearSpawnProtectionOnAction(player, now);
 
   if (!player.alive) {
-    if (!isRoomSurvivalMode(room) && now >= player.respawnAt) {
-      const spawn = createSpawnPoint(room, {
-        teamId: player.teamId,
-        spawnKey: `${player.id}:${Math.floor(now)}`,
-        enforceEnemyBuffer: true,
-        minDistanceToPlayers: GAME_CONFIG.spawn.safeRespawnDistance
-      });
-      player.x = spawn.x;
-      player.y = spawn.y;
-      player.angle = 0;
-      player.turretAngle = 0;
-      player.hp = GAME_CONFIG.tank.hitPoints;
-      normalizePlayerInventory(player);
-      player.alive = true;
-      applyRoomSpawnProtection(room, player, now);
-      player.credits += GAME_CONFIG.economy.respawnCredits;
-      player.combat = createPlayerCombatState(player, now);
-      clearCombatContributors(player);
-      resetPlayerHistory(player);
-      rememberSafePlayerState(player);
-      if (player.isBot) {
-        resetBotAiState(player, now);
-      }
-      queueAnimationStateEvent(room, player, ANIMATION_ACTIONS.SPAWN, now);
-      queueSpawnStateEvent(room, player, now);
-      queueHealthStateEvent(room, player, GAME_CONFIG.tank.hitPoints, now);
-      queueInventoryStateEvent(room, player, now);
+    if (player.isBot && canPlayerRespawn(room, player, now)) {
+      respawnPlayer(room, player, now);
     }
 
     updatePlayerAnimationState(
@@ -8994,6 +9030,8 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq) {
           lastProcessedInputTick: player.lastProcessedInputTick,
           lastProcessedInputClientSentAt: player.lastProcessedInputClientSentAt,
           pendingInputCount: player.pendingInputs.length,
+          alive: player.alive,
+          respawnAt: player.respawnAt,
           ready: player.ready,
           assists: player.assists,
           isSpectator: player.isSpectator,
@@ -9173,6 +9211,13 @@ wss.on("connection", (socket, request) => {
           return;
         }
         handleReady(socket, payload);
+        acknowledgeReliableMessage(socket, payload);
+        break;
+      case MESSAGE_TYPES.RESPAWN:
+        if (resendAckForDuplicate(socket, payload)) {
+          return;
+        }
+        handleRespawn(socket);
         acknowledgeReliableMessage(socket, payload);
         break;
       case MESSAGE_TYPES.RESYNC:

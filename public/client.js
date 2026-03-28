@@ -51,6 +51,8 @@ const refreshRoomsButton = document.getElementById("refresh-rooms-button");
 const resultsCard = document.getElementById("results-card");
 const resultsSummaryElement = document.getElementById("results-summary");
 const resultsListElement = document.getElementById("results-list");
+const deathOverlayElement = document.getElementById("death-overlay");
+const respawnButton = document.getElementById("respawn-button");
 
 const STORAGE_KEYS = {
   name: "multitank.name",
@@ -561,6 +563,7 @@ function updateSessionChrome() {
   document.body.classList.toggle("in-session", hasPlayableSession());
   document.body.classList.toggle("joining-session", false);
   syncJoinMatchButton();
+  refreshDeathOverlay();
   updateDiagnosticBanner();
 }
 
@@ -975,10 +978,24 @@ function clearPendingReliableMessages(type = null) {
   }
 }
 
+function hasPendingReliableMessage(type) {
+  for (const entry of pendingReliableMessages.values()) {
+    if (entry.payload.type === type) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function queueReliableMessage(payload) {
   if (payload.type === MESSAGE_TYPES.READY || payload.type === MESSAGE_TYPES.RESYNC) {
     clearPendingReliableMessages(MESSAGE_TYPES.READY);
     clearPendingReliableMessages(MESSAGE_TYPES.RESYNC);
+  }
+
+  if (payload.type === MESSAGE_TYPES.RESPAWN) {
+    clearPendingReliableMessages(MESSAGE_TYPES.RESPAWN);
   }
 
   const messageId = payload.messageId ?? createReliableMessageId(payload.type);
@@ -1497,6 +1514,44 @@ function canPredictLocalShots() {
   return canShootPhase(latestMatch?.phase) && localPlayer && !localPlayer.isSpectator;
 }
 
+function formatRespawnDelay(ms) {
+  const seconds = Math.max(0, ms) / 1000;
+  return seconds >= 10 ? `${Math.ceil(seconds)}s` : `${seconds.toFixed(1)}s`;
+}
+
+function refreshDeathOverlay(localPlayer = getLocalPlayer(), you = latestYou) {
+  if (!deathOverlayElement || !respawnButton) {
+    return;
+  }
+
+  const isSpectator = you?.isSpectator ?? localPlayer?.isSpectator ?? false;
+  const alive = localPlayer?.alive ?? you?.alive ?? true;
+  const respawnAt = localPlayer?.respawnAt ?? you?.respawnAt ?? null;
+  const waitingForAck = hasPendingReliableMessage(MESSAGE_TYPES.RESPAWN);
+  const hasRespawnTimer = Number.isFinite(respawnAt);
+  const remainingMs = hasRespawnTimer ? Math.max(0, respawnAt - estimateServerTime()) : 0;
+  const canRespawn = Boolean(currentRoomId) && hasRespawnTimer && remainingMs <= 0 && socket?.readyState === WebSocket.OPEN;
+  const shouldShow = Boolean(currentRoomId && !isSpectator && (localPlayer || you) && !alive);
+
+  deathOverlayElement.hidden = !shouldShow;
+  if (!shouldShow) {
+    return;
+  }
+
+  if (!hasRespawnTimer) {
+    respawnButton.disabled = true;
+    respawnButton.textContent = "Respawn";
+    return;
+  }
+
+  respawnButton.disabled = !canRespawn || waitingForAck;
+  respawnButton.textContent = waitingForAck && canRespawn
+    ? "Respawning..."
+    : canRespawn
+      ? "Respawn"
+      : `Respawn ${formatRespawnDelay(remainingMs)}`;
+}
+
 function refreshSessionUi(localPlayer = getLocalPlayer(), you = null) {
   const isSpectator = you?.isSpectator ?? localPlayer?.isSpectator ?? false;
   const isReady = you?.ready ?? localPlayer?.ready ?? false;
@@ -1534,6 +1589,7 @@ function refreshSessionUi(localPlayer = getLocalPlayer(), you = null) {
   setReadyButton(isReady, {
     disabled: !canReady
   });
+  refreshDeathOverlay(localPlayer, you);
 }
 
 function refreshLobbyUi(localPlayer = getLocalPlayer(), you = latestYou) {
@@ -2347,6 +2403,7 @@ function applySnapshot(payload) {
   }
 
   refreshLobbyUi(localPlayer, payload.you ?? latestYou);
+  refreshDeathOverlay(localPlayer, payload.you ?? latestYou);
 
   roundLabelElement.textContent = latestMatch
     ? `#${latestMatch.roundNumber || 0} | ${latestMatch.phase}`
@@ -2770,6 +2827,30 @@ function sendReady(ready) {
   sendReliable({
     type: MESSAGE_TYPES.READY,
     ready
+  });
+}
+
+function sendRespawn() {
+  const localPlayer = getLocalPlayer();
+  const isSpectator = localPlayer?.isSpectator ?? latestYou?.isSpectator ?? false;
+  const alive = localPlayer?.alive ?? latestYou?.alive ?? true;
+  const respawnAt = localPlayer?.respawnAt ?? latestYou?.respawnAt ?? null;
+
+  if (
+    !socket ||
+    socket.readyState !== WebSocket.OPEN ||
+    !currentRoomId ||
+    isSpectator ||
+    alive ||
+    !Number.isFinite(respawnAt) ||
+    estimateServerTime() < respawnAt ||
+    hasPendingReliableMessage(MESSAGE_TYPES.RESPAWN)
+  ) {
+    return;
+  }
+
+  sendReliable({
+    type: MESSAGE_TYPES.RESPAWN
   });
 }
 
@@ -3209,6 +3290,7 @@ function render(frameAt = performance.now()) {
   try {
     const deltaSeconds = Math.min(0.05, Math.max(0.001, (frameAt - lastRenderFrameAt) / 1000));
     lastRenderFrameAt = frameAt;
+    refreshDeathOverlay();
 
     updateRenderState(deltaSeconds, frameAt);
     updateLocalRenderState(deltaSeconds);
@@ -3278,6 +3360,11 @@ readyButton.addEventListener("click", () => {
     return;
   }
   sendReady(!(localPlayer?.ready ?? latestYou?.ready ?? false));
+});
+
+respawnButton?.addEventListener("click", () => {
+  unlockAudio();
+  sendRespawn();
 });
 
 refreshRoomsButton.addEventListener("click", () => {
