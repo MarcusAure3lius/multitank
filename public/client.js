@@ -3239,8 +3239,8 @@ function drawProjectile(projectile, options = {}) {
 
   const {
     alpha = 1,
-    headColor = "rgba(17, 17, 17, 0.98)",
-    tailColor = "rgba(17, 17, 17, 0.08)"
+    headColor = "#111111",
+    trailColor = "#111111"
   } = options;
   const x = projectile.renderX ?? projectile.x;
   const y = projectile.renderY ?? projectile.y;
@@ -3248,22 +3248,26 @@ function drawProjectile(projectile, options = {}) {
   const trailLength = getProjectileTrailLength(projectile);
   const tailX = x - Math.cos(angle) * trailLength;
   const tailY = y - Math.sin(angle) * trailLength;
-  const gradient = context.createLinearGradient(tailX, tailY, x, y);
+  const innerTrailX = x - Math.cos(angle) * trailLength * 0.58;
+  const innerTrailY = y - Math.sin(angle) * trailLength * 0.58;
   const strokeWidth = GAME_CONFIG.bullet.radius * 1.08;
 
-  gradient.addColorStop(0, tailColor);
-  gradient.addColorStop(0.62, "rgba(17, 17, 17, 0.45)");
-  gradient.addColorStop(1, headColor);
-
   context.save();
-  context.globalAlpha = alpha;
   context.lineCap = "round";
+  context.strokeStyle = trailColor;
+  context.globalAlpha = alpha * 0.22;
   context.lineWidth = strokeWidth;
-  context.strokeStyle = gradient;
   context.beginPath();
   context.moveTo(tailX, tailY);
   context.lineTo(x, y);
   context.stroke();
+  context.globalAlpha = alpha * 0.52;
+  context.lineWidth = strokeWidth * 0.74;
+  context.beginPath();
+  context.moveTo(innerTrailX, innerTrailY);
+  context.lineTo(x, y);
+  context.stroke();
+  context.globalAlpha = alpha;
   context.fillStyle = headColor;
   context.beginPath();
   context.arc(x, y, GAME_CONFIG.bullet.radius * 0.56, 0, Math.PI * 2);
@@ -3278,8 +3282,8 @@ function drawBullet(bullet) {
 function drawPredictedProjectile(projectile) {
   drawProjectile(projectile, {
     alpha: 0.52,
-    headColor: "rgba(17, 17, 17, 0.86)",
-    tailColor: "rgba(17, 17, 17, 0.04)"
+    headColor: "#111111",
+    trailColor: "#111111"
   });
 }
 
