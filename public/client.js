@@ -2673,10 +2673,16 @@ function connect(options = {}) {
     if (payload.type === MESSAGE_TYPES.JOINED) {
       clearPendingReliableMessages(MESSAGE_TYPES.JOIN);
       if (payload.gameVersion && payload.gameVersion !== GAME_BUILD_VERSION) {
-        setStatus(`Connected to a newer server build (${payload.gameVersion}). Refresh when convenient.`);
+        if (requestCompatibilityRefresh("game-version")) {
+          return;
+        }
+        setStatus(`Connected to a newer server build (${payload.gameVersion}). Refreshing...`);
       }
       if (payload.assetVersion && payload.assetVersion !== ASSET_BUNDLE_VERSION) {
-        setStatus(`Connected with newer assets available (${payload.assetVersion}). Refresh when convenient.`);
+        if (requestCompatibilityRefresh("asset-version")) {
+          return;
+        }
+        setStatus(`Connected with newer assets available (${payload.assetVersion}). Refreshing...`);
       }
       localPlayerId = payload.playerId;
       profileId = payload.profileId;
@@ -2736,7 +2742,10 @@ function connect(options = {}) {
       }
 
       if (payload.code === "game_version_mismatch") {
-        setStatus(`${payload.message} Continuing with the current session.`);
+        if (requestCompatibilityRefresh("game-version")) {
+          return;
+        }
+        setStatus(`${payload.message} Refreshing...`);
       }
 
       if (payload.code === "invalid_auth_token") {
@@ -2746,7 +2755,10 @@ function connect(options = {}) {
       }
 
       if (payload.code === "asset_version_mismatch") {
-        setStatus(`${payload.message} Continuing with the current session.`);
+        if (requestCompatibilityRefresh("asset-version")) {
+          return;
+        }
+        setStatus(`${payload.message} Refreshing...`);
       }
 
       if (payload.code === "unsupported_version") {
