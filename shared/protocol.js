@@ -162,7 +162,7 @@ export const GAME_CONFIG = Object.freeze({
     width: 9600,
     height: 5400,
     padding: 80,
-    teamZoneWidth: 1760,
+    teamZoneWidth: 1056,
     obstacles: Object.freeze([])
   }),
   objective: Object.freeze({
