@@ -8259,12 +8259,20 @@ function updateBotInputs(room, player, now) {
 
   const turretTarget = target ?? { x: GAME_CONFIG.objective.x, y: GAME_CONFIG.objective.y };
   player.input.turretAngle = Math.atan2(turretTarget.y - player.y, turretTarget.x - player.x);
+  const aimDelta = normalizeAngle(player.input.turretAngle - player.turretAngle);
+  const shootAimTolerance = soloBotDuel ? Math.max(GAME_CONFIG.ai.aimToleranceRadians, 1.05) : GAME_CONFIG.ai.aimToleranceRadians;
+  const closeRangeThreshold = GAME_CONFIG.ai.preferredRange * 0.45;
+  const effectiveAimTolerance =
+    targetDistance <= closeRangeThreshold
+      ? (soloBotDuel ? Math.PI : Math.max(shootAimTolerance, 1.35))
+      : shootAimTolerance;
   const canShootAtRange = soloBotDuel || targetDistance <= GAME_CONFIG.ai.shootRange;
 
   player.input.shoot =
     Boolean(target) &&
     canShootAtRange &&
     hasLineOfSight &&
+    Math.abs(aimDelta) <= effectiveAimTolerance &&
     !ai.stuck;
 }
 
