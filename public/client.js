@@ -1046,7 +1046,6 @@ function requestLifecycleResync(reason) {
   }
 
   lastResyncRequestAt = now;
-  stateChunks.clear();
   sendReliable({
     type: MESSAGE_TYPES.RESYNC,
     snapshotSeq: lastAppliedSnapshotSeq,
@@ -2343,6 +2342,10 @@ function applySnapshot(payload) {
   const replicationStatus = applyReplication(payload.replication, payload.serverTime, previousSnapshotSeq);
 
   if (replicationStatus === "resync") {
+    const hasPendingOlderFullSnapshot = Array.from(stateChunks.keys()).some((pendingSeq) => pendingSeq < snapshotSeq);
+    if (hasPendingOlderFullSnapshot) {
+      return;
+    }
     requestLifecycleResync("baseline_mismatch");
     return;
   }
@@ -2450,7 +2453,7 @@ function applyStateChunk(payload) {
   const existing = stateChunks.get(snapshotSeq) ?? {
     chunkCount,
     receivedAt: Date.now(),
-    chunks: new Array(chunkCount)
+    chunks: new Array(chunkCount).fill(null)
   };
 
   if (existing.chunkCount !== chunkCount) {
@@ -2464,7 +2467,9 @@ function applyStateChunk(payload) {
   stateChunks.set(snapshotSeq, existing);
   cleanupStaleStateChunks();
 
-  if (existing.chunks.some((chunk) => typeof chunk !== "string")) {
+  // Keep a dense array here; sparse holes are skipped by some()/every() and can
+  // make a single received fragment look like a complete snapshot.
+  if (!existing.chunks.every((chunk) => typeof chunk === "string")) {
     return;
   }
 
