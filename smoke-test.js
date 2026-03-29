@@ -599,7 +599,109 @@ function payloadContainsOwnedBullet(payload, ownerId) {
   );
 }
 
+function assertStateChunkAssemblyWaitsForAllFragments() {
+  const serializedState = serializePacket({
+    type: MESSAGE_TYPES.STATE,
+    roomId: "chunk-smoke",
+    snapshotSeq: 777,
+    simulationTick: 777,
+    snapshotTick: 777,
+    serverTime: Date.now(),
+    leaderboard: Array.from({ length: 80 }, (_, index) => ({
+      id: `chunk-player-${index}`,
+      name: `Chunk Player ${index}`,
+      teamId: index % 2 === 0 ? "alpha" : "bravo",
+      classId: "scout",
+      score: index,
+      assists: 0,
+      deaths: 0,
+      credits: 0,
+      connected: true,
+      ready: true,
+      isBot: false,
+      isSpectator: false,
+      queuedForSlot: false,
+      slotReserved: false,
+      afk: false
+    })),
+    players: Array.from({ length: 80 }, (_, index) => ({
+      id: `chunk-player-${index}`,
+      name: `Chunk Player ${index}`,
+      teamId: index % 2 === 0 ? "alpha" : "bravo",
+      classId: "scout",
+      x: 100 + index * 12,
+      y: 200 + index * 6,
+      angle: 0,
+      turretAngle: 0,
+      hp: GAME_CONFIG.tank.hitPoints,
+      score: index,
+      deaths: 0,
+      assists: 0,
+      credits: 0,
+      alive: true,
+      connected: true,
+      ready: true
+    })),
+    replication: {
+      mode: "full",
+      baselineSnapshotSeq: 0
+    }
+  });
+
+  const chunks = [];
+  for (let offset = 0; offset < serializedState.length; offset += GAME_CONFIG.network.stateChunkChars) {
+    chunks.push(serializedState.slice(offset, offset + GAME_CONFIG.network.stateChunkChars));
+  }
+
+  if (chunks.length < 3) {
+    throw new Error("Expected chunk assembly coverage to use a multi-fragment state payload");
+  }
+
+  const stateChunks = new Map();
+
+  const applyChunk = (chunkIndex) => {
+    const existing = stateChunks.get(777) ?? {
+      chunkCount: chunks.length,
+      chunks: new Array(chunks.length).fill(null)
+    };
+
+    existing.chunks[chunkIndex] = chunks[chunkIndex];
+    stateChunks.set(777, existing);
+
+    if (!existing.chunks.every((chunk) => typeof chunk === "string")) {
+      return null;
+    }
+
+    stateChunks.delete(777);
+    const rebuilt = deserializePacket(existing.chunks.join(""), {
+      allowLargePacket: true
+    });
+
+    if (!rebuilt.ok || rebuilt.packet.type !== MESSAGE_TYPES.STATE) {
+      throw new Error("Expected fragmented state packets to rebuild into a valid state snapshot");
+    }
+
+    return rebuilt.packet;
+  };
+
+  if (applyChunk(0) !== null) {
+    throw new Error("Expected fragmented state assembly to wait for every chunk before decoding");
+  }
+
+  for (let index = 1; index < chunks.length - 1; index += 1) {
+    if (applyChunk(index) !== null) {
+      throw new Error("Expected fragmented state assembly to stay pending until the final chunk arrives");
+    }
+  }
+
+  const rebuiltState = applyChunk(chunks.length - 1);
+  if (!rebuiltState || rebuiltState.snapshotSeq !== 777) {
+    throw new Error("Expected the final state fragment to complete authoritative snapshot assembly");
+  }
+}
+
 try {
+  assertStateChunkAssemblyWaitsForAllFragments();
   await waitForServer();
   const metaPayload = await requestJson("/meta");
 

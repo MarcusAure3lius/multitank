@@ -1,6 +1,6 @@
 export const PROTOCOL_VERSION = 2;
 export const MIN_SUPPORTED_PROTOCOL_VERSION = 1;
-export const GAME_BUILD_VERSION = "0.1.1";
+export const GAME_BUILD_VERSION = "0.1.2";
 export const ASSET_BUNDLE_VERSION = GAME_BUILD_VERSION;
 export const PROFILES_SCHEMA_VERSION = 2;
 

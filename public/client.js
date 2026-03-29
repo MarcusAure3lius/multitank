@@ -747,6 +747,18 @@ function ensureQuickJoinDefaults() {
   classSelect.value = GAME_CONFIG.lobby.classes[0].id;
 }
 
+function getPreferredQuickJoinRoomCode() {
+  const candidate = String(initialRoomFromUrl ?? "")
+    .trim()
+    .toLowerCase();
+
+  if (!candidate || candidate === "default") {
+    return null;
+  }
+
+  return candidate;
+}
+
 function compareRoomsForQuickJoin(left, right) {
   return (
     (right.activePlayers ?? 0) - (left.activePlayers ?? 0) ||
@@ -757,6 +769,11 @@ function compareRoomsForQuickJoin(left, right) {
 }
 
 async function resolveQuickJoinRoomCode() {
+  const preferredRoomCode = getPreferredQuickJoinRoomCode();
+  if (preferredRoomCode) {
+    return preferredRoomCode;
+  }
+
   const response = await fetch("/rooms", {
     headers: {
       Accept: "application/json"
