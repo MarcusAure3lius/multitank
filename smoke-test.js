@@ -257,7 +257,9 @@ async function waitForMessage(socket, predicate, timeoutMs = 12000, label = "mes
 
         if (chunkState.chunks.every((chunk) => typeof chunk === "string")) {
           stateChunks.delete(key);
-          const fullParsed = deserializePacket(chunkState.chunks.join(""));
+          const fullParsed = deserializePacket(chunkState.chunks.join(""), {
+            allowLargePacket: true
+          });
           if (!fullParsed.ok) {
             return;
           }

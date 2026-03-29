@@ -1435,14 +1435,15 @@ export function serializePacket(packet) {
   return JSON.stringify(encodePacketObject(packet));
 }
 
-export function deserializePacket(rawPacket) {
+export function deserializePacket(rawPacket, options = {}) {
+  const { allowLargePacket = false } = options;
   let serializedLength = 0;
   let packet = rawPacket;
 
   if (typeof rawPacket === "string") {
     serializedLength = rawPacket.length;
 
-    if (serializedLength > GAME_CONFIG.network.maxPacketBytes) {
+    if (!allowLargePacket && serializedLength > GAME_CONFIG.network.maxPacketBytes) {
       return buildParseError("Packet exceeded maximum size", "packet_too_large");
     }
 

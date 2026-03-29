@@ -2471,7 +2471,9 @@ function applyStateChunk(payload) {
   stateChunks.delete(snapshotSeq);
 
   try {
-    const rebuilt = deserializePacket(existing.chunks.join(""));
+    const rebuilt = deserializePacket(existing.chunks.join(""), {
+      allowLargePacket: true
+    });
     if (rebuilt.ok && rebuilt.packet.type === MESSAGE_TYPES.STATE) {
       applySnapshot(rebuilt.packet);
     } else {
