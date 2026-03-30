@@ -605,53 +605,13 @@ function updateLocalRenderState(deltaSeconds) {
     return null;
   }
 
-  if (canSimulateLocalPlayer() && localPlayer.alive) {
-    const inputState = getCapturedInputState();
-    const pointerWorldPosition = refreshPointerWorldPosition();
-    const targetTurretAngle = Math.atan2(
-      pointerWorldPosition.y - renderState.y,
-      pointerWorldPosition.x - renderState.x
-    );
-    const simulated = simulateTankMovement(
-      {
-        x: renderState.x,
-        y: renderState.y,
-        angle: renderState.angle,
-        turretAngle: renderState.turretAngle
-      },
-      {
-        ...inputState,
-        turretAngle: targetTurretAngle
-      },
-      deltaSeconds
-    );
-    const correctionStrength = hasMovementInputActive() ? 0.04 : 0.18;
-    const correctionDeadzone = hasMovementInputActive() ? 1.5 : 0.5;
-    const driftX = visualState.x - simulated.x;
-    const driftY = visualState.y - simulated.y;
-    const driftAngle = normalizeAngle(visualState.angle - simulated.angle);
-    const driftTurretAngle = normalizeAngle(visualState.turretAngle - simulated.turretAngle);
+  const followAmount = canSimulateLocalPlayer() && localPlayer.alive
+    ? clamp(1 - Math.exp(-(hasMovementInputActive() ? 28 : 18) * deltaSeconds), 0.24, 0.62)
+    : clamp(1 - Math.exp(-16 * deltaSeconds), 0.18, 0.4);
 
-    renderState.x =
-      simulated.x + (Math.abs(driftX) <= correctionDeadzone ? 0 : driftX * correctionStrength);
-    renderState.y =
-      simulated.y + (Math.abs(driftY) <= correctionDeadzone ? 0 : driftY * correctionStrength);
-    renderState.angle =
-      simulated.angle + (Math.abs(driftAngle) <= 0.01 ? 0 : driftAngle * correctionStrength);
-    const correctedTurretAngle =
-      simulated.turretAngle +
-      (Math.abs(driftTurretAngle) <= 0.01 ? 0 : driftTurretAngle * correctionStrength);
-    renderState.turretAngle = lerpAngle(
-      renderState.turretAngle,
-      correctedTurretAngle,
-      getTurretVisualSmoothing(deltaSeconds)
-    );
-    return renderState;
-  }
-
-  renderState.x = lerp(renderState.x, visualState.x, 0.24);
-  renderState.y = lerp(renderState.y, visualState.y, 0.24);
-  renderState.angle = lerpAngle(renderState.angle, visualState.angle, 0.24);
+  renderState.x = lerp(renderState.x, visualState.x, followAmount);
+  renderState.y = lerp(renderState.y, visualState.y, followAmount);
+  renderState.angle = lerpAngle(renderState.angle, visualState.angle, followAmount);
   renderState.turretAngle = lerpAngle(
     renderState.turretAngle,
     visualState.turretAngle,
