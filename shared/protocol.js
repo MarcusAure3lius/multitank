@@ -1,6 +1,6 @@
 export const PROTOCOL_VERSION = 2;
 export const MIN_SUPPORTED_PROTOCOL_VERSION = 1;
-export const GAME_BUILD_VERSION = "0.1.2";
+export const GAME_BUILD_VERSION = "0.1.3";
 export const ASSET_BUNDLE_VERSION = GAME_BUILD_VERSION;
 export const PROFILES_SCHEMA_VERSION = 2;
 
@@ -136,14 +136,14 @@ export const GAME_CONFIG = Object.freeze({
     heartbeatIntervalMs: 5000,
     heartbeatTimeoutMs: 180000,
     maxMissedHeartbeats: 6,
-    maxOutgoingBytesPerSecond: 96000,
-    maxStatePayloadBytes: 12000,
+    maxOutgoingBytesPerSecond: 256000,
+    maxStatePayloadBytes: 24000,
     stateChunkChars: 7000,
     maxPacketBytes: 65536,
     maxRecentEvents: 48
   }),
   replication: Object.freeze({
-    fullSyncIntervalMs: 5000,
+    fullSyncIntervalMs: 8000,
     cellSize: 400,
     bulletInterestRadius: 960,
     maxPlayerRecordsPerSnapshot: 16,

@@ -70,15 +70,15 @@ const SESSION_STORAGE_KEYS = {
 };
 
 const NETWORK_RENDER = Object.freeze({
-  interpolationBackTimeMs: 48,
-  minInterpolationBackTimeMs: 16,
-  maxExtrapolationMs: 96,
-  historyLimit: 24,
+  interpolationBackTimeMs: 96,
+  minInterpolationBackTimeMs: 32,
+  maxExtrapolationMs: 144,
+  historyLimit: 32,
   playerTeleportDistance: 220,
   bulletTeleportDistance: 140,
   snapDistance: 120,
-  remoteSmoothing: 0.68,
-  clockSmoothing: 0.12
+  remoteSmoothing: 0.52,
+  clockSmoothing: 0.18
 });
 
 const NETWORK_RECOVERY = Object.freeze({
@@ -165,6 +165,8 @@ let roomBrowserRefreshInFlight = false;
 let audioContext = null;
 let renderFailure = null;
 let renderLoopStopped = false;
+let lastScoreboardRenderKey = "";
+let lastResultsRenderKey = "";
 const assetState = {
   manifest: null,
   images: new Map(),
@@ -243,8 +245,110 @@ function requestCompatibilityRefresh(reason) {
 }
 
 function setStatus(text) {
-  statusElement.textContent = text;
+  setElementText(statusElement, text);
   updateDiagnosticBanner();
+}
+
+function setElementText(element, text) {
+  if (!element) {
+    return;
+  }
+
+  const nextText = String(text ?? "");
+  if (element.textContent !== nextText) {
+    element.textContent = nextText;
+  }
+}
+
+function buildLeaderboardRenderKey(leaderboard = latestLeaderboard) {
+  return (leaderboard ?? []).map((player) =>
+    [
+      player.id,
+      player.name,
+      player.teamId,
+      player.classId,
+      player.score,
+      player.assists ?? 0,
+      player.deaths,
+      player.credits,
+      player.ready ? 1 : 0,
+      player.afk ? 1 : 0,
+      player.slotReserved ? 1 : 0,
+      player.queuedForSlot ? 1 : 0,
+      player.connected === false ? 0 : 1,
+      player.isBot ? 1 : 0,
+      player.isSpectator ? 1 : 0
+    ].join(":")
+  ).join("|");
+}
+
+function renderScoreboard(leaderboard = latestLeaderboard) {
+  const resolvedLeaderboard = Array.isArray(leaderboard) ? leaderboard : [];
+  const renderKey = buildLeaderboardRenderKey(resolvedLeaderboard);
+  if (renderKey === lastScoreboardRenderKey) {
+    return;
+  }
+
+  lastScoreboardRenderKey = renderKey;
+  scoreboardElement.innerHTML = "";
+
+  for (const player of resolvedLeaderboard) {
+    const item = document.createElement("li");
+    item.innerHTML = `<strong>${player.name}${player.isBot ? " [BOT]" : ""}${player.isSpectator ? " [SPEC]" : ""}</strong><span>${getTeamName(player.teamId)} / ${player.classId} | ${player.score} / ${player.assists ?? 0} / ${player.deaths} | ${player.credits}cr${player.ready ? " / ready" : ""}${player.afk ? " / afk" : ""}${player.slotReserved ? " / reserved" : ""}${player.queuedForSlot ? " / queued" : ""}${player.connected ? "" : " / dc"}</span>`;
+    scoreboardElement.append(item);
+  }
+}
+
+function buildResultsRenderKey() {
+  return [
+    latestMatch?.phase ?? "",
+    latestMatch?.winnerName ?? "",
+    latestLobby?.rematchVotes ?? 0,
+    latestLobby?.activePlayers ?? 0,
+    buildLeaderboardRenderKey(latestLeaderboard)
+  ].join("|");
+}
+
+function renderResultsList() {
+  const shouldShow = shouldShowResultsPhase(latestMatch?.phase);
+  resultsCard.hidden = !shouldShow;
+
+  if (!shouldShow) {
+    if (lastResultsRenderKey) {
+      lastResultsRenderKey = "";
+      resultsListElement.replaceChildren();
+    }
+    return;
+  }
+
+  const renderKey = buildResultsRenderKey();
+  if (renderKey === lastResultsRenderKey) {
+    return;
+  }
+
+  lastResultsRenderKey = renderKey;
+  resultsListElement.replaceChildren();
+
+  const activePlayers = latestLobby?.activePlayers ?? 0;
+  const rematchVotes = latestLobby?.rematchVotes ?? 0;
+  const winnerName = latestMatch?.winnerName ?? "No winner";
+  const voteTarget = Math.max(1, activePlayers);
+  setElementText(
+    resultsSummaryElement,
+    latestMatch?.phase === MATCH_PHASES.ROUND_END
+      ? `${winnerName} | locking round results`
+      : `${winnerName} | rematch votes ${rematchVotes}/${voteTarget}`
+  );
+
+  for (const player of latestLeaderboard) {
+    if (player.isSpectator) {
+      continue;
+    }
+
+    const item = document.createElement("li");
+    item.innerHTML = `<div class="results-title">${escapeHtml(player.name)}</div><div class="results-meta">${escapeHtml(getTeamName(player.teamId))} / ${escapeHtml(player.classId)} | ${player.score} score | ${player.assists ?? 0} assists | ${player.deaths} deaths | ${player.credits} credits${player.ready ? " | ready" : ""}</div>`;
+    resultsListElement.append(item);
+  }
 }
 
 function formatSocketCloseInfo(closeInfo) {
@@ -1612,16 +1716,16 @@ function refreshSessionUi(localPlayer = getLocalPlayer(), you = null) {
 
 function refreshLobbyUi(localPlayer = getLocalPlayer(), you = latestYou) {
   if (!currentRoomId && !latestLobby) {
-    roomLabelElement.textContent = roomInput.value || "-";
-    lobbyRoomCodeElement.textContent = `Room code: ${roomInput.value || "-"}`;
-    lobbySummaryElement.textContent = "Connect deploys you straight into the arena using these room and loadout defaults.";
+    setElementText(roomLabelElement, roomInput.value || "-");
+    setElementText(lobbyRoomCodeElement, `Room code: ${roomInput.value || "-"}`);
+    setElementText(lobbySummaryElement, "Connect deploys you straight into the arena using these room and loadout defaults.");
     mapSelect.value = GAME_CONFIG.lobby.maps[0].id;
     teamSelect.value = GAME_CONFIG.lobby.teams[0].id;
     classSelect.value = GAME_CONFIG.lobby.classes[0].id;
     mapSelect.disabled = true;
     teamSelect.disabled = true;
     classSelect.disabled = true;
-    resultsCard.hidden = true;
+    renderResultsList();
     return;
   }
 
@@ -1648,14 +1752,16 @@ function refreshLobbyUi(localPlayer = getLocalPlayer(), you = latestYou) {
         ? " | warmup drive active"
         : "";
 
-  lobbyRoomCodeElement.textContent = `Room code: ${roomCode}`;
-  lobbySummaryElement.textContent =
+  setElementText(lobbyRoomCodeElement, `Room code: ${roomCode}`);
+  setElementText(
+    lobbySummaryElement,
     `${ownerName} owns this room | ${mapName} | ${activePlayers}/${GAME_CONFIG.session.maxHumanPlayersPerRoom} active | ${spectators} spectators` +
     stageHint +
     (isResultsPhase(phase) && activePlayers > 0
       ? ` | ${rematchVotes}/${activePlayers} rematch votes`
-      : "");
-  roomLabelElement.textContent = `${roomCode}${latestLobby ? ` | ${latestLobby.mapName}` : ""}`;
+      : "")
+  );
+  setElementText(roomLabelElement, `${roomCode}${latestLobby ? ` | ${latestLobby.mapName}` : ""}`);
 
   mapSelect.value = latestLobby?.mapId ?? GAME_CONFIG.lobby.maps[0].id;
   teamSelect.value = playerTeamId;
@@ -1665,29 +1771,7 @@ function refreshLobbyUi(localPlayer = getLocalPlayer(), you = latestYou) {
   teamSelect.disabled = !canEditLoadout;
   classSelect.disabled = !canEditLoadout;
 
-  resultsCard.hidden = !shouldShowResultsPhase(latestMatch?.phase);
-  resultsListElement.replaceChildren();
-
-  if (!shouldShowResultsPhase(latestMatch?.phase)) {
-    return;
-  }
-
-  const winnerName = latestMatch?.winnerName ?? "No winner";
-  const voteTarget = Math.max(1, activePlayers);
-  resultsSummaryElement.textContent =
-    latestMatch?.phase === MATCH_PHASES.ROUND_END
-      ? `${winnerName} | locking round results`
-      : `${winnerName} | rematch votes ${rematchVotes}/${voteTarget}`;
-
-  for (const player of latestLeaderboard) {
-    if (player.isSpectator) {
-      continue;
-    }
-
-    const item = document.createElement("li");
-    item.innerHTML = `<div class="results-title">${escapeHtml(player.name)}</div><div class="results-meta">${escapeHtml(getTeamName(player.teamId))} / ${escapeHtml(player.classId)} | ${player.score} score | ${player.assists ?? 0} assists | ${player.deaths} deaths | ${player.credits} credits${player.ready ? " | ready" : ""}</div>`;
-    resultsListElement.append(item);
-  }
+  renderResultsList();
 }
 
 function renderRoomBrowser(rooms) {
@@ -2412,8 +2496,10 @@ function applySnapshot(payload) {
       setStatus("Connected");
     }
 
-    playerLabelElement.textContent =
-      `${localPlayer.name}${localPlayer.isSpectator ? " [SPEC]" : ""} (HP ${localPlayer.hp}/${GAME_CONFIG.tank.hitPoints} | ${getTeamName(localPlayer.teamId)}/${localPlayer.classId} | ${localPlayer.score}/${localPlayer.assists ?? 0}/${localPlayer.deaths} | ${localPlayer.credits} cr)`;
+    setElementText(
+      playerLabelElement,
+      `${localPlayer.name}${localPlayer.isSpectator ? " [SPEC]" : ""} (HP ${localPlayer.hp}/${GAME_CONFIG.tank.hitPoints} | ${getTeamName(localPlayer.teamId)}/${localPlayer.classId} | ${localPlayer.score}/${localPlayer.assists ?? 0}/${localPlayer.deaths} | ${localPlayer.credits} cr)`
+    );
 
     if (payload.you) {
       refreshSessionUi(localPlayer, payload.you);
@@ -2422,8 +2508,10 @@ function applySnapshot(payload) {
         payload.you.lastProcessedInputSeq ?? 0,
         payload.you.lastProcessedInputClientSentAt ?? 0
       );
-      profileLabelElement.textContent =
-        `${payload.you.profileId.slice(0, 8)} | ${payload.you.profileStats.kills}K/${payload.you.profileStats.deaths}D`;
+      setElementText(
+        profileLabelElement,
+        `${payload.you.profileId.slice(0, 8)} | ${payload.you.profileStats.kills}K/${payload.you.profileStats.deaths}D`
+      );
     }
   } else if (payload.you) {
     refreshSessionUi(null, payload.you);
@@ -2435,16 +2523,14 @@ function applySnapshot(payload) {
   refreshLobbyUi(localPlayer, payload.you ?? latestYou);
   refreshDeathOverlay(localPlayer, payload.you ?? latestYou);
 
-  roundLabelElement.textContent = latestMatch
-    ? `#${latestMatch.roundNumber || 0} | ${latestMatch.phase}`
-    : "-";
-  matchStatusElement.textContent = buildMatchStatusText();
+  setElementText(
+    roundLabelElement,
+    latestMatch ? `#${latestMatch.roundNumber || 0} | ${latestMatch.phase}` : "-"
+  );
+  setElementText(matchStatusElement, buildMatchStatusText());
 
-  scoreboardElement.innerHTML = "";
-  for (const player of payload.leaderboard ?? []) {
-    const item = document.createElement("li");
-    item.innerHTML = `<strong>${player.name}${player.isBot ? " [BOT]" : ""}${player.isSpectator ? " [SPEC]" : ""}</strong><span>${getTeamName(player.teamId)} / ${player.classId} | ${player.score} / ${player.assists ?? 0} / ${player.deaths} | ${player.credits}cr${player.ready ? " / ready" : ""}${player.afk ? " / afk" : ""}${player.slotReserved ? " / reserved" : ""}${player.queuedForSlot ? " / queued" : ""}${player.connected ? "" : " / dc"}</span>`;
-    scoreboardElement.append(item);
+  if (Array.isArray(payload.leaderboard)) {
+    renderScoreboard(payload.leaderboard);
   }
 }
 
@@ -2639,7 +2725,9 @@ function connect(options = {}) {
     hasSeenLocalPlayerSnapshot = false;
     processedEventIds.clear();
     processedEventOrder.length = 0;
-    scoreboardElement.innerHTML = "";
+    lastScoreboardRenderKey = "";
+    lastResultsRenderKey = "";
+    renderScoreboard([]);
     renderKillFeed();
     localPlayerId = null;
     currentRoomId = null;
@@ -2647,13 +2735,13 @@ function connect(options = {}) {
     setReadyButton(false);
     latestLatencyMs = 0;
     latencyElement.textContent = "--";
-    matchStatusElement.textContent = "Waiting for server";
+    setElementText(matchStatusElement, "Waiting for server");
     refreshLobbyUi();
   }
 
   setStatus(isReconnect ? "Reconnecting to server..." : "Connecting to server...");
-  roomLabelElement.textContent = roomInput.value || "default";
-  playerLabelElement.textContent = nameInput.value || "Commander";
+  setElementText(roomLabelElement, roomInput.value || "default");
+  setElementText(playerLabelElement, nameInput.value || "Commander");
 
   const nextSocket = new WebSocket(buildSocketUrl());
   socket = nextSocket;
@@ -2855,7 +2943,9 @@ function connect(options = {}) {
     stateChunks.clear();
     processedEventIds.clear();
     processedEventOrder.length = 0;
-    scoreboardElement.innerHTML = "";
+    lastScoreboardRenderKey = "";
+    lastResultsRenderKey = "";
+    renderScoreboard([]);
     combatEffects.length = 0;
     killFeedEntries.length = 0;
     renderKillFeed();
@@ -3070,7 +3160,7 @@ function updateRenderState(deltaSeconds, frameAt) {
 
     bullet.teleportFrames = Math.max(0, (bullet.teleportFrames ?? 0) - 1);
   }
-  matchStatusElement.textContent = buildMatchStatusText();
+  setElementText(matchStatusElement, buildMatchStatusText());
 }
 
 function drawBackground() {
