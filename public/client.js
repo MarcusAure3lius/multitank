@@ -12,6 +12,7 @@ import {
   MESSAGE_TYPES,
   SHAPE_TYPES,
   SOUND_CUES,
+  STAT_NAMES,
   STATUS_EFFECTS,
   VFX_CUES,
   XP_PER_LEVEL,
@@ -106,13 +107,37 @@ const shapes = new Map();
 const predictedProjectiles = new Map();
 const combatEffects = [];
 const killFeedEntries = [];
+const STAT_LABELS = Object.freeze({
+  healthRegen: "Health Regen",
+  maxHealth: "Max Health",
+  bodyDamage: "Body Damage",
+  bulletSpeed: "Bullet Speed",
+  bulletPenetration: "Penetration",
+  bulletDamage: "Bullet Damage",
+  reload: "Reload",
+  movementSpeed: "Move Speed"
+});
+
+function createEmptyAllocatedStats() {
+  return Object.fromEntries(STAT_NAMES.map((statName) => [statName, 0]));
+}
+
+function normalizeAllocatedStats(stats, fallback = createEmptyAllocatedStats()) {
+  const nextStats = { ...fallback };
+  for (const statName of STAT_NAMES) {
+    const rawValue = Number(stats?.[statName]);
+    nextStats[statName] = Number.isFinite(rawValue) ? clamp(Math.round(rawValue), 0, 7) : (fallback[statName] ?? 0);
+  }
+  return nextStats;
+}
 
 // XP / upgrade state
 let localXp = 0;
 let localLevel = 1;
 let localStatPoints = 0;
 let localPendingUpgrades = [];
-let localTankClassId = 'basic';
+let localTankClassId = "basic";
+let localStats = createEmptyAllocatedStats();
 let upgradeMenuOpen = false;
 const keys = new Set();
 const pendingInputs = [];
@@ -1609,6 +1634,33 @@ function canPredictLocalShots() {
   return canShootPhase(latestMatch?.phase) && localPlayer && !localPlayer.isSpectator;
 }
 
+function getLocalTankClassDef() {
+  return CLASS_TREE[localTankClassId] ?? CLASS_TREE.basic;
+}
+
+function getLocalStatValue(statName) {
+  return localStats?.[statName] ?? 0;
+}
+
+function getEffectiveLocalMoveSpeed() {
+  return GAME_CONFIG.tank.speed * (1 + getLocalStatValue("movementSpeed") * 0.07);
+}
+
+function getEffectiveLocalReloadMs() {
+  const classDef = getLocalTankClassDef();
+  const classReloadMs = classDef.reloadMs ?? GAME_CONFIG.tank.shootCooldownMs;
+  return Math.max(50, classReloadMs * (1 - getLocalStatValue("reload") * 0.065));
+}
+
+function getEffectiveLocalBulletSpeed() {
+  const classDef = getLocalTankClassDef();
+  return (classDef.bulletSpeed ?? GAME_CONFIG.bullet.speed) * (1 + getLocalStatValue("bulletSpeed") * 0.08);
+}
+
+function getEffectiveLocalBulletRadius() {
+  return getLocalTankClassDef().bulletRadius ?? GAME_CONFIG.bullet.radius;
+}
+
 function formatRespawnDelay(ms) {
   const seconds = Math.max(0, ms) / 1000;
   return seconds >= 10 ? `${Math.ceil(seconds)}s` : `${seconds.toFixed(1)}s`;
@@ -1984,7 +2036,7 @@ function simulateTankMovement(state, input, deltaSeconds) {
   const normalizedMoveX = moveMagnitude > 0 ? moveX / moveMagnitude : 0;
   const normalizedMoveY = moveMagnitude > 0 ? moveY / moveMagnitude : 0;
   const nextAngle = moveMagnitude > 0 ? Math.atan2(normalizedMoveY, normalizedMoveX) : state.angle;
-  const moveSpeed = moveMagnitude > 0 ? GAME_CONFIG.tank.speed : 0;
+  const moveSpeed = moveMagnitude > 0 ? getEffectiveLocalMoveSpeed() : 0;
   const nextX = Math.max(
     GAME_CONFIG.world.padding,
     Math.min(GAME_CONFIG.world.width - GAME_CONFIG.world.padding, state.x + normalizedMoveX * moveSpeed * deltaSeconds)
@@ -2014,28 +2066,42 @@ function simulateTankMovement(state, input, deltaSeconds) {
 
 function spawnPredictedProjectile(localPlayer, inputFrame) {
   const now = performance.now();
-  const barrelDistance = GAME_CONFIG.tank.radius + 10;
   const origin = localRenderState ?? {
     x: getPlayerVisualX(localPlayer),
     y: getPlayerVisualY(localPlayer)
   };
-  const muzzleX = origin.x + Math.cos(inputFrame.turretAngle) * barrelDistance;
-  const muzzleY = origin.y + Math.sin(inputFrame.turretAngle) * barrelDistance;
+  const classDef = getLocalTankClassDef();
+  const shotBarrels = classDef.barrels ?? [{ x: 40, y: 0, w: 40, h: 14 }];
+  const rightX = -Math.sin(inputFrame.turretAngle);
+  const rightY = Math.cos(inputFrame.turretAngle);
+  const projectileRadius = getEffectiveLocalBulletRadius();
+  const projectileSpeed = getEffectiveLocalBulletSpeed();
 
-  predictedProjectiles.set(`predicted:${inputFrame.seq}`, {
-    id: `predicted:${inputFrame.seq}`,
-    ownerId: localPlayerId,
-    x: muzzleX,
-    y: muzzleY,
-    angle: inputFrame.turretAngle,
-    renderX: muzzleX,
-    renderY: muzzleY,
-    previousRenderX: muzzleX,
-    previousRenderY: muzzleY,
-    renderAngle: inputFrame.turretAngle,
-    renderSpeed: GAME_CONFIG.bullet.speed,
-    bornAt: now,
-    expiresAt: now + Math.min(450, GAME_CONFIG.bullet.lifeMs)
+  shotBarrels.forEach((barrel, index) => {
+    const barrelAngle = inputFrame.turretAngle + (barrel.angle ?? 0);
+    const lateralOffset = barrel.y ?? 0;
+    const muzzleDistance = GAME_CONFIG.tank.radius + 8;
+    const muzzleX =
+      origin.x + Math.cos(barrelAngle) * muzzleDistance + rightX * lateralOffset;
+    const muzzleY =
+      origin.y + Math.sin(barrelAngle) * muzzleDistance + rightY * lateralOffset;
+
+    predictedProjectiles.set(`predicted:${inputFrame.seq}:${index}`, {
+      id: `predicted:${inputFrame.seq}:${index}`,
+      ownerId: localPlayerId,
+      x: muzzleX,
+      y: muzzleY,
+      angle: barrelAngle,
+      radius: projectileRadius,
+      renderX: muzzleX,
+      renderY: muzzleY,
+      previousRenderX: muzzleX,
+      previousRenderY: muzzleY,
+      renderAngle: barrelAngle,
+      renderSpeed: projectileSpeed,
+      bornAt: now,
+      expiresAt: now + Math.min(450, GAME_CONFIG.bullet.lifeMs)
+    });
   });
 
   triggerShotRecoil(localPlayer, now, { predicted: true });
@@ -2479,6 +2545,7 @@ function applySnapshot(payload) {
     localStatPoints = payload.you.statPoints ?? localStatPoints;
     localPendingUpgrades = payload.you.pendingUpgrades ?? localPendingUpgrades;
     localTankClassId = payload.you.tankClassId ?? localTankClassId;
+    localStats = normalizeAllocatedStats(payload.you.stats, localStats);
     if (localPendingUpgrades.length > 0 && prevUpgrades.length === 0) {
       upgradeMenuOpen = true;
     }
@@ -2499,10 +2566,13 @@ function applySnapshot(payload) {
 
     setElementText(
       playerLabelElement,
-      `${localPlayer.name}${localPlayer.isSpectator ? " [SPEC]" : ""} (HP ${localPlayer.hp}/${GAME_CONFIG.tank.hitPoints} | ${getTeamName(localPlayer.teamId)}/${localPlayer.classId} | ${localPlayer.score}/${localPlayer.assists ?? 0}/${localPlayer.deaths} | ${localPlayer.credits} cr)`
+      `${localPlayer.name}${localPlayer.isSpectator ? " [SPEC]" : ""} (HP ${Math.round(localPlayer.hp ?? 0)}/${Math.round(localPlayer.maxHp ?? payload.you?.maxHp ?? GAME_CONFIG.tank.hitPoints)} | ${getTeamName(localPlayer.teamId)}/${localPlayer.tankClassId ?? localTankClassId} | ${localPlayer.score}/${localPlayer.assists ?? 0}/${localPlayer.deaths} | ${localPlayer.credits} cr)`
     );
 
     if (payload.you) {
+      localPlayer.maxHp = payload.you.maxHp ?? localPlayer.maxHp;
+      localPlayer.tankClassId = payload.you.tankClassId ?? localPlayer.tankClassId ?? localTankClassId;
+      localPlayer.stats = normalizeAllocatedStats(payload.you.stats, localPlayer.stats ?? localStats);
       refreshSessionUi(localPlayer, payload.you);
       replayPendingInputs(
         localPlayer,
@@ -2699,6 +2769,7 @@ function connect(options = {}) {
   if (!isReconnect) {
     players.clear();
     bullets.clear();
+    shapes.clear();
     predictedProjectiles.clear();
     pendingInputs.length = 0;
     nextInputSeq = 1;
@@ -2719,6 +2790,13 @@ function connect(options = {}) {
     latestLatencyMs = 0;
     lastServerMessageAt = 0;
     lastRenderFrameAt = performance.now();
+    localXp = 0;
+    localLevel = 1;
+    localStatPoints = 0;
+    localPendingUpgrades = [];
+    localTankClassId = "basic";
+    localStats = createEmptyAllocatedStats();
+    upgradeMenuOpen = false;
     camera.x = 0;
     camera.y = 0;
     cameraNeedsSnap = true;
@@ -2928,6 +3006,7 @@ function connect(options = {}) {
     matchStatusElement.textContent = "Disconnected";
     players.clear();
     bullets.clear();
+    shapes.clear();
     predictedProjectiles.clear();
     latestObjective = null;
     latestLobby = null;
@@ -2952,6 +3031,13 @@ function connect(options = {}) {
     renderKillFeed();
     pendingInputs.length = 0;
     lastStallWarningAt = 0;
+    localXp = 0;
+    localLevel = 1;
+    localStatPoints = 0;
+    localPendingUpgrades = [];
+    localTankClassId = "basic";
+    localStats = createEmptyAllocatedStats();
+    upgradeMenuOpen = false;
     camera.x = 0;
     camera.y = 0;
     cameraNeedsSnap = true;
@@ -3317,7 +3403,7 @@ function drawTank(player) {
   const alpha = player.connected === false ? 0.42 : 1;
 
   // Look up class def for barrel rendering
-  const effectiveClassId = isLocalPlayer ? localTankClassId : (player.classId ?? 'basic');
+  const effectiveClassId = isLocalPlayer ? localTankClassId : (player.tankClassId ?? player.classId ?? "basic");
   const classDef = CLASS_TREE[effectiveClassId] ?? CLASS_TREE.basic;
   const barrels = classDef.barrels ?? [{ x: 40, y: 0, w: 40, h: 14 }];
 
@@ -3367,7 +3453,7 @@ function drawTank(player) {
   context.restore();
 
   // Health bar
-  const hpRatio = clamp((Number(player.hp) || 0) / GAME_CONFIG.tank.hitPoints, 0, 1);
+  const hpRatio = clamp((Number(player.hp) || 0) / Math.max(1, Number(player.maxHp) || GAME_CONFIG.tank.hitPoints), 0, 1);
   const healthBarWidth = 52;
   const healthBarHeight = 7;
   const healthBarY = y - bodyRadius - 16;
@@ -3393,12 +3479,13 @@ function drawProjectile(projectile, options = {}) {
   } = options;
   const x = projectile.renderX ?? projectile.x;
   const y = projectile.renderY ?? projectile.y;
+  const radius = projectile.radius ?? GAME_CONFIG.bullet.radius;
 
   context.save();
   context.globalAlpha = alpha;
   context.fillStyle = headColor;
   context.beginPath();
-  context.arc(x, y, GAME_CONFIG.bullet.radius, 0, Math.PI * 2);
+  context.arc(x, y, radius, 0, Math.PI * 2);
   context.fill();
   context.restore();
 }
@@ -3550,6 +3637,125 @@ function drawXpBar() {
   context.restore();
 }
 
+const statButtonRects = [];
+
+function allocateLocalStatPoint(statName) {
+  if (
+    !STAT_NAMES.includes(statName) ||
+    !currentRoomId ||
+    !socket ||
+    socket.readyState !== WebSocket.OPEN ||
+    localStatPoints <= 0
+  ) {
+    return false;
+  }
+
+  const currentLevel = localStats?.[statName] ?? 0;
+  if (currentLevel >= 7) {
+    return false;
+  }
+
+  sendReliable({
+    type: MESSAGE_TYPES.STAT_POINT,
+    statName
+  });
+
+  localStatPoints = Math.max(0, localStatPoints - 1);
+  localStats = {
+    ...localStats,
+    [statName]: currentLevel + 1
+  };
+
+  const localPlayer = getLocalPlayer();
+  if (localPlayer) {
+    localPlayer.stats = {
+      ...(localPlayer.stats ?? createEmptyAllocatedStats()),
+      [statName]: currentLevel + 1
+    };
+    if (statName === "maxHealth") {
+      const previousMaxHp = Number(localPlayer.maxHp) || GAME_CONFIG.tank.hitPoints;
+      const nextMaxHp = Math.round(GAME_CONFIG.tank.hitPoints * (1 + (currentLevel + 1) * 0.12));
+      localPlayer.maxHp = nextMaxHp;
+      localPlayer.hp = Math.min(nextMaxHp, (Number(localPlayer.hp) || previousMaxHp) + (nextMaxHp - previousMaxHp));
+    }
+  }
+
+  return true;
+}
+
+function drawStatPanel() {
+  if (!currentRoomId) {
+    statButtonRects.length = 0;
+    return;
+  }
+
+  statButtonRects.length = 0;
+
+  const panelWidth = 252;
+  const rowHeight = 32;
+  const panelHeight = 54 + STAT_NAMES.length * rowHeight;
+  const panelX = 14;
+  const panelY = Math.max(14, canvas.height - panelHeight - 56);
+
+  context.save();
+  context.fillStyle = "rgba(0,0,0,0.56)";
+  context.beginPath();
+  context.roundRect(panelX, panelY, panelWidth, panelHeight, 10);
+  context.fill();
+
+  context.font = "bold 12px Segoe UI";
+  context.textAlign = "left";
+  context.fillStyle = "#00c8dc";
+  context.fillText("STATS", panelX + 12, panelY + 18);
+
+  context.textAlign = "right";
+  context.fillStyle = localStatPoints > 0 ? "#ffd166" : "#dde6ff";
+  context.fillText(`PTS ${localStatPoints}`, panelX + panelWidth - 12, panelY + 18);
+
+  for (let index = 0; index < STAT_NAMES.length; index += 1) {
+    const statName = STAT_NAMES[index];
+    const currentValue = localStats?.[statName] ?? 0;
+    const rowY = panelY + 28 + index * rowHeight;
+    const labelY = rowY + 12;
+
+    context.textAlign = "left";
+    context.font = "11px Segoe UI";
+    context.fillStyle = "#f7fbff";
+    context.fillText(`${index + 1}. ${STAT_LABELS[statName] ?? statName}`, panelX + 12, labelY);
+
+    const barsX = panelX + 12;
+    const barsY = rowY + 16;
+    for (let barIndex = 0; barIndex < 7; barIndex += 1) {
+      context.fillStyle = barIndex < currentValue ? "#00c8dc" : "rgba(255,255,255,0.14)";
+      context.fillRect(barsX + barIndex * 18, barsY, 14, 7);
+    }
+
+    if (localStatPoints > 0 && currentValue < 7) {
+      const buttonX = panelX + panelWidth - 34;
+      const buttonY = rowY + 4;
+      const buttonW = 20;
+      const buttonH = 20;
+      context.fillStyle = "rgba(255,209,102,0.95)";
+      context.beginPath();
+      context.roundRect(buttonX, buttonY, buttonW, buttonH, 5);
+      context.fill();
+      context.fillStyle = "#111111";
+      context.font = "bold 15px Segoe UI";
+      context.textAlign = "center";
+      context.fillText("+", buttonX + buttonW / 2, buttonY + 15);
+      statButtonRects.push({
+        x: buttonX,
+        y: buttonY,
+        w: buttonW,
+        h: buttonH,
+        statName
+      });
+    }
+  }
+
+  context.restore();
+}
+
 function drawCanvasLeaderboard() {
   if (!currentRoomId || !latestLeaderboard || latestLeaderboard.length === 0) {
     return;
@@ -3625,8 +3831,11 @@ function drawCanvasKillFeed() {
 
 function drawUpgradeMenu() {
   if (!upgradeMenuOpen || localPendingUpgrades.length === 0) {
+    upgradeButtonRects.length = 0;
     return;
   }
+
+  upgradeButtonRects.length = 0;
 
   const cw = canvas.width;
   const ch = canvas.height;
@@ -3688,6 +3897,21 @@ function drawUpgradeMenu() {
 }
 
 const upgradeButtonRects = [];
+function handleStatPointClick(canvasX, canvasY) {
+  for (const btn of statButtonRects) {
+    if (
+      canvasX >= btn.x &&
+      canvasX <= btn.x + btn.w &&
+      canvasY >= btn.y &&
+      canvasY <= btn.y + btn.h &&
+      allocateLocalStatPoint(btn.statName)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 function handleUpgradeClick(canvasX, canvasY) {
   if (!upgradeMenuOpen) {
@@ -3781,6 +4005,7 @@ function render(frameAt = performance.now()) {
     drawCanvasLeaderboard();
     drawCanvasKillFeed();
     drawXpBar();
+    drawStatPanel();
     drawUpgradeMenu();
 
     if (debugUiEnabled) {
@@ -3870,6 +4095,16 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
+  if (!event.repeat) {
+    const statIndex = Number.parseInt(event.key, 10) - 1;
+    if (Number.isInteger(statIndex) && statIndex >= 0 && statIndex < STAT_NAMES.length) {
+      if (allocateLocalStatPoint(STAT_NAMES[statIndex])) {
+        event.preventDefault();
+        return;
+      }
+    }
+  }
+
   keys.add(event.code);
 });
 
@@ -3951,7 +4186,7 @@ setInterval(() => {
   if (
     inputFrame.shoot &&
     canPredictLocalShots() &&
-    Date.now() - (localPlayer.lastPredictedShotAt ?? 0) >= GAME_CONFIG.tank.shootCooldownMs
+    Date.now() - (localPlayer.lastPredictedShotAt ?? 0) >= getEffectiveLocalReloadMs()
   ) {
     localPlayer.lastPredictedShotAt = Date.now();
     spawnPredictedProjectile(localPlayer, inputFrame);
@@ -4194,7 +4429,10 @@ canvas.addEventListener("click", (event) => {
   const scaleY = canvas.height / bounds.height;
   const cx = (event.clientX - bounds.left) * scaleX;
   const cy = (event.clientY - bounds.top) * scaleY;
-  handleUpgradeClick(cx, cy);
+  if (handleUpgradeClick(cx, cy)) {
+    return;
+  }
+  handleStatPointClick(cx, cy);
 });
 
 // Show start menu or play area based on session state

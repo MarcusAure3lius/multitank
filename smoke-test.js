@@ -700,8 +700,147 @@ function assertStateChunkAssemblyWaitsForAllFragments() {
   }
 }
 
+function assertProgressionPacketsRoundTrip() {
+  const upgradePacket = deserializePacket(
+    serializePacket({
+      type: MESSAGE_TYPES.UPGRADE,
+      classId: "sniper",
+      messageId: "upgrade-smoke"
+    })
+  );
+  if (!upgradePacket.ok || upgradePacket.packet.type !== MESSAGE_TYPES.UPGRADE || upgradePacket.packet.classId !== "sniper") {
+    throw new Error("Expected upgrade packets to round-trip through shared protocol serialization");
+  }
+
+  const statPointPacket = deserializePacket(
+    serializePacket({
+      type: MESSAGE_TYPES.STAT_POINT,
+      statName: "movementSpeed",
+      messageId: "stat-smoke"
+    })
+  );
+  if (
+    !statPointPacket.ok ||
+    statPointPacket.packet.type !== MESSAGE_TYPES.STAT_POINT ||
+    statPointPacket.packet.statName !== "movementSpeed"
+  ) {
+    throw new Error("Expected stat-point packets to round-trip through shared protocol serialization");
+  }
+
+  const localClassId = GAME_CONFIG.lobby.classes[0]?.id ?? "assault";
+  const progressionState = deserializePacket(
+    serializePacket({
+      type: MESSAGE_TYPES.STATE,
+      roomId: "progression-smoke",
+      snapshotSeq: 9,
+      simulationTick: 9,
+      snapshotTick: 9,
+      serverTime: Date.now(),
+      players: [{
+        id: "player-1",
+        profileId: "a".repeat(32),
+        name: "Progression Smoke",
+        teamId: GAME_CONFIG.lobby.teams[0]?.id ?? "alpha",
+        classId: localClassId,
+        tankClassId: "sniper",
+        x: 420,
+        y: 360,
+        angle: 0.3,
+        turretAngle: 0.4,
+        hp: 132,
+        maxHp: 140,
+        score: 4,
+        assists: 1,
+        deaths: 0,
+        credits: 12,
+        alive: true,
+        ready: true,
+        connected: true,
+        stats: {
+          movementSpeed: 3,
+          reload: 2
+        }
+      }],
+      bullets: [{
+        id: "bullet-1",
+        ownerId: "player-1",
+        x: 460,
+        y: 360,
+        angle: 0.4,
+        speed: 950,
+        damage: 44,
+        radius: 12
+      }],
+      shapes: [{
+        id: "shape-1",
+        type: "triangle",
+        x: 600,
+        y: 420,
+        hp: 20,
+        maxHp: 25,
+        radius: 22,
+        angle: 0.8
+      }],
+      you: {
+        playerId: "player-1",
+        profileId: "a".repeat(32),
+        alive: true,
+        ready: true,
+        isSpectator: false,
+        teamId: GAME_CONFIG.lobby.teams[0]?.id ?? "alpha",
+        classId: localClassId,
+        tankClassId: "sniper",
+        xp: 1600,
+        level: 15,
+        statPoints: 2,
+        pendingUpgrades: ["assassin"],
+        maxHp: 140,
+        stats: {
+          movementSpeed: 3,
+          reload: 2
+        },
+        profileStats: {
+          matchesPlayed: 1,
+          wins: 0,
+          kills: 2,
+          deaths: 1,
+          shotsFired: 5,
+          shotsHit: 3
+        }
+      },
+      replication: {
+        mode: "full",
+        baselineSnapshotSeq: 0
+      }
+    })
+  );
+
+  if (!progressionState.ok || progressionState.packet.type !== MESSAGE_TYPES.STATE) {
+    throw new Error("Expected progression snapshots to round-trip through shared protocol serialization");
+  }
+
+  const state = progressionState.packet;
+  if (
+    state.players?.[0]?.tankClassId !== "sniper" ||
+    state.players?.[0]?.maxHp !== 140 ||
+    state.players?.[0]?.stats?.movementSpeed !== 3 ||
+    state.bullets?.[0]?.radius !== 12 ||
+    state.bullets?.[0]?.speed !== 950 ||
+    state.shapes?.[0]?.type !== "triangle" ||
+    state.you?.tankClassId !== "sniper" ||
+    state.you?.level !== 15 ||
+    state.you?.statPoints !== 2 ||
+    state.you?.maxHp !== 140 ||
+    state.you?.stats?.reload !== 2 ||
+    state.you?.pendingUpgrades?.[0] !== "assassin"
+  ) {
+    throw new Error("Expected progression snapshots to preserve class, stat, bullet, and shape fields");
+  }
+}
+
 try {
   assertStateChunkAssemblyWaitsForAllFragments();
+  assertProgressionPacketsRoundTrip();
   await waitForServer();
   const metaPayload = await requestJson("/meta");
 

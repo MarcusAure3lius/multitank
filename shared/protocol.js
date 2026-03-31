@@ -1,6 +1,6 @@
 export const PROTOCOL_VERSION = 2;
 export const MIN_SUPPORTED_PROTOCOL_VERSION = 1;
-export const GAME_BUILD_VERSION = "0.2.0";
+export const GAME_BUILD_VERSION = "0.2.1";
 export const ASSET_BUNDLE_VERSION = GAME_BUILD_VERSION;
 export const PROFILES_SCHEMA_VERSION = 2;
 
@@ -591,6 +591,12 @@ function sanitizeProfileStats(stats) {
   };
 }
 
+export function createAllocatedStats(stats) {
+  return Object.fromEntries(
+    STAT_NAMES.map((statName) => [statName, clampInteger(stats?.[statName], 0, 7, 0)])
+  );
+}
+
 export function createPublicProfileStats(stats) {
   const normalized = sanitizeProfileStats(stats);
   return {
@@ -770,7 +776,8 @@ export function createPlayerSnapshot(player) {
     y: roundTo(readFiniteNumber(player?.y, 0), 2),
     angle: roundTo(normalizeAngle(player?.angle), 4),
     turretAngle: roundTo(normalizeAngle(player?.turretAngle), 4),
-    hp: clampInteger(player?.hp, 0, GAME_CONFIG.tank.hitPoints, GAME_CONFIG.tank.hitPoints),
+    hp: Math.max(0, Math.round(readFiniteNumber(player?.hp, GAME_CONFIG.tank.hitPoints))),
+    maxHp: Math.max(1, Math.round(readFiniteNumber(player?.maxHp ?? GAME_CONFIG.tank.hitPoints, GAME_CONFIG.tank.hitPoints))),
     credits: Math.max(0, readInteger(player?.credits, 0)),
     score: Math.max(0, readInteger(player?.score, 0)),
     assists: Math.max(0, readInteger(player?.assists, 0)),
@@ -786,9 +793,14 @@ export function createPlayerSnapshot(player) {
       GAME_CONFIG.lobby.classes,
       GAME_CONFIG.lobby.classes[0].id
     ),
+    tankClassId:
+      typeof player?.tankClassId === "string" && CLASS_TREE[player.tankClassId]
+        ? player.tankClassId
+        : "basic",
     queuedForSlot: readBoolean(player?.queuedForSlot, false),
     slotReserved: readBoolean(player?.slotReserved, false),
     afk: readBoolean(player?.afk, false),
+    stats: createAllocatedStats(player?.stats),
     animation: createAnimationState(player?.animation),
     combat: createPlayerCombatState(player?.combat),
     ai: readBoolean(player?.isBot, false) ? createBotAiSnapshot(player?.ai) : null,
@@ -806,7 +818,27 @@ export function createBulletSnapshot(bullet) {
     ownerId: sanitizeText(bullet?.ownerId ?? "", "", 96),
     x: roundTo(readFiniteNumber(bullet?.x, 0), 2),
     y: roundTo(readFiniteNumber(bullet?.y, 0), 2),
-    angle: roundTo(normalizeAngle(bullet?.angle), 4)
+    angle: roundTo(normalizeAngle(bullet?.angle), 4),
+    speed: roundTo(readFiniteNumber(bullet?.speed, GAME_CONFIG.bullet.speed), 2),
+    damage: Math.max(0, readInteger(bullet?.damage, GAME_CONFIG.bullet.damage)),
+    radius: Math.max(1, roundTo(readFiniteNumber(bullet?.radius, GAME_CONFIG.bullet.radius), 2))
+  };
+}
+
+export function createShapeSnapshot(shape) {
+  const type =
+    Object.values(SHAPE_TYPES).includes(shape?.type)
+      ? shape.type
+      : SHAPE_TYPES.SQUARE;
+  return {
+    id: sanitizeText(shape?.id ?? "", "", 96),
+    type,
+    x: roundTo(readFiniteNumber(shape?.x, 0), 2),
+    y: roundTo(readFiniteNumber(shape?.y, 0), 2),
+    hp: Math.max(0, readInteger(shape?.hp, 0)),
+    maxHp: Math.max(1, readInteger(shape?.maxHp ?? shape?.hp, 1)),
+    radius: Math.max(1, roundTo(readFiniteNumber(shape?.radius, 20), 2)),
+    angle: roundTo(normalizeAngle(shape?.angle), 4)
   };
 }
 
@@ -818,7 +850,7 @@ export function createSpawnEvent(event) {
     playerId: sanitizeText(event?.playerId ?? "", "", 96),
     x: roundTo(readFiniteNumber(event?.x, 0), 2),
     y: roundTo(readFiniteNumber(event?.y, 0), 2),
-    hp: clampInteger(event?.hp, 0, GAME_CONFIG.tank.hitPoints, GAME_CONFIG.tank.hitPoints)
+    hp: Math.max(0, Math.round(readFiniteNumber(event?.hp, GAME_CONFIG.tank.hitPoints)))
   };
 }
 
@@ -831,7 +863,7 @@ export function createHitEvent(event) {
     targetId: sanitizeText(event?.targetId ?? "", "", 96),
     bulletId: sanitizeText(event?.bulletId ?? "", "", 96),
     damage: Math.max(0, readInteger(event?.damage, 0)),
-    hpAfter: clampInteger(event?.hpAfter, 0, GAME_CONFIG.tank.hitPoints, GAME_CONFIG.tank.hitPoints),
+    hpAfter: Math.max(0, Math.round(readFiniteNumber(event?.hpAfter, 0))),
     isCritical: readBoolean(event?.isCritical, false),
     armorBlocked: Math.max(0, readInteger(event?.armorBlocked, 0)),
     statusEffect: Object.values(STATUS_EFFECTS).includes(event?.statusEffect)
@@ -847,7 +879,7 @@ export function createHealthEvent(event) {
     type: EVENT_TYPES.HEALTH,
     serverTime: Number(event?.serverTime ?? Date.now()),
     playerId: sanitizeText(event?.playerId ?? "", "", 96),
-    hp: clampInteger(event?.hp, 0, GAME_CONFIG.tank.hitPoints, GAME_CONFIG.tank.hitPoints),
+    hp: Math.max(0, Math.round(readFiniteNumber(event?.hp, GAME_CONFIG.tank.hitPoints))),
     delta: readInteger(event?.delta, 0)
   };
 }
@@ -1039,6 +1071,7 @@ export function createStatePayload({
   leaderboard,
   players,
   bullets,
+  shapes,
   events,
   inventory,
   replication,
@@ -1059,6 +1092,7 @@ export function createStatePayload({
     leaderboard: (leaderboard ?? []).map(createLeaderboardEntry),
     players: (players ?? []).map(createPlayerSnapshot),
     bullets: (bullets ?? []).map(createBulletSnapshot),
+    shapes: (shapes ?? []).map(createShapeSnapshot),
     events: (events ?? []).map(createEventSnapshot).filter(Boolean),
     inventory: (inventory ?? []).map(createInventoryState),
     replication: createReplicationPayload(replication),
@@ -1085,6 +1119,18 @@ export function createStatePayload({
             GAME_CONFIG.lobby.classes,
             GAME_CONFIG.lobby.classes[0].id
           ),
+          tankClassId:
+            typeof you.tankClassId === "string" && CLASS_TREE[you.tankClassId]
+              ? you.tankClassId
+              : "basic",
+          xp: Math.max(0, readInteger(you.xp, 0)),
+          level: clampInteger(you.level, 1, MAX_LEVEL, 1),
+          statPoints: Math.max(0, readInteger(you.statPoints, 0)),
+          pendingUpgrades: Array.isArray(you.pendingUpgrades)
+            ? you.pendingUpgrades.filter((classId) => typeof classId === "string" && CLASS_TREE[classId])
+            : [],
+          stats: createAllocatedStats(you.stats),
+          maxHp: Math.max(1, readInteger(you.maxHp ?? GAME_CONFIG.tank.hitPoints, GAME_CONFIG.tank.hitPoints)),
           queuedForSlot: readBoolean(you.queuedForSlot, false),
           slotReserved: readBoolean(you.slotReserved, false),
           afk: readBoolean(you.afk, false),
@@ -1165,6 +1211,34 @@ function normalizeResyncPacket(packet, version) {
     type: MESSAGE_TYPES.RESYNC,
     snapshotSeq: Math.max(0, readInteger(packet.snapshotSeq ?? packet.ss, 0)),
     reason: sanitizeText(packet.reason ?? packet.rr, "", 48) || null,
+    messageId: sanitizeMessageId(packet.messageId ?? packet.m)
+  };
+}
+
+function normalizeUpgradePacket(packet, version) {
+  const classId = sanitizeText(packet.classId ?? packet.cid, "", 24);
+  if (!classId || !CLASS_TREE[classId]) {
+    return null;
+  }
+
+  return {
+    v: version,
+    type: MESSAGE_TYPES.UPGRADE,
+    classId,
+    messageId: sanitizeMessageId(packet.messageId ?? packet.m)
+  };
+}
+
+function normalizeStatPointPacket(packet, version) {
+  const statName = sanitizeText(packet.statName ?? packet.sn, "", 24);
+  if (!STAT_NAMES.includes(statName)) {
+    return null;
+  }
+
+  return {
+    v: version,
+    type: MESSAGE_TYPES.STAT_POINT,
+    statName,
     messageId: sanitizeMessageId(packet.messageId ?? packet.m)
   };
 }
@@ -1269,6 +1343,7 @@ function normalizeStatePacket(packet, version) {
     leaderboard: packet.leaderboard,
     players: packet.players,
     bullets: packet.bullets,
+    shapes: packet.shapes,
     events: Array.isArray(packet.events) ? packet.events : [],
     inventory: Array.isArray(packet.inventory) ? packet.inventory : [],
     replication: packet.replication,
@@ -1313,6 +1388,14 @@ function normalizePacketObject(packet) {
       return { ok: true, packet: normalizeRespawnPacket(packet, version) };
     case MESSAGE_TYPES.RESYNC:
       return { ok: true, packet: normalizeResyncPacket(packet, version) };
+    case MESSAGE_TYPES.UPGRADE: {
+      const normalized = normalizeUpgradePacket(packet, version);
+      return normalized ? { ok: true, packet: normalized } : buildParseError("Invalid upgrade packet");
+    }
+    case MESSAGE_TYPES.STAT_POINT: {
+      const normalized = normalizeStatPointPacket(packet, version);
+      return normalized ? { ok: true, packet: normalized } : buildParseError("Invalid stat point packet");
+    }
     case MESSAGE_TYPES.INPUT: {
       const normalized = normalizeInputPacket(packet, version);
       return normalized ? { ok: true, packet: normalized } : buildParseError("Invalid input packet");
@@ -1388,6 +1471,20 @@ function encodePacketObject(packet) {
         type: MESSAGE_TYPES.RESYNC,
         ss: Math.max(0, readInteger(packet.snapshotSeq, 0)),
         rr: sanitizeText(packet.reason ?? "", "", 48) || null,
+        m: sanitizeMessageId(packet.messageId)
+      };
+    case MESSAGE_TYPES.UPGRADE:
+      return {
+        v: version,
+        type: MESSAGE_TYPES.UPGRADE,
+        cid: sanitizeText(packet.classId ?? "", "", 24),
+        m: sanitizeMessageId(packet.messageId)
+      };
+    case MESSAGE_TYPES.STAT_POINT:
+      return {
+        v: version,
+        type: MESSAGE_TYPES.STAT_POINT,
+        sn: sanitizeText(packet.statName ?? "", "", 24),
         m: sanitizeMessageId(packet.messageId)
       };
     case MESSAGE_TYPES.INPUT:

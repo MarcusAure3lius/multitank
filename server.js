@@ -27,10 +27,12 @@ import {
   SHAPE_XP,
   SHAPE_SCORE,
   SOUND_CUES,
+  STAT_NAMES,
   STATUS_EFFECTS,
   VFX_CUES,
   XP_PER_LEVEL,
   clamp,
+  createAllocatedStats,
   createAnimationEvent,
   createBulletSnapshot,
   createCombatEvent,
@@ -376,6 +378,41 @@ function createPlayerCombatState(player, now = Date.now()) {
           .filter((entry) => entry.attackerId)
       : []
   };
+}
+
+function getPlayerStatValue(player, statName) {
+  const rawValue = player?.stats?.[statName];
+  if (!Number.isFinite(Number(rawValue))) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(7, Math.round(Number(rawValue))));
+}
+
+function getPlayerMaxHitPoints(player) {
+  const bonusLevels = getPlayerStatValue(player, "maxHealth");
+  return Math.max(1, Math.round(GAME_CONFIG.tank.hitPoints * (1 + bonusLevels * 0.12)));
+}
+
+function applyPassiveRegeneration(player, deltaSeconds, now) {
+  if (!player?.alive) {
+    return;
+  }
+
+  const maxHp = getPlayerMaxHitPoints(player);
+  if ((player.hp ?? 0) >= maxHp) {
+    player.hp = maxHp;
+    return;
+  }
+
+  const lastDamagedAt = Number(player.combat?.lastDamagedAt ?? 0) || 0;
+  if (lastDamagedAt > 0 && now - lastDamagedAt < 2500) {
+    return;
+  }
+
+  const regenLevel = getPlayerStatValue(player, "healthRegen");
+  const regenPerSecond = 5 + regenLevel * 2.5;
+  player.hp = Math.min(maxHp, player.hp + regenPerSecond * deltaSeconds);
 }
 
 function createBotAiState(playerId, now = Date.now()) {
@@ -1529,7 +1566,7 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     statPoints: 0,
     tankClassId: 'basic',
     pendingUpgrades: [],
-    stats: { healthRegen: 0, maxHealth: 0, bodyDamage: 0, bulletSpeed: 0, bulletPenetration: 0, bulletDamage: 0, reload: 0, movementSpeed: 0 },
+    stats: createAllocatedStats(),
     assists: 0,
     deaths: 0,
     inventory: {
@@ -2066,12 +2103,15 @@ function applyStatusEffect(room, attacker, target, resolution, now) {
 function resolveCombatHit(room, attacker, target, now, baseDamage = GAME_CONFIG.bullet.damage) {
   const attackerProfile = getCombatClassProfile(attacker?.classId);
   const defenderProfile = getCombatClassProfile(target?.classId);
+  const bodyDamageMultiplier = 1 + getPlayerStatValue(attacker, "bodyDamage") * 0.05;
+  const armorReduction = 1 - getPlayerStatValue(attacker, "bulletPenetration") * 0.04;
+  const effectiveArmorMultiplier = clamp(defenderProfile.armorMultiplier * armorReduction, 0.1, 3);
   const rolledCritical = getRandomFloat(room) < attackerProfile.critChance;
-  const scaledDamage = Math.round(baseDamage * attackerProfile.damageMultiplier);
+  const scaledDamage = Math.round(baseDamage * attackerProfile.damageMultiplier * bodyDamageMultiplier);
   const critDamage = rolledCritical ? Math.round(scaledDamage * attackerProfile.critMultiplier) : scaledDamage;
   const mitigatedDamage = Math.max(
     GAME_CONFIG.combat.critFloorDamage,
-    Math.round(critDamage * defenderProfile.armorMultiplier)
+    Math.round(critDamage * effectiveArmorMultiplier)
   );
   const armorBlocked = Math.max(0, critDamage - mitigatedDamage);
   const shouldApplyStatus =
@@ -2287,6 +2327,7 @@ function createViewerPlayerState(candidate, viewer) {
     angle: candidate.angle,
     turretAngle: candidate.turretAngle,
     hp: candidate.hp,
+    maxHp: getPlayerMaxHitPoints(candidate),
     credits: candidate.credits,
     score: candidate.score,
     assists: candidate.assists,
@@ -2298,9 +2339,11 @@ function createViewerPlayerState(candidate, viewer) {
     isSpectator: candidate.isSpectator,
     teamId: candidate.teamId,
     classId: candidate.classId,
+    tankClassId: candidate.tankClassId ?? "basic",
     queuedForSlot: candidate.queuedForSlot,
     slotReserved: candidate.slotReserved,
     afk: candidate.afk,
+    stats: createAllocatedStats(candidate.stats),
     animation: candidate.animation,
     combat: candidate.combat,
     ai: candidate.ai,
@@ -7057,7 +7100,7 @@ function resetPlayerForRound(room, player) {
   player.y = spawn.y;
   player.angle = 0;
   player.turretAngle = 0;
-  player.hp = GAME_CONFIG.tank.hitPoints;
+  player.hp = getPlayerMaxHitPoints(player);
   player.credits = 0;
   player.score = 0;
   player.assists = 0;
@@ -7975,7 +8018,7 @@ function respawnPlayer(room, player, now = Date.now()) {
   }
   queueAnimationStateEvent(room, player, ANIMATION_ACTIONS.SPAWN, now);
   queueSpawnStateEvent(room, player, now);
-  queueHealthStateEvent(room, player, GAME_CONFIG.tank.hitPoints, now);
+  queueHealthStateEvent(room, player, player.hp, now);
   queueInventoryStateEvent(room, player, now);
   return true;
 }
@@ -8079,19 +8122,22 @@ function handleStatPoint(socket, payload) {
     return;
   }
   const statName = String(payload.statName ?? "");
-  const validStats = ['healthRegen', 'maxHealth', 'bodyDamage', 'bulletSpeed', 'bulletPenetration', 'bulletDamage', 'reload', 'movementSpeed'];
-  if (!validStats.includes(statName)) {
+  if (!STAT_NAMES.includes(statName)) {
     return;
   }
-  if (!player.stats) {
-    player.stats = { healthRegen: 0, maxHealth: 0, bodyDamage: 0, bulletSpeed: 0, bulletPenetration: 0, bulletDamage: 0, reload: 0, movementSpeed: 0 };
-  }
+  const previousMaxHp = getPlayerMaxHitPoints(player);
+  player.stats = createAllocatedStats(player.stats);
   const currentVal = player.stats[statName] ?? 0;
   if (currentVal >= 7) {
     return;
   }
   player.stats[statName] = currentVal + 1;
   player.statPoints -= 1;
+  if (statName === "maxHealth") {
+    const nextMaxHp = getPlayerMaxHitPoints(player);
+    player.hp = Math.min(nextMaxHp, Math.max(0, player.hp) + (nextMaxHp - previousMaxHp));
+    queueHealthStateEvent(room, player, player.hp, Date.now());
+  }
 }
 
 function createInputFrame(payload, receivedAt) {
@@ -8995,6 +9041,7 @@ function updatePlayer(room, player, deltaSeconds, now) {
   }
 
   syncPlayerCombatProfile(player, now);
+  applyPassiveRegeneration(player, deltaSeconds, now);
   updateBotInputs(room, player, now);
   applyPendingInputs(player, room.tickNumber);
   clearSpawnProtectionOnAction(player, now);
@@ -9300,10 +9347,12 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq) {
           teamId: player.teamId,
           classId: player.classId,
           tankClassId: player.tankClassId ?? 'basic',
+          maxHp: getPlayerMaxHitPoints(player),
           xp: player.xp ?? 0,
           level: player.level ?? 1,
           statPoints: player.statPoints ?? 0,
           pendingUpgrades: player.pendingUpgrades ?? [],
+          stats: createAllocatedStats(player.stats),
           queuedForSlot: player.queuedForSlot,
           slotReserved: player.slotReserved,
           afk: player.afk,
@@ -9499,6 +9548,13 @@ wss.on("connection", (socket, request) => {
           return;
         }
         handleUpgrade(socket, payload);
+        acknowledgeReliableMessage(socket, payload);
+        break;
+      case MESSAGE_TYPES.STAT_POINT:
+        if (resendAckForDuplicate(socket, payload)) {
+          return;
+        }
+        handleStatPoint(socket, payload);
         acknowledgeReliableMessage(socket, payload);
         break;
       case MESSAGE_TYPES.INPUT:
