@@ -1,6 +1,6 @@
 export const PROTOCOL_VERSION = 2;
 export const MIN_SUPPORTED_PROTOCOL_VERSION = 1;
-export const GAME_BUILD_VERSION = "0.1.3";
+export const GAME_BUILD_VERSION = "0.2.0";
 export const ASSET_BUNDLE_VERSION = GAME_BUILD_VERSION;
 export const PROFILES_SCHEMA_VERSION = 2;
 
@@ -17,7 +17,34 @@ export const MESSAGE_TYPES = Object.freeze({
   ACK: "ack",
   PING: "ping",
   PONG: "pong",
-  ERROR: "error"
+  ERROR: "error",
+  UPGRADE: "upgrade",
+  UPGRADE_AVAILABLE: "upgrade_available",
+  STAT_POINT: "stat_point"
+});
+
+export const XP_PER_LEVEL = [0, 500, 1000, 1500, 2000, 2500, 3000, 4000, 5000, 6000, 7500, 9000, 11000, 13000, 15000, 18000, 21000, 25000, 29000, 34000, 40000, 46000, 54000, 63000, 73000, 85000, 98000, 114000, 132000, 152000, 175000];
+export const MAX_LEVEL = 30;
+export const SHAPE_XP = Object.freeze({ triangle: 25, square: 10, pentagon: 130, alpha_pentagon: 3000 });
+export const SHAPE_SCORE = Object.freeze({ triangle: 1, square: 1, pentagon: 3, alpha_pentagon: 15 });
+
+export const SHAPE_TYPES = Object.freeze({ TRIANGLE: 'triangle', SQUARE: 'square', PENTAGON: 'pentagon', ALPHA_PENTAGON: 'alpha_pentagon' });
+
+export const STAT_NAMES = Object.freeze(['healthRegen', 'maxHealth', 'bodyDamage', 'bulletSpeed', 'bulletPenetration', 'bulletDamage', 'reload', 'movementSpeed']);
+
+export const CLASS_TREE = Object.freeze({
+  basic: { name: 'Basic', level: 1, barrels: [{ x: 40, y: 0, w: 40, h: 14 }], bulletCount: 1, reloadMs: 500, bulletSpeed: 700, bulletDamage: 25, bulletRadius: 8, upgradesTo: ['twin', 'sniper', 'machine_gun', 'flank_guard'], upgradesAt: 15 },
+  twin: { name: 'Twin', level: 15, barrels: [{ x: 40, y: -8, w: 38, h: 12 }, { x: 40, y: 8, w: 38, h: 12 }], bulletCount: 2, reloadMs: 500, bulletSpeed: 680, bulletDamage: 18, bulletRadius: 7, upgradesTo: ['triple_shot', 'twin_flank'], upgradesAt: 30 },
+  sniper: { name: 'Sniper', level: 15, barrels: [{ x: 50, y: 0, w: 50, h: 12 }], bulletCount: 1, reloadMs: 1200, bulletSpeed: 1100, bulletDamage: 60, bulletRadius: 8, upgradesTo: ['assassin', 'overseer'], upgradesAt: 30 },
+  machine_gun: { name: 'Machine Gun', level: 15, barrels: [{ x: 42, y: 0, w: 42, h: 18 }], bulletCount: 1, reloadMs: 200, bulletSpeed: 600, bulletDamage: 15, bulletRadius: 9, upgradesTo: ['fighter', 'destroyer'], upgradesAt: 30 },
+  flank_guard: { name: 'Flank Guard', level: 15, barrels: [{ x: 40, y: 0, w: 38, h: 12 }, { x: -40, y: 0, w: 38, h: 12 }], bulletCount: 2, reloadMs: 600, bulletSpeed: 680, bulletDamage: 20, bulletRadius: 7, upgradesTo: ['triple_shot', 'auto_3'], upgradesAt: 30 },
+  triple_shot: { name: 'Triple Shot', level: 30, barrels: [{ x: 40, y: 0, w: 38, h: 12 }, { x: 38, y: -14, w: 36, h: 11 }, { x: 38, y: 14, w: 36, h: 11 }], bulletCount: 3, reloadMs: 600, bulletSpeed: 680, bulletDamage: 20, bulletRadius: 8, upgradesTo: [], upgradesAt: null },
+  twin_flank: { name: 'Twin Flank', level: 30, barrels: [{ x: 40, y: -8, w: 36, h: 11 }, { x: 40, y: 8, w: 36, h: 11 }, { x: -40, y: -8, w: 36, h: 11 }, { x: -40, y: 8, w: 36, h: 11 }], bulletCount: 4, reloadMs: 600, bulletSpeed: 660, bulletDamage: 17, bulletRadius: 7, upgradesTo: [], upgradesAt: null },
+  assassin: { name: 'Assassin', level: 30, barrels: [{ x: 56, y: 0, w: 56, h: 11 }], bulletCount: 1, reloadMs: 1500, bulletSpeed: 1400, bulletDamage: 85, bulletRadius: 7, upgradesTo: [], upgradesAt: null },
+  overseer: { name: 'Overseer', level: 30, barrels: [{ x: 0, y: 28, w: 30, h: 12, angle: Math.PI / 2 }, { x: 0, y: -28, w: 30, h: 12, angle: -Math.PI / 2 }], bulletCount: 2, reloadMs: 800, bulletSpeed: 650, bulletDamage: 20, bulletRadius: 10, upgradesTo: [], upgradesAt: null },
+  fighter: { name: 'Fighter', level: 30, barrels: [{ x: 42, y: 0, w: 42, h: 16 }, { x: -8, y: -28, w: 28, h: 11, angle: -Math.PI / 2 }, { x: -8, y: 28, w: 28, h: 11, angle: Math.PI / 2 }], bulletCount: 3, reloadMs: 300, bulletSpeed: 600, bulletDamage: 14, bulletRadius: 8, upgradesTo: [], upgradesAt: null },
+  destroyer: { name: 'Destroyer', level: 30, barrels: [{ x: 48, y: 0, w: 48, h: 24 }], bulletCount: 1, reloadMs: 1800, bulletSpeed: 550, bulletDamage: 120, bulletRadius: 16, upgradesTo: [], upgradesAt: null },
+  auto_3: { name: 'Auto 3', level: 30, barrels: [{ x: 40, y: 0, w: 38, h: 12 }, { x: 40, y: 0, w: 38, h: 12, autoRotate: true }, { x: -40, y: 0, w: 38, h: 12, autoRotate: true }], bulletCount: 3, reloadMs: 700, bulletSpeed: 650, bulletDamage: 18, bulletRadius: 7, upgradesTo: [], upgradesAt: null }
 });
 
 export const MATCH_PHASES = Object.freeze({

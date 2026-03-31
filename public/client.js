@@ -1,16 +1,20 @@
 import {
   ANIMATION_ACTIONS,
   ASSET_BUNDLE_VERSION,
+  CLASS_TREE,
   clamp,
   COMBAT_EVENT_ACTIONS,
   EVENT_TYPES,
   GAME_BUILD_VERSION,
   GAME_CONFIG,
   MATCH_PHASES,
+  MAX_LEVEL,
   MESSAGE_TYPES,
+  SHAPE_TYPES,
   SOUND_CUES,
   STATUS_EFFECTS,
   VFX_CUES,
+  XP_PER_LEVEL,
   deserializePacket,
   getTeamConfig,
   getTeamSpawnZone,
@@ -98,9 +102,18 @@ const WORLD_RENDER = Object.freeze({
 
 const players = new Map();
 const bullets = new Map();
+const shapes = new Map();
 const predictedProjectiles = new Map();
 const combatEffects = [];
 const killFeedEntries = [];
+
+// XP / upgrade state
+let localXp = 0;
+let localLevel = 1;
+let localStatPoints = 0;
+let localPendingUpgrades = [];
+let localTankClassId = 'basic';
+let upgradeMenuOpen = false;
 const keys = new Set();
 const pendingInputs = [];
 const pendingReliableMessages = new Map();
@@ -2443,6 +2456,34 @@ function applySnapshot(payload) {
     }
   }
 
+  // Update shapes
+  if (Array.isArray(payload.shapes)) {
+    const shapeIds = new Set(payload.shapes.map((s) => s.id));
+    for (const id of shapes.keys()) {
+      if (!shapeIds.has(id)) {
+        shapes.delete(id);
+      }
+    }
+    for (const shape of payload.shapes) {
+      if (shape && shape.id) {
+        shapes.set(shape.id, shape);
+      }
+    }
+  }
+
+  // Update local XP/level state from 'you' field
+  if (payload.you) {
+    const prevUpgrades = localPendingUpgrades;
+    localXp = payload.you.xp ?? localXp;
+    localLevel = payload.you.level ?? localLevel;
+    localStatPoints = payload.you.statPoints ?? localStatPoints;
+    localPendingUpgrades = payload.you.pendingUpgrades ?? localPendingUpgrades;
+    localTankClassId = payload.you.tankClassId ?? localTankClassId;
+    if (localPendingUpgrades.length > 0 && prevUpgrades.length === 0) {
+      upgradeMenuOpen = true;
+    }
+  }
+
   consumeServerEvents(payload.events ?? []);
 
   const localPlayer = getLocalPlayer();
@@ -3271,28 +3312,38 @@ function drawTank(player) {
   const bodyAngle = pose.angle;
   const turretAngle = pose.turretAngle;
   const bodyRadius = GAME_CONFIG.tank.radius;
-  const turretBaseRadius = 10;
-  const barrelHalfWidth = 6;
-  const barrelLength = bodyRadius + 28 - Math.min(8, (player.predictedRecoil ?? 0) * 8);
   const isLocalPlayer = player.id === localPlayerId;
   const bodyColor = player.color ?? getTeamConfig(player.teamId)?.color ?? "#ff4d00";
   const alpha = player.connected === false ? 0.42 : 1;
 
+  // Look up class def for barrel rendering
+  const effectiveClassId = isLocalPlayer ? localTankClassId : (player.classId ?? 'basic');
+  const classDef = CLASS_TREE[effectiveClassId] ?? CLASS_TREE.basic;
+  const barrels = classDef.barrels ?? [{ x: 40, y: 0, w: 40, h: 14 }];
+
+  // Draw barrels
   context.save();
   context.globalAlpha = alpha;
   context.translate(x, y);
   context.rotate(turretAngle);
-  context.fillStyle = "#111111";
-  context.fillRect(-2, -barrelHalfWidth, barrelLength + 2, barrelHalfWidth * 2);
 
-  if ((player.muzzleFlashUntil ?? 0) > now) {
-    context.beginPath();
-    context.arc(barrelLength + 5, 0, 5, 0, Math.PI * 2);
-    context.fillStyle = "#111111";
-    context.fill();
+  for (const barrel of barrels) {
+    const bAngle = barrel.angle ?? 0;
+    context.save();
+    context.rotate(bAngle);
+    context.fillStyle = "#555566";
+    context.strokeStyle = "#1a1a2e";
+    context.lineWidth = 2;
+    const bx = barrel.x > 0 ? 0 : barrel.x - barrel.w / 2;
+    const bLen = barrel.w;
+    const bH = barrel.h;
+    context.fillRect(bx, barrel.y - bH / 2, bLen, bH);
+    context.strokeRect(bx, barrel.y - bH / 2, bLen, bH);
+    context.restore();
   }
   context.restore();
 
+  // Draw body
   context.save();
   context.globalAlpha = alpha;
   context.translate(x, y);
@@ -3301,26 +3352,32 @@ function drawTank(player) {
   context.beginPath();
   context.arc(0, 0, bodyRadius, 0, Math.PI * 2);
   context.fill();
-  context.lineWidth = 4;
-  context.strokeStyle = "#111111";
+  context.lineWidth = 3;
+  context.strokeStyle = "#1a1a2e";
   context.stroke();
-  context.fillStyle = "#111111";
-  context.beginPath();
-  context.arc(0, 0, turretBaseRadius, 0, Math.PI * 2);
-  context.fill();
   context.restore();
 
+  // Player name above tank
+  context.save();
+  context.globalAlpha = alpha;
+  context.font = "bold 12px Segoe UI";
+  context.textAlign = "center";
+  context.fillStyle = isLocalPlayer ? "#ffd166" : "#ffffff";
+  context.fillText(player.name ?? "", x, y - bodyRadius - 22);
+  context.restore();
+
+  // Health bar
   const hpRatio = clamp((Number(player.hp) || 0) / GAME_CONFIG.tank.hitPoints, 0, 1);
   const healthBarWidth = 52;
   const healthBarHeight = 7;
-  const healthBarY = isLocalPlayer ? y + bodyRadius + 11 : y - bodyRadius - 18;
+  const healthBarY = y - bodyRadius - 16;
   const healthBarX = x - healthBarWidth / 2;
 
   context.save();
   context.globalAlpha = alpha;
   context.fillStyle = "rgba(17, 17, 17, 0.88)";
   context.fillRect(healthBarX, healthBarY, healthBarWidth, healthBarHeight);
-  context.fillStyle = "#22c55e";
+  context.fillStyle = hpRatio > 0.5 ? "#22c55e" : hpRatio > 0.25 ? "#fbbf24" : "#ef4444";
   context.fillRect(healthBarX + 1, healthBarY + 1, Math.max(0, (healthBarWidth - 2) * hpRatio), healthBarHeight - 2);
   context.restore();
 }
@@ -3388,6 +3445,269 @@ function drawCombatEffects() {
   }
 }
 
+function drawShape(shape) {
+  if (!shape) {
+    return;
+  }
+
+  // Called inside the camera-transform context (world coordinates)
+  const sx = shape.x;
+  const sy = shape.y;
+  const r = shape.radius ?? 20;
+
+  let fillColor = "#ffb703";
+  const sides = shape.type === SHAPE_TYPES.TRIANGLE ? 3 : shape.type === SHAPE_TYPES.SQUARE ? 4 : shape.type === SHAPE_TYPES.PENTAGON ? 5 : 5;
+  if (shape.type === SHAPE_TYPES.TRIANGLE) {
+    fillColor = "#00d4aa";
+  } else if (shape.type === SHAPE_TYPES.SQUARE) {
+    fillColor = "#ffb703";
+  } else if (shape.type === SHAPE_TYPES.PENTAGON) {
+    fillColor = "#4488ff";
+  } else if (shape.type === SHAPE_TYPES.ALPHA_PENTAGON) {
+    fillColor = "#aa44ff";
+  }
+
+  context.save();
+  context.translate(sx, sy);
+  context.rotate(shape.angle ?? 0);
+  context.beginPath();
+  for (let i = 0; i < sides; i++) {
+    const angle = (i / sides) * Math.PI * 2 - Math.PI / 2;
+    if (i === 0) {
+      context.moveTo(Math.cos(angle) * r, Math.sin(angle) * r);
+    } else {
+      context.lineTo(Math.cos(angle) * r, Math.sin(angle) * r);
+    }
+  }
+  context.closePath();
+  context.fillStyle = fillColor;
+  context.fill();
+  context.lineWidth = 2.5;
+  context.strokeStyle = "#1a1a2e";
+  context.stroke();
+  context.restore();
+
+  // Health bar if damaged (in world space)
+  const maxHp = shape.maxHp ?? shape.hp;
+  const hpRatio = maxHp > 0 ? clamp(shape.hp / maxHp, 0, 1) : 1;
+  if (hpRatio < 1) {
+    const barW = r * 2;
+    const barH = 5;
+    const bx = sx - r;
+    const by = sy - r - 12;
+    context.save();
+    context.fillStyle = "rgba(0,0,0,0.7)";
+    context.fillRect(bx, by, barW, barH);
+    context.fillStyle = "#22c55e";
+    context.fillRect(bx, by, barW * hpRatio, barH);
+    context.restore();
+  }
+}
+
+function drawShapes() {
+  for (const shape of shapes.values()) {
+    drawShape(shape);
+  }
+}
+
+function drawXpBar() {
+  if (!currentRoomId) {
+    return;
+  }
+  const barWidth = Math.min(600, canvas.width * 0.6);
+  const barHeight = 20;
+  const barX = (canvas.width - barWidth) / 2;
+  const barY = canvas.height - barHeight - 10;
+
+  const currentLevelXp = XP_PER_LEVEL[localLevel - 1] ?? 0;
+  const nextLevelXp = XP_PER_LEVEL[localLevel] ?? XP_PER_LEVEL[XP_PER_LEVEL.length - 1];
+  const xpIntoLevel = localXp - currentLevelXp;
+  const xpNeeded = Math.max(1, nextLevelXp - currentLevelXp);
+  const xpRatio = localLevel >= MAX_LEVEL ? 1 : clamp(xpIntoLevel / xpNeeded, 0, 1);
+
+  context.save();
+  // Background
+  context.fillStyle = "rgba(0,0,0,0.65)";
+  context.beginPath();
+  context.roundRect(barX - 2, barY - 2, barWidth + 4, barHeight + 4, 6);
+  context.fill();
+  // XP fill
+  context.fillStyle = "#0080ff";
+  context.beginPath();
+  context.roundRect(barX, barY, barWidth * xpRatio, barHeight, 4);
+  context.fill();
+  // Text
+  context.font = "bold 12px Segoe UI";
+  context.fillStyle = "#ffffff";
+  context.textAlign = "left";
+  context.fillText(`Level ${localLevel}`, barX + 6, barY + 14);
+  context.textAlign = "right";
+  if (localLevel < MAX_LEVEL) {
+    context.fillText(`${xpIntoLevel} / ${xpNeeded} XP`, barX + barWidth - 6, barY + 14);
+  } else {
+    context.fillText("MAX LEVEL", barX + barWidth - 6, barY + 14);
+  }
+  context.restore();
+}
+
+function drawCanvasLeaderboard() {
+  if (!currentRoomId || !latestLeaderboard || latestLeaderboard.length === 0) {
+    return;
+  }
+
+  const entries = latestLeaderboard.slice(0, 8);
+  const lineH = 20;
+  const padX = 14;
+  const padY = 10;
+  const panelW = 200;
+  const panelH = padY * 2 + (entries.length + 1) * lineH;
+  const panelX = canvas.width - panelW - 14;
+  const panelY = 14;
+
+  context.save();
+  context.fillStyle = "rgba(0,0,0,0.55)";
+  context.beginPath();
+  context.roundRect(panelX, panelY, panelW, panelH, 8);
+  context.fill();
+
+  context.font = "bold 12px Segoe UI";
+  context.fillStyle = "#00c8dc";
+  context.textAlign = "left";
+  context.fillText("SCOREBOARD", panelX + padX, panelY + padY + 12);
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const y = panelY + padY + (i + 2) * lineH;
+    const isLocal = entry.id === localPlayerId;
+    context.font = isLocal ? "bold 11px Segoe UI" : "11px Segoe UI";
+    context.fillStyle = isLocal ? "#ffd166" : (entry.connected === false ? "#666" : "#dde");
+    const teamColor = getTeamConfig(entry.teamId)?.color ?? "#888";
+    context.fillStyle = teamColor;
+    context.fillRect(panelX + padX, y - 9, 4, 12);
+    context.fillStyle = isLocal ? "#ffd166" : (entry.connected === false ? "#666" : "#dde");
+    const nameText = (entry.isBot ? "[B] " : "") + (entry.name ?? "?");
+    context.fillText(nameText.slice(0, 14), panelX + padX + 8, y);
+    context.textAlign = "right";
+    context.fillText(`${entry.score ?? 0}`, panelX + panelW - padX, y);
+    context.textAlign = "left";
+  }
+  context.restore();
+}
+
+function drawCanvasKillFeed() {
+  if (killFeedEntries.length === 0) {
+    return;
+  }
+
+  const now = performance.now();
+  const feedX = 14;
+  let feedY = 14;
+  const lineH = 22;
+
+  context.save();
+  const visible = killFeedEntries.filter((e) => e.expiresAt > now).slice(0, 5);
+  for (const entry of visible) {
+    const totalDuration = GAME_CONFIG.combat.assistWindowMs;
+    const age = (entry.expiresAt - now) / totalDuration;
+    const alpha = Math.min(1, age * 4);
+    context.globalAlpha = alpha;
+    context.fillStyle = "rgba(0,0,0,0.55)";
+    const textW = context.measureText(entry.text ?? "").width;
+    context.fillRect(feedX - 4, feedY - 14, textW + 16, lineH);
+    context.font = "bold 12px Segoe UI";
+    context.fillStyle = entry.color ?? "#ffd166";
+    context.textAlign = "left";
+    context.fillText(entry.text ?? "", feedX + 4, feedY);
+    feedY += lineH;
+  }
+  context.restore();
+}
+
+function drawUpgradeMenu() {
+  if (!upgradeMenuOpen || localPendingUpgrades.length === 0) {
+    return;
+  }
+
+  const cw = canvas.width;
+  const ch = canvas.height;
+  const cardW = 440;
+  const cardH = 80 + localPendingUpgrades.length * 72 + 20;
+  const cardX = (cw - cardW) / 2;
+  const cardY = (ch - cardH) / 2;
+
+  context.save();
+  context.fillStyle = "rgba(0,0,0,0.72)";
+  context.fillRect(0, 0, cw, ch);
+
+  context.fillStyle = "rgba(10, 15, 40, 0.96)";
+  context.beginPath();
+  context.roundRect(cardX, cardY, cardW, cardH, 16);
+  context.fill();
+  context.strokeStyle = "rgba(0,200,220,0.5)";
+  context.lineWidth = 1.5;
+  context.stroke();
+
+  context.font = "bold 22px Segoe UI";
+  context.fillStyle = "#00c8dc";
+  context.textAlign = "center";
+  context.fillText("LEVEL UP! Choose your upgrade:", cw / 2, cardY + 44);
+
+  for (let i = 0; i < localPendingUpgrades.length; i++) {
+    const classId = localPendingUpgrades[i];
+    const classDef = CLASS_TREE[classId];
+    if (!classDef) {
+      continue;
+    }
+    const btnX = cardX + 20;
+    const btnY = cardY + 68 + i * 72;
+    const btnW = cardW - 40;
+    const btnH = 58;
+
+    context.fillStyle = "rgba(0,80,180,0.55)";
+    context.beginPath();
+    context.roundRect(btnX, btnY, btnW, btnH, 10);
+    context.fill();
+    context.strokeStyle = "rgba(0,200,220,0.4)";
+    context.lineWidth = 1;
+    context.stroke();
+
+    context.font = "bold 16px Segoe UI";
+    context.fillStyle = "#ffffff";
+    context.textAlign = "left";
+    context.fillText(classDef.name, btnX + 14, btnY + 24);
+
+    context.font = "12px Segoe UI";
+    context.fillStyle = "#aaccff";
+    const desc = `Reload: ${classDef.reloadMs}ms | Dmg: ${classDef.bulletDamage} | Spd: ${classDef.bulletSpeed}`;
+    context.fillText(desc, btnX + 14, btnY + 42);
+
+    // Store button bounds for click handling
+    upgradeButtonRects[i] = { x: btnX, y: btnY, w: btnW, h: btnH, classId };
+  }
+  context.restore();
+}
+
+const upgradeButtonRects = [];
+
+function handleUpgradeClick(canvasX, canvasY) {
+  if (!upgradeMenuOpen) {
+    return false;
+  }
+  for (const btn of upgradeButtonRects) {
+    if (!btn) {
+      continue;
+    }
+    if (canvasX >= btn.x && canvasX <= btn.x + btn.w && canvasY >= btn.y && canvasY <= btn.y + btn.h) {
+      sendReliable({ type: MESSAGE_TYPES.UPGRADE, classId: btn.classId });
+      localPendingUpgrades = [];
+      localTankClassId = btn.classId;
+      upgradeMenuOpen = false;
+      return true;
+    }
+  }
+  return false;
+}
+
 function drawOverlay() {
   context.fillStyle = "rgba(255,255,255,0.66)";
   context.font = "16px Segoe UI";
@@ -3439,6 +3759,8 @@ function render(frameAt = performance.now()) {
     drawCenterProbe();
     drawObstacles();
     drawObjective();
+    // Draw shapes before players
+    drawShapes();
 
     for (const bullet of bullets.values()) {
       drawBullet(bullet);
@@ -3454,6 +3776,13 @@ function render(frameAt = performance.now()) {
 
     drawCombatEffects();
     context.restore();
+
+    // Canvas HUD (drawn in screen space, not world space)
+    drawCanvasLeaderboard();
+    drawCanvasKillFeed();
+    drawXpBar();
+    drawUpgradeMenu();
+
     if (debugUiEnabled) {
       drawOverlay();
     }
@@ -3701,6 +4030,189 @@ setInterval(() => {
 setInterval(() => {
   refreshRoomBrowser();
 }, 8000);
+
+// ---- START MENU ----
+// Support both new IDs (start-screen/game-screen) and legacy IDs (start-menu/play-area)
+const startMenuEl = document.getElementById("start-screen") ?? document.getElementById("start-menu");
+const gameScreenEl = document.getElementById("game-screen");
+const playAreaEl = document.getElementById("play-area");
+const playButton = document.getElementById("play-button");
+const startBgCanvas = document.getElementById("bg-canvas") ?? document.getElementById("start-bg");
+
+function showStartMenu() {
+  if (startMenuEl) {
+    startMenuEl.hidden = false;
+    startMenuEl.classList.remove("hidden");
+  }
+  if (gameScreenEl) {
+    gameScreenEl.hidden = true;
+  }
+  if (playAreaEl) {
+    playAreaEl.classList.remove("active");
+  }
+}
+
+function hideStartMenu() {
+  if (startMenuEl) {
+    startMenuEl.hidden = true;
+    startMenuEl.classList.add("hidden");
+  }
+  if (gameScreenEl) {
+    gameScreenEl.hidden = false;
+  }
+  if (playAreaEl) {
+    playAreaEl.classList.add("active");
+  }
+}
+
+function startMenuPlay() {
+  const nameVal = nameInput?.value?.trim() || createCommanderName();
+  if (nameInput) {
+    nameInput.value = nameVal;
+  }
+  hideStartMenu();
+  unlockAudio();
+  void startQuickJoin();
+}
+
+if (playButton) {
+  playButton.addEventListener("click", () => {
+    startMenuPlay();
+  });
+}
+
+// Enter key in name input starts the game
+if (nameInput && startMenuEl) {
+  nameInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      startMenuPlay();
+    }
+  });
+}
+
+// Show play area when session is active
+const origUpdateSessionChrome = updateSessionChrome;
+
+// Animated start screen background
+(function initStartBg() {
+  if (!startBgCanvas) {
+    return;
+  }
+  const bgCtx = startBgCanvas.getContext("2d");
+  const dots = [];
+  let animId = null;
+
+  function resize() {
+    startBgCanvas.width = window.innerWidth;
+    startBgCanvas.height = window.innerHeight;
+  }
+
+  function initDots() {
+    dots.length = 0;
+    for (let i = 0; i < 80; i++) {
+      dots.push({
+        x: Math.random() * startBgCanvas.width,
+        y: Math.random() * startBgCanvas.height,
+        r: Math.random() * 2 + 0.5,
+        vx: (Math.random() - 0.5) * 0.3,
+        vy: (Math.random() - 0.5) * 0.3,
+        alpha: Math.random() * 0.5 + 0.15
+      });
+    }
+  }
+
+  function drawBg(t) {
+    // Stop animation when start screen is hidden
+    const isHidden = startMenuEl
+      ? (startMenuEl.hidden || startMenuEl.classList.contains("hidden"))
+      : true;
+    if (isHidden) {
+      animId = null;
+      return;
+    }
+    bgCtx.clearRect(0, 0, startBgCanvas.width, startBgCanvas.height);
+    for (const dot of dots) {
+      dot.x += dot.vx;
+      dot.y += dot.vy;
+      if (dot.x < 0) { dot.x = startBgCanvas.width; }
+      if (dot.x > startBgCanvas.width) { dot.x = 0; }
+      if (dot.y < 0) { dot.y = startBgCanvas.height; }
+      if (dot.y > startBgCanvas.height) { dot.y = 0; }
+      bgCtx.beginPath();
+      bgCtx.arc(dot.x, dot.y, dot.r, 0, Math.PI * 2);
+      bgCtx.fillStyle = `rgba(0,200,220,${dot.alpha})`;
+      bgCtx.fill();
+    }
+    // Draw connecting lines between close dots
+    for (let i = 0; i < dots.length; i++) {
+      for (let j = i + 1; j < dots.length; j++) {
+        const dx = dots[i].x - dots[j].x;
+        const dy = dots[i].y - dots[j].y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < 100) {
+          bgCtx.beginPath();
+          bgCtx.moveTo(dots[i].x, dots[i].y);
+          bgCtx.lineTo(dots[j].x, dots[j].y);
+          bgCtx.strokeStyle = `rgba(0,200,220,${0.06 * (1 - d / 100)})`;
+          bgCtx.lineWidth = 0.5;
+          bgCtx.stroke();
+        }
+      }
+    }
+    animId = requestAnimationFrame(drawBg);
+  }
+
+  function restartBgAnimation() {
+    const isHidden = startMenuEl
+      ? (startMenuEl.hidden || startMenuEl.classList.contains("hidden"))
+      : true;
+    if (!isHidden && !animId) {
+      animId = requestAnimationFrame(drawBg);
+    }
+  }
+
+  window.addEventListener("resize", () => {
+    resize();
+    initDots();
+  });
+
+  resize();
+  initDots();
+  animId = requestAnimationFrame(drawBg);
+
+  // Restart animation when start screen becomes visible again (class-based)
+  if (startMenuEl) {
+    const observer = new MutationObserver(restartBgAnimation);
+    observer.observe(startMenuEl, { attributes: true, attributeFilter: ["class", "hidden"] });
+  }
+})();
+
+// Canvas click for upgrade menu
+canvas.addEventListener("click", (event) => {
+  const bounds = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / bounds.width;
+  const scaleY = canvas.height / bounds.height;
+  const cx = (event.clientX - bounds.left) * scaleX;
+  const cy = (event.clientY - bounds.top) * scaleY;
+  handleUpgradeClick(cx, cy);
+});
+
+// Show start menu or play area based on session state
+function syncStartMenuVisibility() {
+  if (currentRoomId && hasSeenLocalPlayerSnapshot) {
+    hideStartMenu();
+  } else if (!joinInProgress) {
+    showStartMenu();
+  }
+}
+
+// Patch updateSessionChrome to also sync the start menu
+const _updateSessionChrome = updateSessionChrome;
+// Override by calling syncStartMenuVisibility after any session change
+setInterval(syncStartMenuVisibility, 500);
+
+// Initial state: show start menu
+showStartMenu();
 
 resizeCanvas();
 render();

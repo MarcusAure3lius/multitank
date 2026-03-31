@@ -12,18 +12,24 @@ import {
   ASSET_BUNDLE_VERSION,
   BOT_AI_INTENTS,
   COMBAT_EVENT_ACTIONS,
+  CLASS_TREE,
   EVENT_TYPES,
   GAME_BUILD_VERSION,
   GAME_CONFIG,
   MATCH_PHASES,
+  MAX_LEVEL,
   MESSAGE_TYPES,
   MIN_SUPPORTED_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   PROFILES_SCHEMA_VERSION,
   REPLICATION_KINDS,
+  SHAPE_TYPES,
+  SHAPE_XP,
+  SHAPE_SCORE,
   SOUND_CUES,
   STATUS_EFFECTS,
   VFX_CUES,
+  XP_PER_LEVEL,
   clamp,
   createAnimationEvent,
   createBulletSnapshot,
@@ -1518,6 +1524,12 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     hp: GAME_CONFIG.tank.hitPoints,
     credits: 0,
     score: 0,
+    xp: 0,
+    level: 1,
+    statPoints: 0,
+    tankClassId: 'basic',
+    pendingUpgrades: [],
+    stats: { healthRegen: 0, maxHealth: 0, bodyDamage: 0, bulletSpeed: 0, bulletPenetration: 0, bulletDamage: 0, reload: 0, movementSpeed: 0 },
     assists: 0,
     deaths: 0,
     inventory: {
@@ -1681,6 +1693,8 @@ function createRoom(roomId) {
     players: new Map(),
     clients: new Set(),
     bullets: new Map(),
+    shapes: new Map(),
+    nextShapeId: 1,
     pendingShots: [],
     events: [],
     nextBulletId: 1,
@@ -1721,6 +1735,110 @@ function createRoomEventId(room, type) {
   const prefix = String(type ?? "event").slice(0, 12);
   const eventId = `${room.id}:${prefix}:${room.nextEventId++}`;
   return eventId;
+}
+
+// ---- XP / LEVEL SYSTEM ----
+function checkLevelUp(player, room) {
+  if (!player || player.level >= MAX_LEVEL) {
+    return;
+  }
+  while (player.level < MAX_LEVEL) {
+    const xpNeeded = XP_PER_LEVEL[player.level] ?? Infinity;
+    if (player.xp < xpNeeded) {
+      break;
+    }
+    player.level += 1;
+    player.statPoints += 1;
+    // Award upgrade options at levels 15 and 30
+    const classDef = CLASS_TREE[player.tankClassId] ?? CLASS_TREE.basic;
+    if (classDef.upgradesAt !== null && player.level >= classDef.upgradesAt && classDef.upgradesTo.length > 0) {
+      player.pendingUpgrades = classDef.upgradesTo.slice();
+    }
+  }
+}
+
+function awardXpToPlayer(player, xpAmount, room) {
+  if (!player || player.isSpectator) {
+    return;
+  }
+  player.xp = (player.xp ?? 0) + xpAmount;
+  checkLevelUp(player, room);
+}
+
+// ---- SHAPE SYSTEM ----
+const SHAPE_HP = { triangle: 25, square: 10, pentagon: 100, alpha_pentagon: 3000 };
+const SHAPE_RADIUS = { triangle: 22, square: 20, pentagon: 35, alpha_pentagon: 70 };
+
+function createShape(room, type, x, y) {
+  const id = `shape-${room.id}-${room.nextShapeId++}`;
+  const maxHp = SHAPE_HP[type] ?? 10;
+  return {
+    id,
+    type,
+    x: x ?? (Math.random() * (GAME_CONFIG.world.width - 200) + 100),
+    y: y ?? (Math.random() * (GAME_CONFIG.world.height - 200) + 100),
+    hp: maxHp,
+    maxHp,
+    radius: SHAPE_RADIUS[type] ?? 20,
+    angle: Math.random() * Math.PI * 2,
+    angleVel: (Math.random() - 0.5) * 0.4
+  };
+}
+
+function spawnInitialShapes(room) {
+  // 20 squares, 10 triangles, 5 pentagons
+  for (let i = 0; i < 20; i++) {
+    const shape = createShape(room, SHAPE_TYPES.SQUARE);
+    room.shapes.set(shape.id, shape);
+  }
+  for (let i = 0; i < 10; i++) {
+    const shape = createShape(room, SHAPE_TYPES.TRIANGLE);
+    room.shapes.set(shape.id, shape);
+  }
+  for (let i = 0; i < 5; i++) {
+    const shape = createShape(room, SHAPE_TYPES.PENTAGON);
+    room.shapes.set(shape.id, shape);
+  }
+}
+
+function updateShapes(room, deltaSeconds, now) {
+  for (const shape of room.shapes.values()) {
+    shape.angle += shape.angleVel * deltaSeconds;
+  }
+}
+
+function checkBulletShapeCollisions(room, bullet, now) {
+  for (const shape of room.shapes.values()) {
+    const dx = bullet.x - shape.x;
+    const dy = bullet.y - shape.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const hitDist = GAME_CONFIG.bullet.radius + shape.radius;
+    if (dist > hitDist) {
+      continue;
+    }
+    // Hit! Damage shape
+    const dmg = bullet.damage ?? GAME_CONFIG.bullet.damage;
+    shape.hp -= dmg;
+    if (shape.hp <= 0) {
+      // Award XP/score to shooter
+      const shooter = room.players.get(bullet.ownerId);
+      if (shooter) {
+        awardXpToPlayer(shooter, SHAPE_XP[shape.type] ?? 10, room);
+        shooter.score += SHAPE_SCORE[shape.type] ?? 1;
+      }
+      room.shapes.delete(shape.id);
+      // Schedule respawn after 8 seconds
+      const shapeType = shape.type;
+      setTimeout(() => {
+        if (room.shapes && room.nextShapeId !== undefined) {
+          const newShape = createShape(room, shapeType);
+          room.shapes.set(newShape.id, newShape);
+        }
+      }, 8000);
+    }
+    return true; // bullet consumed
+  }
+  return false;
 }
 
 function queueRoomEvent(room, event) {
@@ -1945,11 +2063,11 @@ function applyStatusEffect(room, attacker, target, resolution, now) {
   });
 }
 
-function resolveCombatHit(room, attacker, target, now) {
+function resolveCombatHit(room, attacker, target, now, baseDamage = GAME_CONFIG.bullet.damage) {
   const attackerProfile = getCombatClassProfile(attacker?.classId);
   const defenderProfile = getCombatClassProfile(target?.classId);
   const rolledCritical = getRandomFloat(room) < attackerProfile.critChance;
-  const scaledDamage = Math.round(GAME_CONFIG.bullet.damage * attackerProfile.damageMultiplier);
+  const scaledDamage = Math.round(baseDamage * attackerProfile.damageMultiplier);
   const critDamage = rolledCritical ? Math.round(scaledDamage * attackerProfile.critMultiplier) : scaledDamage;
   const mitigatedDamage = Math.max(
     GAME_CONFIG.combat.critFloorDamage,
@@ -7105,6 +7223,10 @@ function setRoomPhase(room, phase, now, winner = null, options = {}) {
   if (phase === MATCH_PHASES.WARMUP) {
     nextPhaseEndsAt ??= now + GAME_CONFIG.match.warmupMs;
     nextMessage ??= "Warmup";
+    // Spawn shapes when game starts
+    if (room.shapes.size === 0) {
+      spawnInitialShapes(room);
+    }
   }
 
   if (phase === MATCH_PHASES.PAUSE) {
@@ -7213,9 +7335,11 @@ function maybeStartCountdown(room, now) {
   const connectedPlayers = getConnectedMatchPlayers(room);
   const readyPlayers = getReadyPlayers(room);
 
+  // Auto-start with 1 human player (bots fill in)
+  const effectiveMinPlayers = 1;
   if (
     room.match.phase === MATCH_PHASES.WAITING &&
-    connectedPlayers.length >= GAME_CONFIG.match.minPlayers &&
+    connectedPlayers.length >= effectiveMinPlayers &&
     readyPlayers.length === connectedPlayers.length
   ) {
     setRoomPhase(room, MATCH_PHASES.WARMUP, now);
@@ -7464,7 +7588,7 @@ function finalizeMapTransition(room, now) {
   const readyPlayers = getReadyPlayers(room);
 
   if (
-    connectedPlayers.length >= GAME_CONFIG.match.minPlayers &&
+    connectedPlayers.length >= 1 &&
     readyPlayers.length === connectedPlayers.length
   ) {
     setRoomPhase(room, MATCH_PHASES.WARMUP, now);
@@ -7926,6 +8050,48 @@ function handleResync(socket) {
 
   markRoomActive(rooms.get(socket.data.roomId), Date.now());
   markSocketForFullSync(socket);
+}
+
+function handleUpgrade(socket, payload) {
+  const room = rooms.get(socket.data?.roomId);
+  const player = room?.players.get(socket.data?.playerId);
+  if (!room || !player) {
+    return;
+  }
+  const requestedClassId = String(payload.classId ?? "");
+  if (!CLASS_TREE[requestedClassId]) {
+    return;
+  }
+  if (!Array.isArray(player.pendingUpgrades) || !player.pendingUpgrades.includes(requestedClassId)) {
+    return;
+  }
+  player.tankClassId = requestedClassId;
+  player.pendingUpgrades = [];
+}
+
+function handleStatPoint(socket, payload) {
+  const room = rooms.get(socket.data?.roomId);
+  const player = room?.players.get(socket.data?.playerId);
+  if (!room || !player) {
+    return;
+  }
+  if ((player.statPoints ?? 0) <= 0) {
+    return;
+  }
+  const statName = String(payload.statName ?? "");
+  const validStats = ['healthRegen', 'maxHealth', 'bodyDamage', 'bulletSpeed', 'bulletPenetration', 'bulletDamage', 'reload', 'movementSpeed'];
+  if (!validStats.includes(statName)) {
+    return;
+  }
+  if (!player.stats) {
+    player.stats = { healthRegen: 0, maxHealth: 0, bodyDamage: 0, bulletSpeed: 0, bulletPenetration: 0, bulletDamage: 0, reload: 0, movementSpeed: 0 };
+  }
+  const currentVal = player.stats[statName] ?? 0;
+  if (currentVal >= 7) {
+    return;
+  }
+  player.stats[statName] = currentVal + 1;
+  player.statPoints -= 1;
 }
 
 function createInputFrame(payload, receivedAt) {
@@ -8536,7 +8702,7 @@ function applyBulletHit(room, bullet, player, impactTime) {
     room.bullets.delete(bullet.id);
     return;
   }
-  const resolution = resolveCombatHit(room, attacker, player, impactTime);
+  const resolution = resolveCombatHit(room, attacker, player, impactTime, bullet.damage ?? GAME_CONFIG.bullet.damage);
   player.hp = Math.max(0, player.hp - resolution.damage);
   room.bullets.delete(bullet.id);
 
@@ -8615,6 +8781,9 @@ function applyBulletHit(room, bullet, player, impactTime) {
     if (attacker) {
       attacker.score += 1;
       attacker.credits += GAME_CONFIG.economy.killCredits;
+      // Award XP for kill
+      const xpGain = 250 + (player.level ?? 1) * 25;
+      awardXpToPlayer(attacker, xpGain, room);
       queueScoreStateEvent(room, attacker, "kill", impactTime);
       queueInventoryStateEvent(room, attacker, impactTime);
       updateProfileStats(attacker.profileId, (stats) => {
@@ -8686,8 +8855,9 @@ function simulateBulletToTime(room, bullet, targetTime, currentTime = targetTime
     const previousX = bullet.x;
     const previousY = bullet.y;
 
-    bullet.x += Math.cos(bullet.angle) * GAME_CONFIG.bullet.speed * stepSeconds;
-    bullet.y += Math.sin(bullet.angle) * GAME_CONFIG.bullet.speed * stepSeconds;
+    const bSpeed = bullet.speed ?? GAME_CONFIG.bullet.speed;
+    bullet.x += Math.cos(bullet.angle) * bSpeed * stepSeconds;
+    bullet.y += Math.sin(bullet.angle) * bSpeed * stepSeconds;
     bullet.lastSimulatedAt = stepEndsAt;
 
     const bulletExpired =
@@ -8697,7 +8867,8 @@ function simulateBulletToTime(room, bullet, targetTime, currentTime = targetTime
       bullet.y < 0 ||
       bullet.y > GAME_CONFIG.world.height;
 
-    if (bulletExpired || segmentHitsObstacle(previousX, previousY, bullet.x, bullet.y, GAME_CONFIG.bullet.radius)) {
+    const bRadius = bullet.radius ?? GAME_CONFIG.bullet.radius;
+    if (bulletExpired || segmentHitsObstacle(previousX, previousY, bullet.x, bullet.y, bRadius)) {
       room.bullets.delete(bullet.id);
       return false;
     }
@@ -8712,7 +8883,7 @@ function simulateBulletToTime(room, bullet, targetTime, currentTime = targetTime
         continue;
       }
 
-      const hitDistance = GAME_CONFIG.tank.radius + GAME_CONFIG.bullet.radius;
+      const hitDistance = GAME_CONFIG.tank.radius + (bullet.radius ?? GAME_CONFIG.bullet.radius);
       const distanceSquared = distanceSquaredToSegment(
         previousX,
         previousY,
@@ -8727,6 +8898,12 @@ function simulateBulletToTime(room, bullet, targetTime, currentTime = targetTime
       }
 
       applyBulletHit(room, bullet, player, stepEndsAt);
+      return false;
+    }
+
+    // Check shape collisions
+    if (checkBulletShapeCollisions(room, bullet, stepEndsAt)) {
+      room.bullets.delete(bullet.id);
       return false;
     }
   }
@@ -8766,28 +8943,48 @@ function resolvePendingShots(room, now) {
       continue;
     }
 
-    const barrelDistance = GAME_CONFIG.tank.radius + 10;
-    const bulletId = `${room.id}-${room.nextBulletId++}`;
-    const bullet = {
-      id: bulletId,
-      ownerId: player.id,
-      x: shooterState.x + Math.cos(shot.turretAngle) * barrelDistance,
-      y: shooterState.y + Math.sin(shot.turretAngle) * barrelDistance,
-      angle: shot.turretAngle,
-      bornAt: shot.fireTime,
-      lastSimulatedAt: shot.fireTime,
-      lagCompensatedMs: shot.compensatedMs,
-      clientSentAt: shot.clientSentAt
-    };
+    const shotClassDef = CLASS_TREE[player.tankClassId] ?? CLASS_TREE.basic;
+    const bulletDmgStat = player.stats?.bulletDamage ?? 0;
+    const bulletSpdStat = player.stats?.bulletSpeed ?? 0;
+    const baseBulletSpeed = (shotClassDef.bulletSpeed ?? GAME_CONFIG.bullet.speed) * (1 + bulletSpdStat * 0.08);
+    const baseBulletDamage = (shotClassDef.bulletDamage ?? GAME_CONFIG.bullet.damage) * (1 + bulletDmgStat * 0.10);
+    const baseBulletRadius = shotClassDef.bulletRadius ?? GAME_CONFIG.bullet.radius;
+    const shotBarrels = shotClassDef.barrels ?? [{ x: 40, y: 0, w: 40, h: 14 }];
 
-    room.bullets.set(bulletId, bullet);
-    if (!simulateBulletToTime(room, bullet, now, now)) {
-      continue;
-    }
+    for (const barrel of shotBarrels) {
+      const barrelAngle = shot.turretAngle + (barrel.angle ?? 0);
+      const rightX = -Math.sin(shot.turretAngle);
+      const rightY = Math.cos(shot.turretAngle);
+      const lateralOffset = barrel.y ?? 0;
+      const bulletId = `${room.id}-${room.nextBulletId++}`;
+      const bullet = {
+        id: bulletId,
+        ownerId: player.id,
+        x: shooterState.x + Math.cos(barrelAngle) * (GAME_CONFIG.tank.radius + 8) + rightX * lateralOffset,
+        y: shooterState.y + Math.sin(barrelAngle) * (GAME_CONFIG.tank.radius + 8) + rightY * lateralOffset,
+        angle: barrelAngle,
+        speed: baseBulletSpeed,
+        damage: baseBulletDamage,
+        radius: baseBulletRadius,
+        bornAt: shot.fireTime,
+        lastSimulatedAt: shot.fireTime,
+        lagCompensatedMs: shot.compensatedMs,
+        clientSentAt: shot.clientSentAt
+      };
 
-    if (!canShootPhase(room.match.phase)) {
-      clearTransientRoomCombatState(room);
-      return;
+      room.bullets.set(bulletId, bullet);
+      if (!simulateBulletToTime(room, bullet, now, now)) {
+        if (!canShootPhase(room.match.phase)) {
+          clearTransientRoomCombatState(room);
+          return;
+        }
+        continue;
+      }
+
+      if (!canShootPhase(room.match.phase)) {
+        clearTransientRoomCombatState(room);
+        return;
+      }
     }
   }
 }
@@ -8836,7 +9033,8 @@ function updatePlayer(room, player, deltaSeconds, now) {
   const moveMagnitude = Math.hypot(moveX, moveY);
   const normalizedMoveX = moveMagnitude > 0 ? moveX / moveMagnitude : 0;
   const normalizedMoveY = moveMagnitude > 0 ? moveY / moveMagnitude : 0;
-  const moveSpeed = moveMagnitude > 0 ? GAME_CONFIG.tank.speed : 0;
+  const moveSpeedStat = player.stats?.movementSpeed ?? 0;
+  const moveSpeed = moveMagnitude > 0 ? GAME_CONFIG.tank.speed * (1 + moveSpeedStat * 0.07) : 0;
 
   if (moveMagnitude > 0) {
     player.angle = Math.atan2(normalizedMoveY, normalizedMoveX);
@@ -8850,7 +9048,11 @@ function updatePlayer(room, player, deltaSeconds, now) {
   if (!stunned && canShootPhase(room.match.phase) && player.input.shoot) {
     const fireContext = getLagCompensatedFireContext(player, now);
 
-    if (fireContext.fireTime - player.lastShotAt >= GAME_CONFIG.tank.shootCooldownMs) {
+    const classDef = CLASS_TREE[player.tankClassId] ?? CLASS_TREE.basic;
+    const reloadStat = player.stats?.reload ?? 0;
+    const classReloadMs = classDef.reloadMs ?? GAME_CONFIG.tank.shootCooldownMs;
+    const effectiveReloadMs = Math.max(50, classReloadMs * (1 - reloadStat * 0.065));
+    if (fireContext.fireTime - player.lastShotAt >= effectiveReloadMs) {
       player.lastShotAt = fireContext.fireTime;
       room.pendingShots.push({
         playerId: player.id,
@@ -8901,16 +9103,19 @@ function updateRoomPhase(room, now) {
     return;
   }
 
+  // Effective minimum for pause/disconnect logic is 1 (auto-start with bots)
+  const effectiveMinPlayers = 1;
+
   if (room.match.phase === MATCH_PHASES.PAUSE) {
     room.match.phaseEndsAt = latestReconnectDeadline;
 
-    if (connectedPlayers.length >= GAME_CONFIG.match.minPlayers) {
+    if (connectedPlayers.length >= effectiveMinPlayers) {
       resumePausedMatch(room, now);
       return;
     }
 
     if (
-      restorablePlayerCount < GAME_CONFIG.match.minPlayers ||
+      restorablePlayerCount < effectiveMinPlayers ||
       (room.match.phaseEndsAt !== null && now >= room.match.phaseEndsAt)
     ) {
       const resumePhase = room.match.resumePhase ?? MATCH_PHASES.WAITING;
@@ -8924,10 +9129,10 @@ function updateRoomPhase(room, now) {
     return;
   }
 
-  if (connectedPlayers.length < GAME_CONFIG.match.minPlayers) {
+  if (connectedPlayers.length < effectiveMinPlayers) {
     if (
       (isWarmupPhase(room.match.phase) || isCombatPhase(room.match.phase)) &&
-      restorablePlayerCount >= GAME_CONFIG.match.minPlayers
+      restorablePlayerCount >= effectiveMinPlayers
     ) {
       pauseMatchForReconnect(room, now);
       return;
@@ -9074,6 +9279,7 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq) {
     leaderboard: getLeaderboard(room),
     players: includeFullCollections ? visiblePlayers : [],
     bullets: includeFullCollections ? visibleBullets : [],
+    shapes: includeFullCollections ? Array.from(room.shapes.values()) : [],
     events: visibleEvents,
     inventory: player ? [createInventoryState(player)] : [],
     replication,
@@ -9093,6 +9299,11 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq) {
           isRoomOwner: room.lobby.ownerPlayerId === player.id,
           teamId: player.teamId,
           classId: player.classId,
+          tankClassId: player.tankClassId ?? 'basic',
+          xp: player.xp ?? 0,
+          level: player.level ?? 1,
+          statPoints: player.statPoints ?? 0,
+          pendingUpgrades: player.pendingUpgrades ?? [],
           queuedForSlot: player.queuedForSlot,
           slotReserved: player.slotReserved,
           afk: player.afk,
@@ -9127,6 +9338,7 @@ function simulateRooms(deltaSeconds, now) {
 
     resolvePendingShots(room, now);
     updateBullets(room, deltaSeconds, now);
+    updateShapes(room, deltaSeconds, now);
     updateObjective(room, deltaSeconds, now);
     updateRoomPhase(room, now);
     recordRoomHistory(room, now);
@@ -9280,6 +9492,13 @@ wss.on("connection", (socket, request) => {
           return;
         }
         handleResync(socket, payload);
+        acknowledgeReliableMessage(socket, payload);
+        break;
+      case MESSAGE_TYPES.UPGRADE:
+        if (resendAckForDuplicate(socket, payload)) {
+          return;
+        }
+        handleUpgrade(socket, payload);
         acknowledgeReliableMessage(socket, payload);
         break;
       case MESSAGE_TYPES.INPUT:

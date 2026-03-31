@@ -4,99 +4,81 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Multitank</title>
-    <link rel="stylesheet" href="/style.css?v=0.1.3">
+    <link rel="stylesheet" href="/style.css?v=0.2.0">
   </head>
   <body>
     <div id="dev-badge" class="dev-badge" hidden>LOCAL DEV</div>
-    <main class="shell">
-      <section class="panel">
-        <div class="brand start-brand">
-          <p class="eyebrow">Authoritative Multiplayer Arena</p>
-          <h1>Multitank</h1>
-          <p class="lede">
-            Press Join Match to drop straight into the map with a controllable unit. Match placement happens automatically in the background.
-          </p>
+
+    <!-- START SCREEN -->
+    <div id="start-screen" class="start-screen">
+      <canvas id="bg-canvas" class="bg-canvas"></canvas>
+      <div class="start-card">
+        <h1 class="game-title">MULTITANK</h1>
+        <p class="game-subtitle">Multiplayer Arena</p>
+        <div class="name-row">
+          <input id="name-input" type="text" maxlength="16" placeholder="Enter your name..." autocomplete="off" spellcheck="false">
         </div>
+        <button id="play-button" class="play-button">PLAY</button>
+        <p class="controls-hint">WASD / Arrow Keys to move &nbsp;·&nbsp; Mouse to aim &nbsp;·&nbsp; Click to fire</p>
+      </div>
+    </div>
 
-        <form id="join-form" class="quick-join-form">
-          <button id="join-match-button" type="submit">Join Match</button>
-          <p class="quick-join-status"><span id="status">Ready to deploy</span></p>
-          <p class="quick-join-copy">WASD to move, mouse to aim, left click to fire, Space optional.</p>
-
-          <div class="join-hidden" hidden>
-            <input id="name-input" name="name" type="text" maxlength="16" value="Commander">
-            <input id="room-input" name="room" type="text" maxlength="24" value="default">
-            <input id="spectate-input" name="spectate" type="checkbox">
-            <button id="create-room-button" type="button" class="secondary">Create Room</button>
-            <button id="ready-button" type="button" class="secondary" hidden>Ready Up</button>
-
-            <p id="lobby-room-code" class="section-note">Room code: -</p>
-            <select id="map-select"></select>
-            <select id="team-select"></select>
-            <select id="class-select"></select>
-            <p id="lobby-summary" class="section-copy">Matchmaking is preparing your room.</p>
-
-            <button id="refresh-rooms-button" type="button" class="secondary compact-button">Refresh</button>
-            <ul id="room-browser" class="room-browser"></ul>
-
-            <section id="results-card" class="stack-card" hidden>
-              <p id="results-summary" class="section-note">Round complete</p>
-              <ul id="results-list" class="results-list"></ul>
-            </section>
-
-            <span id="latency">--</span>
-            <span id="match-status">Waiting for players</span>
-          </div>
-        </form>
-      </section>
-
-      <section class="play-area">
-        <div id="diagnostic-banner" class="diagnostic-banner" aria-live="polite"></div>
-        <div id="death-overlay" class="death-overlay" hidden>
-          <div class="death-overlay-tabs" role="group" aria-label="Respawn">
-            <div class="death-overlay-tab death-overlay-label">You Died</div>
-            <button id="respawn-button" class="death-overlay-tab death-overlay-action" type="button">Respawn</button>
-          </div>
+    <!-- GAME SCREEN -->
+    <div id="game-screen" class="game-screen" hidden>
+      <div id="diagnostic-banner" class="diagnostic-banner" aria-live="polite"></div>
+      <div id="death-overlay" class="death-overlay" hidden>
+        <div class="death-card">
+          <div class="death-title">YOU DIED</div>
+          <button id="respawn-button" class="respawn-button" type="button">RESPAWN</button>
         </div>
-        <div id="fallback-visual-layer" class="fallback-visual-layer" aria-hidden="true">
-          <div id="fallback-center-marker" class="fallback-center-marker">MAP CENTER</div>
-          <div id="fallback-player-marker" class="fallback-player-marker" hidden>
-            <div class="fallback-player-ring"></div>
-            <div class="fallback-player-dot"></div>
-            <div class="fallback-player-label">YOU</div>
-          </div>
-          <div id="fallback-remote-markers" class="fallback-remote-markers"></div>
-        </div>
-        <canvas id="game" width="1600" height="900"></canvas>
-        <aside class="hud">
-          <div>
-            <p class="hud-label">Room</p>
-            <p id="room-label">-</p>
-          </div>
-          <div>
-            <p class="hud-label">You</p>
-            <p id="player-label">-</p>
-          </div>
-          <div>
-            <p class="hud-label">Profile</p>
-            <p id="profile-label">-</p>
-          </div>
-          <div>
-            <p class="hud-label">Round</p>
-            <p id="round-label">-</p>
-          </div>
-          <div>
-            <p class="hud-label">Scoreboard</p>
-            <ul id="scoreboard" class="scoreboard"></ul>
-          </div>
-          <div>
-            <p class="hud-label">Kill Feed</p>
-            <ul id="kill-feed" class="kill-feed"></ul>
-          </div>
-        </aside>
-      </section>
-    </main>
+      </div>
+      <canvas id="game" class="game-canvas"></canvas>
+      <div id="upgrade-menu" class="upgrade-menu" hidden></div>
+    </div>
 
-    <script type="module" src="/client.js?v=0.1.3"></script>
+    <!-- Hidden legacy elements for backward compat with client.js -->
+    <div hidden aria-hidden="true">
+      <span id="status"></span>
+      <span id="latency"></span>
+      <span id="match-status"></span>
+      <p id="room-label"></p>
+      <p id="player-label"></p>
+      <p id="profile-label"></p>
+      <p id="round-label"></p>
+      <ul id="scoreboard"></ul>
+      <ul id="kill-feed"></ul>
+      <form id="join-form">
+        <button id="join-match-button" type="submit"></button>
+        <div class="join-hidden" hidden>
+          <input id="room-input" name="room" type="text" value="default">
+          <input id="spectate-input" name="spectate" type="checkbox">
+          <button id="create-room-button" type="button"></button>
+          <button id="ready-button" type="button" hidden></button>
+          <p id="lobby-room-code"></p>
+          <select id="map-select"></select>
+          <select id="team-select"></select>
+          <select id="class-select"></select>
+          <p id="lobby-summary"></p>
+          <button id="refresh-rooms-button" type="button"></button>
+          <ul id="room-browser"></ul>
+          <section id="results-card" hidden>
+            <p id="results-summary"></p>
+            <ul id="results-list"></ul>
+          </section>
+        </div>
+      </form>
+      <div class="play-area" id="play-area"></div>
+      <div id="fallback-visual-layer">
+        <div id="fallback-center-marker"></div>
+        <div id="fallback-player-marker" hidden>
+          <div class="fallback-player-ring"></div>
+          <div class="fallback-player-dot"></div>
+          <div class="fallback-player-label"></div>
+        </div>
+        <div id="fallback-remote-markers"></div>
+      </div>
+    </div>
+
+    <script type="module" src="/client.js?v=0.2.0"></script>
   </body>
 </html>
