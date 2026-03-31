@@ -136,6 +136,7 @@ function normalizeAllocatedStats(stats, fallback = createEmptyAllocatedStats()) 
 
 // XP / upgrade state
 let localXp = 0;
+let displayXp = 0;
 let localLevel = 1;
 let localStatPoints = 0;
 let localPendingUpgrades = [];
@@ -198,6 +199,8 @@ let lastPointerWorldPosition = {
 };
 let lastRenderFrameAt = performance.now();
 let cameraNeedsSnap = true;
+let cameraShakeX = 0;
+let cameraShakeY = 0;
 let hasSeenLocalPlayerSnapshot = false;
 let joinInProgress = false;
 let nextInputSeq = 1;
@@ -1379,6 +1382,9 @@ function triggerCombatEvent(event) {
     if (event.action === COMBAT_EVENT_ACTIONS.DAMAGE) {
       target.hitFlashUntil = Math.max(target.hitFlashUntil ?? 0, now + 180);
       target.hitFlashStrength = 1;
+      if (event.targetId === localPlayerId) {
+        triggerCameraShake(Math.min(10, (event.damage ?? 5) * 0.3));
+      }
     }
 
     if (event.statusEffect === STATUS_EFFECTS.STUN && (event.statusDurationMs ?? 0) > 0) {
@@ -1577,7 +1583,7 @@ function getCameraFocusTarget() {
   };
 }
 
-function updateCamera() {
+function updateCamera(deltaSeconds) {
   const focus = getCameraFocusTarget();
   const viewport = getVisibleViewportSize();
   const target = clampCameraPosition(focus.x - viewport.width / 2, focus.y - viewport.height / 2);
@@ -1589,17 +1595,24 @@ function updateCamera() {
     return;
   }
 
-  if (localRenderState) {
-    camera.x = target.x;
-    camera.y = target.y;
-    return;
-  }
-
-  camera.x = lerp(camera.x, target.x, 0.18);
-  camera.y = lerp(camera.y, target.y, 0.18);
+  const followAmount = clamp(1 - Math.exp(-14 * deltaSeconds), 0.12, 0.55);
+  camera.x = lerp(camera.x, target.x, followAmount);
+  camera.y = lerp(camera.y, target.y, followAmount);
   const clamped = clampCameraPosition(camera.x, camera.y);
   camera.x = clamped.x;
   camera.y = clamped.y;
+}
+
+function triggerCameraShake(intensity) {
+  const angle = Math.random() * Math.PI * 2;
+  cameraShakeX += Math.cos(angle) * intensity;
+  cameraShakeY += Math.sin(angle) * intensity;
+}
+
+function updateCameraShake(deltaSeconds) {
+  const decay = clamp(1 - Math.exp(-18 * deltaSeconds), 0.2, 0.9);
+  cameraShakeX = lerp(cameraShakeX, 0, decay);
+  cameraShakeY = lerp(cameraShakeY, 0, decay);
 }
 
 function getPlayerVisualX(player) {
@@ -2552,6 +2565,8 @@ function applySnapshot(payload) {
     }
     for (const shape of payload.shapes) {
       if (shape && shape.id) {
+        const existing = shapes.get(shape.id);
+        if (existing) shape.renderAngle = existing.renderAngle ?? existing.angle;
         shapes.set(shape.id, shape);
       }
     }
@@ -2811,6 +2826,7 @@ function connect(options = {}) {
     lastServerMessageAt = 0;
     lastRenderFrameAt = performance.now();
     localXp = 0;
+    displayXp = 0;
     localLevel = 1;
     localStatPoints = 0;
     localPendingUpgrades = [];
@@ -3052,6 +3068,7 @@ function connect(options = {}) {
     pendingInputs.length = 0;
     lastStallWarningAt = 0;
     localXp = 0;
+    displayXp = 0;
     localLevel = 1;
     localStatPoints = 0;
     localPendingUpgrades = [];
@@ -3234,6 +3251,12 @@ function updateRenderState(deltaSeconds, frameAt) {
     updateVisualRecoil(player, deltaSeconds);
     const blendedMotion = Math.min(1, (distanceMoved / Math.max(0.001, deltaSeconds)) / GAME_CONFIG.tank.speed);
     updateVisualAnimationState(player, blendedMotion);
+    player.displayHp = lerp(player.displayHp ?? player.hp, player.hp, clamp(1 - Math.exp(-10 * deltaSeconds), 0.1, 0.6));
+  }
+
+  const shapeAngleSmoothing = clamp(1 - Math.exp(-6 * deltaSeconds), 0.08, 0.4);
+  for (const shape of shapes.values()) {
+    shape.renderAngle = lerpAngle(shape.renderAngle ?? shape.angle ?? 0, shape.angle ?? 0, shapeAngleSmoothing);
   }
 
   for (const bullet of bullets.values()) {
@@ -3561,7 +3584,7 @@ function drawTank(player) {
   context.restore();
 
   // Health bar
-  const hpRatio = clamp((Number(player.hp) || 0) / Math.max(1, Number(player.maxHp) || GAME_CONFIG.tank.hitPoints), 0, 1);
+  const hpRatio = clamp((Number(player.displayHp ?? player.hp) || 0) / Math.max(1, Number(player.maxHp) || GAME_CONFIG.tank.hitPoints), 0, 1);
   const healthBarWidth = 52;
   const healthBarHeight = 7;
   const healthBarY = y - bodyRadius - 16;
@@ -3588,6 +3611,21 @@ function drawProjectile(projectile, options = {}) {
   const x = projectile.renderX ?? projectile.x;
   const y = projectile.renderY ?? projectile.y;
   const radius = projectile.radius ?? GAME_CONFIG.bullet.radius;
+
+  const prevX = projectile.previousRenderX ?? x;
+  const prevY = projectile.previousRenderY ?? y;
+  if (Math.hypot(x - prevX, y - prevY) > 1) {
+    context.save();
+    context.globalAlpha = alpha * 0.35;
+    context.strokeStyle = headColor;
+    context.lineWidth = radius * 1.4;
+    context.lineCap = "round";
+    context.beginPath();
+    context.moveTo(prevX, prevY);
+    context.lineTo(x, y);
+    context.stroke();
+    context.restore();
+  }
 
   context.save();
   context.globalAlpha = alpha;
@@ -3664,7 +3702,7 @@ function drawShape(shape) {
 
   context.save();
   context.translate(sx, sy);
-  context.rotate(shape.angle ?? 0);
+  context.rotate(shape.renderAngle ?? shape.angle ?? 0);
   context.beginPath();
   for (let i = 0; i < sides; i++) {
     const angle = (i / sides) * Math.PI * 2 - Math.PI / 2;
@@ -3781,7 +3819,7 @@ function drawXpBar() {
 
   const currentLevelXp = XP_PER_LEVEL[localLevel - 1] ?? 0;
   const nextLevelXp = XP_PER_LEVEL[localLevel] ?? XP_PER_LEVEL[XP_PER_LEVEL.length - 1];
-  const xpIntoLevel = localXp - currentLevelXp;
+  const xpIntoLevel = displayXp - currentLevelXp;
   const xpNeeded = Math.max(1, nextLevelXp - currentLevelXp);
   const xpRatio = localLevel >= MAX_LEVEL ? 1 : clamp(xpIntoLevel / xpNeeded, 0, 1);
   const classDef = getLocalTankClassDef();
@@ -4260,13 +4298,14 @@ function render(frameAt = performance.now()) {
 
     updateRenderState(deltaSeconds, frameAt);
     updateLocalRenderState(deltaSeconds);
-    updateCamera();
+    updateCamera(deltaSeconds);
+    updateCameraShake(deltaSeconds);
     updateFallbackVisuals();
     drawBackground();
 
     context.save();
     context.scale(cameraZoom, cameraZoom);
-    context.translate(-camera.x, -camera.y);
+    context.translate(-camera.x + cameraShakeX, -camera.y + cameraShakeY);
     drawMapSquare();
     drawGrid();
     drawCenterProbe();
@@ -4295,6 +4334,7 @@ function render(frameAt = performance.now()) {
     drawCanvasLeaderboard();
     drawCanvasKillFeed();
     drawMinimap();
+    displayXp = lerp(displayXp, localXp, clamp(1 - Math.exp(-8 * deltaSeconds), 0.1, 0.5));
     drawXpBar();
     drawStatPanel();
     drawUpgradeMenu();
