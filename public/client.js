@@ -1,6 +1,7 @@
 import {
   ANIMATION_ACTIONS,
   ASSET_BUNDLE_VERSION,
+  AUTO_BARREL_ROT_SPEED,
   CLASS_TREE,
   clamp,
   COMBAT_EVENT_ACTIONS,
@@ -17,6 +18,7 @@ import {
   VFX_CUES,
   XP_PER_LEVEL,
   deserializePacket,
+  getMapLayout,
   getTeamConfig,
   getTeamSpawnZone,
   normalizeAngle,
@@ -107,6 +109,7 @@ const shapes = new Map();
 const predictedProjectiles = new Map();
 const combatEffects = [];
 const killFeedEntries = [];
+const shapeParticles = [];
 const STAT_LABELS = Object.freeze({
   healthRegen: "Health Regen",
   maxHealth: "Max Health",
@@ -811,6 +814,9 @@ function populateSelectOptions(select, options) {
     const element = document.createElement("option");
     element.value = option.id;
     element.textContent = option.name;
+    if (option.summary) {
+      element.title = option.summary;
+    }
     select.append(element);
   }
 }
@@ -847,6 +853,10 @@ function ensureQuickJoinDefaults() {
   mapSelect.value = GAME_CONFIG.lobby.maps[0].id;
   teamSelect.value = GAME_CONFIG.lobby.teams[0].id;
   classSelect.value = GAME_CONFIG.lobby.classes[0].id;
+}
+
+function getLobbyMapConfig(mapId) {
+  return GAME_CONFIG.lobby.maps.find((map) => map.id === mapId) ?? GAME_CONFIG.lobby.maps[0];
 }
 
 function getPreferredQuickJoinRoomCode() {
@@ -1519,6 +1529,10 @@ function getVisibleViewportSize() {
   };
 }
 
+function getActiveMapLayout() {
+  return getMapLayout(latestLobby?.mapId ?? mapSelect?.value ?? GAME_CONFIG.lobby.maps[0]?.id);
+}
+
 function clampCameraPosition(x, y) {
   const viewport = getVisibleViewportSize();
   return {
@@ -1755,7 +1769,9 @@ function refreshLobbyUi(localPlayer = getLocalPlayer(), you = latestYou) {
   }
 
   const roomCode = latestLobby?.roomCode ?? currentRoomId ?? roomInput.value ?? "-";
-  const mapName = latestLobby?.mapName ?? GAME_CONFIG.lobby.maps[0].name;
+  const activeMapConfig = getLobbyMapConfig(latestLobby?.mapId ?? GAME_CONFIG.lobby.maps[0].id);
+  const mapName = latestLobby?.mapName ?? activeMapConfig.name;
+  const mapSummary = activeMapConfig?.summary ?? "Arena";
   const ownerName = latestLobby?.ownerName ?? "No owner yet";
   const activePlayers = latestLobby?.activePlayers ?? 0;
   const spectators = latestLobby?.spectators ?? 0;
@@ -1780,7 +1796,7 @@ function refreshLobbyUi(localPlayer = getLocalPlayer(), you = latestYou) {
   setElementText(lobbyRoomCodeElement, `Room code: ${roomCode}`);
   setElementText(
     lobbySummaryElement,
-    `${ownerName} owns this room | ${mapName} | ${activePlayers}/${GAME_CONFIG.session.maxHumanPlayersPerRoom} active | ${spectators} spectators` +
+    `${ownerName} owns this room | ${mapName} | ${mapSummary} | ${activePlayers}/${GAME_CONFIG.session.maxHumanPlayersPerRoom} active | ${spectators} spectators` +
     stageHint +
     (isResultsPhase(phase) && activePlayers > 0
       ? ` | ${rematchVotes}/${activePlayers} rematch votes`
@@ -1813,10 +1829,11 @@ function renderRoomBrowser(rooms) {
   for (const room of rooms) {
     const item = document.createElement("li");
     item.className = "room-browser-item";
+    const mapConfig = getLobbyMapConfig(room.mapId);
 
     const meta = document.createElement("div");
     meta.className = "room-browser-meta";
-    meta.innerHTML = `<div class="room-browser-title">${escapeHtml(room.roomCode)}</div><div>${escapeHtml(room.mapName)} | ${escapeHtml(room.phase)}</div><div>${room.activePlayers}/${room.maxPlayers} active | ${room.spectators} spectators</div>`;
+    meta.innerHTML = `<div class="room-browser-title">${escapeHtml(room.roomCode)}</div><div>${escapeHtml(room.mapName)} | ${escapeHtml(room.phase)}</div><div>${escapeHtml(mapConfig?.summary ?? "Arena")}</div><div>${room.activePlayers}/${room.maxPlayers} active | ${room.spectators} spectators</div>`;
 
     const actions = document.createElement("div");
     actions.className = "room-browser-actions";
@@ -1888,7 +1905,7 @@ function circleIntersectsRect(x, y, radius, rect) {
 }
 
 function collidesWithObstacle(x, y, radius = GAME_CONFIG.tank.radius) {
-  return GAME_CONFIG.world.obstacles.some((obstacle) => circleIntersectsRect(x, y, radius, obstacle));
+  return getActiveMapLayout().obstacles.some((obstacle) => circleIntersectsRect(x, y, radius, obstacle));
 }
 
 function getTeleportDistanceForKind(kind) {
@@ -2072,19 +2089,21 @@ function spawnPredictedProjectile(localPlayer, inputFrame) {
   };
   const classDef = getLocalTankClassDef();
   const shotBarrels = classDef.barrels ?? [{ x: 40, y: 0, w: 40, h: 14 }];
-  const rightX = -Math.sin(inputFrame.turretAngle);
-  const rightY = Math.cos(inputFrame.turretAngle);
   const projectileRadius = getEffectiveLocalBulletRadius();
   const projectileSpeed = getEffectiveLocalBulletSpeed();
 
   shotBarrels.forEach((barrel, index) => {
-    const barrelAngle = inputFrame.turretAngle + (barrel.angle ?? 0);
+    const barrelAngle = barrel.autoRotate
+      ? estimateServerTime(now) / 1000 * AUTO_BARREL_ROT_SPEED
+      : inputFrame.turretAngle + (barrel.angle ?? 0);
     const lateralOffset = barrel.y ?? 0;
+    const bRightX = -Math.sin(barrelAngle);
+    const bRightY = Math.cos(barrelAngle);
     const muzzleDistance = GAME_CONFIG.tank.radius + 8;
     const muzzleX =
-      origin.x + Math.cos(barrelAngle) * muzzleDistance + rightX * lateralOffset;
+      origin.x + Math.cos(barrelAngle) * muzzleDistance + bRightX * lateralOffset;
     const muzzleY =
-      origin.y + Math.sin(barrelAngle) * muzzleDistance + rightY * lateralOffset;
+      origin.y + Math.sin(barrelAngle) * muzzleDistance + bRightY * lateralOffset;
 
     predictedProjectiles.set(`predicted:${inputFrame.seq}:${index}`, {
       id: `predicted:${inputFrame.seq}:${index}`,
@@ -2525,8 +2544,9 @@ function applySnapshot(payload) {
   // Update shapes
   if (Array.isArray(payload.shapes)) {
     const shapeIds = new Set(payload.shapes.map((s) => s.id));
-    for (const id of shapes.keys()) {
+    for (const [id, shape] of shapes.entries()) {
       if (!shapeIds.has(id)) {
+        spawnShapeDeathParticles(shape);
         shapes.delete(id);
       }
     }
@@ -3251,12 +3271,14 @@ function updateRenderState(deltaSeconds, frameAt) {
 }
 
 function drawBackground() {
-  context.fillStyle = "#dbe7ff";
+  const theme = getActiveMapLayout().theme;
+  context.fillStyle = theme?.background ?? "#dbe7ff";
   context.fillRect(0, 0, canvas.width, canvas.height);
 }
 
 function drawMapSquare() {
-  context.fillStyle = "#f3f7ff";
+  const theme = getActiveMapLayout().theme;
+  context.fillStyle = theme?.floor ?? "#f3f7ff";
   context.fillRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
 
   for (const team of GAME_CONFIG.lobby.teams) {
@@ -3280,6 +3302,9 @@ function drawCenterProbe() {
 }
 
 function drawGrid() {
+  const theme = getActiveMapLayout().theme;
+  const minorColor = theme?.gridMinor ?? "rgba(76, 118, 191, 0.36)";
+  const majorColor = theme?.gridMajor ?? "rgba(40, 78, 148, 0.72)";
   const cellSize = 40;
   const majorEvery = 5;
   const minorLineWidth = Math.max(1.8 / cameraZoom, 1.4);
@@ -3293,7 +3318,7 @@ function drawGrid() {
     context.moveTo(x, 0);
     context.lineTo(x, GAME_CONFIG.world.height);
     context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
-    context.strokeStyle = isMajor ? "rgba(40, 78, 148, 0.72)" : "rgba(76, 118, 191, 0.36)";
+    context.strokeStyle = isMajor ? majorColor : minorColor;
     context.stroke();
   }
 
@@ -3303,7 +3328,7 @@ function drawGrid() {
     context.moveTo(0, y);
     context.lineTo(GAME_CONFIG.world.width, y);
     context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
-    context.strokeStyle = isMajor ? "rgba(40, 78, 148, 0.72)" : "rgba(76, 118, 191, 0.36)";
+    context.strokeStyle = isMajor ? majorColor : minorColor;
     context.stroke();
   }
 
@@ -3311,11 +3336,92 @@ function drawGrid() {
 }
 
 function drawObstacles() {
-  // Intentionally blank while we isolate spawn visibility.
+  const mapLayout = getActiveMapLayout();
+  if ((mapLayout.obstacles?.length ?? 0) === 0) {
+    return;
+  }
+
+  context.save();
+  for (const obstacle of mapLayout.obstacles) {
+    context.fillStyle = "rgba(33, 51, 84, 0.94)";
+    context.strokeStyle = "rgba(9, 15, 28, 0.95)";
+    context.lineWidth = 5 / cameraZoom;
+    context.beginPath();
+    context.roundRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height, 18 / cameraZoom);
+    context.fill();
+    context.stroke();
+  }
+  context.restore();
 }
 
 function drawObjective() {
-  // Intentionally blank while we isolate spawn visibility.
+  const mapLayout = getActiveMapLayout();
+  const objective = latestObjective ?? {
+    x: mapLayout.objective.x,
+    y: mapLayout.objective.y,
+    radius: mapLayout.objective.radius,
+    ownerId: null,
+    ownerName: null,
+    captureTargetId: null,
+    captureTargetName: null,
+    captureProgress: 0,
+    contested: false
+  };
+  const objectiveX = objective.x ?? mapLayout.objective.x;
+  const objectiveY = objective.y ?? mapLayout.objective.y;
+  const objectiveRadius = objective.radius ?? mapLayout.objective.radius;
+  const owner = objective.ownerId ? players.get(objective.ownerId) : null;
+  const captureTarget = objective.captureTargetId ? players.get(objective.captureTargetId) : null;
+  const ownerColor = owner?.color ?? getTeamConfig(owner?.teamId)?.color ?? "#ffd166";
+  const captureColor = captureTarget?.color ?? getTeamConfig(captureTarget?.teamId)?.color ?? "#a5f3fc";
+  const progress = clamp(objective.captureProgress ?? 0, 0, 1);
+  const ringWidth = Math.max(5 / cameraZoom, 2.5);
+
+  context.save();
+  context.globalAlpha = 0.92;
+  context.fillStyle = objective.ownerId ? `${ownerColor}22` : "rgba(255, 209, 102, 0.12)";
+  context.beginPath();
+  context.arc(objectiveX, objectiveY, objectiveRadius, 0, Math.PI * 2);
+  context.fill();
+
+  context.beginPath();
+  context.lineWidth = ringWidth;
+  context.strokeStyle = objective.contested ? "rgba(255, 209, 102, 0.95)" : "rgba(255,255,255,0.85)";
+  context.arc(objectiveX, objectiveY, objectiveRadius, 0, Math.PI * 2);
+  context.stroke();
+
+  if (progress > 0 && objective.captureTargetId) {
+    context.beginPath();
+    context.lineWidth = Math.max(8 / cameraZoom, 4);
+    context.strokeStyle = captureColor;
+    context.arc(objectiveX, objectiveY, objectiveRadius + 11 / cameraZoom, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress);
+    context.stroke();
+  }
+
+  context.fillStyle = objective.ownerId ? ownerColor : "rgba(255,255,255,0.14)";
+  context.beginPath();
+  context.arc(objectiveX, objectiveY, objectiveRadius * 0.3, 0, Math.PI * 2);
+  context.fill();
+
+  context.font = `${Math.max(13 / cameraZoom, 8)}px Segoe UI`;
+  context.textAlign = "center";
+  context.fillStyle = "#10243b";
+  context.fillText(objective.ownerName ?? "OBJ", objectiveX, objectiveY + 4 / cameraZoom);
+
+  context.font = `${Math.max(15 / cameraZoom, 9)}px Segoe UI`;
+  context.fillStyle = objective.contested ? "#ffd166" : "#ffffff";
+  context.fillText(
+    objective.contested
+      ? "Contested"
+      : objective.captureTargetName
+        ? objective.ownerId
+          ? objective.ownerName ?? "Objective"
+          : `Capturing: ${objective.captureTargetName}`
+        : "Objective",
+    objectiveX,
+    objectiveY - objectiveRadius - 16 / cameraZoom
+  );
+  context.restore();
 }
 
 function drawRepeatedImage(image, options = {}) {
@@ -3391,7 +3497,6 @@ function drawTank(player) {
     return;
   }
 
-  const now = performance.now();
   const pose = getTankRenderPose(player);
   const x = pose.x;
   const y = pose.y;
@@ -3408,15 +3513,18 @@ function drawTank(player) {
   const barrels = classDef.barrels ?? [{ x: 40, y: 0, w: 40, h: 14 }];
 
   // Draw barrels
+  const autoAngle = estimateServerTime() / 1000 * AUTO_BARREL_ROT_SPEED;
   context.save();
   context.globalAlpha = alpha;
   context.translate(x, y);
-  context.rotate(turretAngle);
 
   for (const barrel of barrels) {
-    const bAngle = barrel.angle ?? 0;
     context.save();
-    context.rotate(bAngle);
+    if (barrel.autoRotate) {
+      context.rotate(autoAngle);
+    } else {
+      context.rotate(turretAngle + (barrel.angle ?? 0));
+    }
     context.fillStyle = "#555566";
     context.strokeStyle = "#1a1a2e";
     context.lineWidth = 2;
@@ -3597,6 +3705,71 @@ function drawShapes() {
   }
 }
 
+const SHAPE_PARTICLE_COLORS = Object.freeze({
+  square: "#fbbf24",
+  triangle: "#2dd4bf",
+  pentagon: "#60a5fa",
+  alpha_pentagon: "#c084fc"
+});
+
+function spawnShapeDeathParticles(shape) {
+  if (!shape) {
+    return;
+  }
+  const color = SHAPE_PARTICLE_COLORS[shape.type] ?? "#fbbf24";
+  const count = shape.type === "alpha_pentagon" ? 12 : shape.type === "pentagon" ? 7 : 5;
+  const speed = shape.type === "alpha_pentagon" ? 90 : 55;
+  const lifeMs = shape.type === "alpha_pentagon" ? 900 : 600;
+  const now = performance.now();
+
+  for (let i = 0; i < count; i++) {
+    const angle = (Math.PI * 2 * i) / count + Math.random() * 0.6;
+    shapeParticles.push({
+      x: shape.x,
+      y: shape.y,
+      vx: Math.cos(angle) * speed * (0.6 + Math.random() * 0.8),
+      vy: Math.sin(angle) * speed * (0.6 + Math.random() * 0.8),
+      rotation: Math.random() * Math.PI * 2,
+      rotationSpeed: (Math.random() - 0.5) * 6,
+      size: shape.radius * (0.22 + Math.random() * 0.22),
+      color,
+      bornAt: now,
+      lifeMs
+    });
+  }
+}
+
+function drawShapeParticles(now) {
+  for (let i = shapeParticles.length - 1; i >= 0; i--) {
+    const p = shapeParticles[i];
+    const age = now - p.bornAt;
+    if (age >= p.lifeMs) {
+      shapeParticles.splice(i, 1);
+      continue;
+    }
+    const life = age / p.lifeMs;
+    const alpha = (1 - life) * (1 - life);
+    const elapsed = age / 1000;
+    const px = p.x + p.vx * elapsed;
+    const py = p.y + p.vy * elapsed;
+    const rotation = p.rotation + p.rotationSpeed * elapsed;
+
+    context.save();
+    context.globalAlpha = alpha;
+    context.translate(px, py);
+    context.rotate(rotation);
+    context.fillStyle = p.color;
+    context.strokeStyle = "rgba(0,0,0,0.3)";
+    context.lineWidth = 1.2;
+    const s = p.size * (1 - life * 0.3);
+    context.beginPath();
+    context.rect(-s / 2, -s / 2, s, s);
+    context.fill();
+    context.stroke();
+    context.restore();
+  }
+}
+
 function drawXpBar() {
   if (!currentRoomId) {
     return;
@@ -3611,6 +3784,13 @@ function drawXpBar() {
   const xpIntoLevel = localXp - currentLevelXp;
   const xpNeeded = Math.max(1, nextLevelXp - currentLevelXp);
   const xpRatio = localLevel >= MAX_LEVEL ? 1 : clamp(xpIntoLevel / xpNeeded, 0, 1);
+  const classDef = getLocalTankClassDef();
+  const upgradeHint =
+    localPendingUpgrades.length > 0
+      ? "Upgrade ready"
+      : classDef.upgradesAt && localLevel < classDef.upgradesAt
+        ? `Next class unlock: Lv ${classDef.upgradesAt}`
+        : "Final class";
 
   context.save();
   // Background
@@ -3627,13 +3807,122 @@ function drawXpBar() {
   context.font = "bold 12px Segoe UI";
   context.fillStyle = "#ffffff";
   context.textAlign = "left";
-  context.fillText(`Level ${localLevel}`, barX + 6, barY + 14);
+  context.fillText(`Lv ${localLevel} ${classDef.name}`, barX + 6, barY + 14);
   context.textAlign = "right";
   if (localLevel < MAX_LEVEL) {
     context.fillText(`${xpIntoLevel} / ${xpNeeded} XP`, barX + barWidth - 6, barY + 14);
   } else {
     context.fillText("MAX LEVEL", barX + barWidth - 6, barY + 14);
   }
+  context.textAlign = "center";
+  context.fillStyle = localPendingUpgrades.length > 0 ? "#ffd166" : "#dbeafe";
+  context.fillText(upgradeHint, barX + barWidth / 2, barY - 8);
+  context.restore();
+}
+
+function drawMinimap() {
+  if (!currentRoomId) {
+    return;
+  }
+
+  const mapLayout = getActiveMapLayout();
+  const panelWidth = 198;
+  const panelHeight = 126;
+  const panelX = canvas.width - panelWidth - 14;
+  const panelY = canvas.height - panelHeight - 14;
+  const mapX = panelX + 10;
+  const mapY = panelY + 26;
+  const mapWidth = panelWidth - 20;
+  const mapHeight = panelHeight - 36;
+  const viewport = getVisibleViewportSize();
+
+  const projectX = (worldX) => mapX + (clamp(worldX, 0, GAME_CONFIG.world.width) / GAME_CONFIG.world.width) * mapWidth;
+  const projectY = (worldY) => mapY + (clamp(worldY, 0, GAME_CONFIG.world.height) / GAME_CONFIG.world.height) * mapHeight;
+
+  context.save();
+  context.fillStyle = "rgba(0,0,0,0.56)";
+  context.beginPath();
+  context.roundRect(panelX, panelY, panelWidth, panelHeight, 10);
+  context.fill();
+
+  context.font = "bold 12px Segoe UI";
+  context.textAlign = "left";
+  context.fillStyle = "#00c8dc";
+  context.fillText(latestLobby?.mapName ?? "Arena", panelX + 10, panelY + 16);
+
+  context.fillStyle = "rgba(14, 22, 39, 0.96)";
+  context.fillRect(mapX, mapY, mapWidth, mapHeight);
+
+  for (const obstacle of mapLayout.obstacles ?? []) {
+    const obstacleX = projectX(obstacle.x);
+    const obstacleY = projectY(obstacle.y);
+    const obstacleWidth = (obstacle.width / GAME_CONFIG.world.width) * mapWidth;
+    const obstacleHeight = (obstacle.height / GAME_CONFIG.world.height) * mapHeight;
+    context.fillStyle = "rgba(49, 62, 95, 0.95)";
+    context.fillRect(obstacleX, obstacleY, obstacleWidth, obstacleHeight);
+  }
+
+  for (const team of GAME_CONFIG.lobby.teams) {
+    const zone = getTeamSpawnZone(team.id);
+    const zoneLeft = projectX(zone.left);
+    const zoneRight = projectX(zone.right);
+    context.fillStyle = zone.zoneColor;
+    context.fillRect(zoneLeft, mapY, Math.max(1, zoneRight - zoneLeft), mapHeight);
+  }
+
+  for (const shape of shapes.values()) {
+    const size = shape.type === SHAPE_TYPES.ALPHA_PENTAGON ? 4 : shape.type === SHAPE_TYPES.PENTAGON ? 3 : 1.75;
+    const color =
+      shape.type === SHAPE_TYPES.ALPHA_PENTAGON
+        ? "#c084fc"
+        : shape.type === SHAPE_TYPES.PENTAGON
+          ? "#60a5fa"
+          : shape.type === SHAPE_TYPES.TRIANGLE
+            ? "#2dd4bf"
+            : "#fbbf24";
+    context.fillStyle = color;
+    context.beginPath();
+    context.arc(projectX(shape.x), projectY(shape.y), size, 0, Math.PI * 2);
+    context.fill();
+  }
+
+  context.strokeStyle = latestObjective?.ownerId ? "#ffffff" : "#ffd166";
+  context.lineWidth = 1.5;
+  context.beginPath();
+  context.arc(projectX(latestObjective?.x ?? mapLayout.objective.x), projectY(latestObjective?.y ?? mapLayout.objective.y), 4, 0, Math.PI * 2);
+  context.stroke();
+
+  for (const player of players.values()) {
+    if (!player?.alive || player.isSpectator) {
+      continue;
+    }
+
+    const px = projectX(player.x);
+    const py = projectY(player.y);
+    const isLocalPlayer = player.id === localPlayerId;
+    context.fillStyle = isLocalPlayer ? "#ffd166" : (player.color ?? getTeamConfig(player.teamId)?.color ?? "#ffffff");
+    context.beginPath();
+    context.arc(px, py, isLocalPlayer ? 3.8 : 2.6, 0, Math.PI * 2);
+    context.fill();
+    if (isLocalPlayer) {
+      context.strokeStyle = "#ffffff";
+      context.lineWidth = 1.1;
+      context.beginPath();
+      context.arc(px, py, 5.6, 0, Math.PI * 2);
+      context.stroke();
+    }
+  }
+
+  const viewX = projectX(camera.x);
+  const viewY = projectY(camera.y);
+  const viewWidth = (viewport.width / GAME_CONFIG.world.width) * mapWidth;
+  const viewHeight = (viewport.height / GAME_CONFIG.world.height) * mapHeight;
+  context.strokeStyle = "rgba(255,255,255,0.75)";
+  context.lineWidth = 1;
+  context.strokeRect(viewX, viewY, viewWidth, viewHeight);
+
+  context.strokeStyle = "rgba(255,255,255,0.12)";
+  context.strokeRect(mapX, mapY, mapWidth, mapHeight);
   context.restore();
 }
 
@@ -3998,12 +4287,14 @@ function render(frameAt = performance.now()) {
       drawTank(player);
     }
 
+    drawShapeParticles(frameAt);
     drawCombatEffects();
     context.restore();
 
     // Canvas HUD (drawn in screen space, not world space)
     drawCanvasLeaderboard();
     drawCanvasKillFeed();
+    drawMinimap();
     drawXpBar();
     drawStatPanel();
     drawUpgradeMenu();

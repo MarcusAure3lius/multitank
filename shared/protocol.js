@@ -1,6 +1,6 @@
 export const PROTOCOL_VERSION = 2;
 export const MIN_SUPPORTED_PROTOCOL_VERSION = 1;
-export const GAME_BUILD_VERSION = "0.2.1";
+export const GAME_BUILD_VERSION = "0.2.4";
 export const ASSET_BUNDLE_VERSION = GAME_BUILD_VERSION;
 export const PROFILES_SCHEMA_VERSION = 2;
 
@@ -358,6 +358,175 @@ export const GAME_CONFIG = Object.freeze({
   maxPlayerNameLength: 16,
   maxProfileIdLength: 64
 });
+
+export const AUTO_BARREL_ROT_SPEED = 1.6; // radians per second, for autoRotate barrels
+
+export const MAP_LAYOUTS = Object.freeze({
+  frontier: Object.freeze({
+    id: "frontier",
+    theme: Object.freeze({
+      background: "#dbe7ff",
+      floor: "#f3f7ff",
+      gridMinor: "rgba(76, 118, 191, 0.36)",
+      gridMajor: "rgba(40, 78, 148, 0.72)"
+    }),
+    objective: Object.freeze({
+      x: 4800,
+      y: 2700,
+      radius: GAME_CONFIG.objective.radius
+    }),
+    teamSpawns: Object.freeze({
+      alpha: Object.freeze([
+        Object.freeze({ x: 420, y: 1420 }),
+        Object.freeze({ x: 620, y: 2700 }),
+        Object.freeze({ x: 420, y: 3980 })
+      ]),
+      bravo: Object.freeze([
+        Object.freeze({ x: 9180, y: 1420 }),
+        Object.freeze({ x: 8980, y: 2700 }),
+        Object.freeze({ x: 9180, y: 3980 })
+      ])
+    }),
+    shapeHotspots: Object.freeze({
+      square: Object.freeze([
+        Object.freeze({ x: 2120, y: 1540, radius: 520 }),
+        Object.freeze({ x: 2120, y: 3860, radius: 520 }),
+        Object.freeze({ x: 7480, y: 1540, radius: 520 }),
+        Object.freeze({ x: 7480, y: 3860, radius: 520 })
+      ]),
+      triangle: Object.freeze([
+        Object.freeze({ x: 3360, y: 2700, radius: 620 }),
+        Object.freeze({ x: 6240, y: 2700, radius: 620 })
+      ]),
+      pentagon: Object.freeze([
+        Object.freeze({ x: 4800, y: 1560, radius: 460 }),
+        Object.freeze({ x: 4800, y: 3840, radius: 460 })
+      ]),
+      alpha_pentagon: Object.freeze([Object.freeze({ x: 4800, y: 2700, radius: 360 })])
+    }),
+    obstacles: Object.freeze([
+      Object.freeze({ id: "frontier-n", x: 4240, y: 1920, width: 1120, height: 180 }),
+      Object.freeze({ id: "frontier-s", x: 4240, y: 3300, width: 1120, height: 180 }),
+      Object.freeze({ id: "frontier-w", x: 3680, y: 2280, width: 200, height: 840 }),
+      Object.freeze({ id: "frontier-e", x: 5720, y: 2280, width: 200, height: 840 })
+    ])
+  }),
+  switchyard: Object.freeze({
+    id: "switchyard",
+    theme: Object.freeze({
+      background: "#e6ddd2",
+      floor: "#f7f1ea",
+      gridMinor: "rgba(140, 95, 42, 0.28)",
+      gridMajor: "rgba(100, 60, 18, 0.58)"
+    }),
+    objective: Object.freeze({
+      x: 5200,
+      y: 2700,
+      radius: GAME_CONFIG.objective.radius
+    }),
+    teamSpawns: Object.freeze({
+      alpha: Object.freeze([
+        Object.freeze({ x: 500, y: 1020 }),
+        Object.freeze({ x: 780, y: 2700 }),
+        Object.freeze({ x: 500, y: 4380 })
+      ]),
+      bravo: Object.freeze([
+        Object.freeze({ x: 9100, y: 1020 }),
+        Object.freeze({ x: 8820, y: 2700 }),
+        Object.freeze({ x: 9100, y: 4380 })
+      ])
+    }),
+    shapeHotspots: Object.freeze({
+      square: Object.freeze([
+        Object.freeze({ x: 1880, y: 1180, radius: 540 }),
+        Object.freeze({ x: 1880, y: 4220, radius: 540 }),
+        Object.freeze({ x: 7720, y: 1180, radius: 540 }),
+        Object.freeze({ x: 7720, y: 4220, radius: 540 })
+      ]),
+      triangle: Object.freeze([
+        Object.freeze({ x: 5200, y: 1120, radius: 500 }),
+        Object.freeze({ x: 5200, y: 4280, radius: 500 })
+      ]),
+      pentagon: Object.freeze([
+        Object.freeze({ x: 3860, y: 2700, radius: 440 }),
+        Object.freeze({ x: 6540, y: 2700, radius: 440 })
+      ]),
+      alpha_pentagon: Object.freeze([Object.freeze({ x: 5200, y: 2700, radius: 320 })])
+    }),
+    obstacles: Object.freeze([
+      Object.freeze({ id: "switchyard-west-n", x: 2780, y: 900, width: 240, height: 1320 }),
+      Object.freeze({ id: "switchyard-west-s", x: 2780, y: 3180, width: 240, height: 1320 }),
+      Object.freeze({ id: "switchyard-mid-n", x: 4540, y: 1120, width: 260, height: 960 }),
+      Object.freeze({ id: "switchyard-mid-s", x: 4540, y: 3320, width: 260, height: 960 }),
+      Object.freeze({ id: "switchyard-east-n", x: 6400, y: 900, width: 240, height: 1320 }),
+      Object.freeze({ id: "switchyard-east-s", x: 6400, y: 3180, width: 240, height: 1320 })
+    ])
+  }),
+  citadel: Object.freeze({
+    id: "citadel",
+    theme: Object.freeze({
+      background: "#d4d0e8",
+      floor: "#edebf8",
+      gridMinor: "rgba(90, 68, 160, 0.28)",
+      gridMajor: "rgba(55, 38, 122, 0.58)"
+    }),
+    objective: Object.freeze({
+      x: 4800,
+      y: 2700,
+      radius: GAME_CONFIG.objective.radius
+    }),
+    teamSpawns: Object.freeze({
+      alpha: Object.freeze([
+        Object.freeze({ x: 560, y: 1280 }),
+        Object.freeze({ x: 500, y: 2700 }),
+        Object.freeze({ x: 560, y: 4120 })
+      ]),
+      bravo: Object.freeze([
+        Object.freeze({ x: 9040, y: 1280 }),
+        Object.freeze({ x: 9100, y: 2700 }),
+        Object.freeze({ x: 9040, y: 4120 })
+      ])
+    }),
+    shapeHotspots: Object.freeze({
+      square: Object.freeze([
+        Object.freeze({ x: 2280, y: 1640, radius: 500 }),
+        Object.freeze({ x: 2280, y: 3760, radius: 500 }),
+        Object.freeze({ x: 7320, y: 1640, radius: 500 }),
+        Object.freeze({ x: 7320, y: 3760, radius: 500 })
+      ]),
+      triangle: Object.freeze([
+        Object.freeze({ x: 3560, y: 1200, radius: 460 }),
+        Object.freeze({ x: 6040, y: 4200, radius: 460 }),
+        Object.freeze({ x: 3560, y: 4200, radius: 460 }),
+        Object.freeze({ x: 6040, y: 1200, radius: 460 })
+      ]),
+      pentagon: Object.freeze([
+        Object.freeze({ x: 4800, y: 1720, radius: 380 }),
+        Object.freeze({ x: 4800, y: 3680, radius: 380 })
+      ]),
+      alpha_pentagon: Object.freeze([Object.freeze({ x: 4800, y: 2700, radius: 260 })])
+    }),
+    obstacles: Object.freeze([
+      Object.freeze({ id: "citadel-n", x: 4120, y: 1280, width: 1360, height: 220 }),
+      Object.freeze({ id: "citadel-s", x: 4120, y: 3900, width: 1360, height: 220 }),
+      Object.freeze({ id: "citadel-w", x: 2940, y: 2140, width: 260, height: 1120 }),
+      Object.freeze({ id: "citadel-e", x: 6400, y: 2140, width: 260, height: 1120 }),
+      Object.freeze({ id: "citadel-core-nw", x: 4160, y: 2120, width: 280, height: 280 }),
+      Object.freeze({ id: "citadel-core-ne", x: 5160, y: 2120, width: 280, height: 280 }),
+      Object.freeze({ id: "citadel-core-sw", x: 4160, y: 3000, width: 280, height: 280 }),
+      Object.freeze({ id: "citadel-core-se", x: 5160, y: 3000, width: 280, height: 280 })
+    ])
+  })
+});
+
+export function getMapLayout(mapId) {
+  const defaultMapId = GAME_CONFIG.lobby.maps[0]?.id ?? "frontier";
+  return MAP_LAYOUTS[mapId] ?? MAP_LAYOUTS[defaultMapId] ?? {
+    id: defaultMapId,
+    objective: GAME_CONFIG.objective,
+    obstacles: GAME_CONFIG.world.obstacles
+  };
+}
 
 export function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));

@@ -18,6 +18,7 @@ import {
   PROTOCOL_VERSION,
   REPLICATION_KINDS,
   deserializePacket,
+  getMapLayout,
   serializePacket
 } from "./shared/protocol.js";
 
@@ -838,9 +839,30 @@ function assertProgressionPacketsRoundTrip() {
   }
 }
 
+function assertMapLayoutsExposeSpawnAndHotspotMetadata() {
+  for (const map of GAME_CONFIG.lobby.maps) {
+    const layout = getMapLayout(map.id);
+
+    for (const team of GAME_CONFIG.lobby.teams) {
+      const spawnAnchors = layout.teamSpawns?.[team.id];
+      if (!Array.isArray(spawnAnchors) || spawnAnchors.length < 3) {
+        throw new Error(`Expected ${map.id} to expose at least three spawn anchors for ${team.id}`);
+      }
+    }
+
+    for (const shapeType of ["square", "triangle", "pentagon", "alpha_pentagon"]) {
+      const hotspots = layout.shapeHotspots?.[shapeType];
+      if (!Array.isArray(hotspots) || hotspots.length < 1) {
+        throw new Error(`Expected ${map.id} to expose spawn hotspots for ${shapeType}`);
+      }
+    }
+  }
+}
+
 try {
   assertStateChunkAssemblyWaitsForAllFragments();
   assertProgressionPacketsRoundTrip();
+  assertMapLayoutsExposeSpawnAndHotspotMetadata();
   await waitForServer();
   const metaPayload = await requestJson("/meta");
 
@@ -1601,6 +1623,20 @@ try {
     throw new Error("Expected /rooms to expose the synced room browser summary");
   }
 
+  const switchyardLayout = getMapLayout("switchyard");
+  const mappedObjectiveState = await waitForState(
+    alpha,
+    (payload) =>
+      payload.lobby?.mapId === "switchyard" &&
+      Math.round(payload.objective?.x ?? 0) === Math.round(switchyardLayout.objective.x) &&
+      Math.round(payload.objective?.y ?? 0) === Math.round(switchyardLayout.objective.y),
+    "map-specific objective layout"
+  );
+
+  if (mappedObjectiveState.lobby?.mapId !== "switchyard") {
+    throw new Error("Expected the selected map to remain authoritative while objective layout updated");
+  }
+
   const [warmupStateA, warmupStateB] = await Promise.all([
     waitForState(
       alpha,
@@ -1666,6 +1702,20 @@ try {
 
   if (!stateA.objective || typeof stateA.objective.captureProgress !== "number") {
     throw new Error("Expected objective state to be present in snapshots");
+  }
+
+  const shapeEcologyState = await waitForState(
+    alpha,
+    (payload) =>
+      payload.match?.phase === MATCH_PHASES.IN_PROGRESS &&
+      Array.isArray(payload.shapes) &&
+      payload.shapes.length >= 10 &&
+      payload.shapes.some((shape) => shape.type === "alpha_pentagon"),
+    "neutral shape ecology snapshot"
+  );
+
+  if (!Array.isArray(shapeEcologyState.shapes) || shapeEcologyState.shapes.length < 10) {
+    throw new Error("Expected active match snapshots to include the expanded neutral shape ecosystem");
   }
 
   if (!Number.isInteger(stateA.snapshotSeq) || !Number.isInteger(stateB.snapshotSeq)) {
