@@ -653,6 +653,14 @@ function updateLocalRenderState(deltaSeconds) {
     ? clamp(1 - Math.exp(-(hasMovementInputActive() ? 28 : 18) * deltaSeconds), 0.24, 0.62)
     : clamp(1 - Math.exp(-16 * deltaSeconds), 0.18, 0.4);
 
+  if (crossedOwnSpawnBoundary(localPlayer.teamId, renderState.x, visualState.x)) {
+    renderState.x = visualState.x;
+    renderState.y = visualState.y;
+    renderState.angle = visualState.angle;
+    renderState.turretAngle = visualState.turretAngle;
+    return renderState;
+  }
+
   renderState.x = lerp(renderState.x, visualState.x, followAmount);
   renderState.y = lerp(renderState.y, visualState.y, followAmount);
   renderState.angle = lerpAngle(renderState.angle, visualState.angle, followAmount);
@@ -1629,6 +1637,22 @@ function getPlayerVisualAngle(player) {
 
 function getPlayerVisualTurretAngle(player) {
   return player?.displayTurretAngle ?? player?.renderTurretAngle ?? player?.turretAngle ?? 0;
+}
+
+function crossedOwnSpawnBoundary(teamId, previousX, nextX) {
+  if (!Number.isFinite(previousX) || !Number.isFinite(nextX)) {
+    return false;
+  }
+
+  const zone = getTeamSpawnZone(teamId);
+  if (!zone) {
+    return false;
+  }
+
+  const boundary = zone.spawnSide === "left" ? zone.right : zone.left;
+  const wasInside = zone.spawnSide === "left" ? previousX <= boundary : previousX >= boundary;
+  const isInside = zone.spawnSide === "left" ? nextX <= boundary : nextX >= boundary;
+  return wasInside !== isInside;
 }
 
 function isCombatPhase(phase) {
@@ -3216,7 +3240,9 @@ function updateRenderState(deltaSeconds, frameAt) {
       };
       const dx = sample.x - previousDisplayX;
       const dy = sample.y - previousDisplayY;
+      const crossedSpawnBoundary = crossedOwnSpawnBoundary(player.teamId, previousDisplayX, sample.x);
       const shouldSnap =
+        crossedSpawnBoundary ||
         (player.teleportFrames ?? 0) > 0 ||
         dx * dx + dy * dy > NETWORK_RENDER.snapDistance * NETWORK_RENDER.snapDistance;
 

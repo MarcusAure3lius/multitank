@@ -19,6 +19,7 @@ import {
   REPLICATION_KINDS,
   deserializePacket,
   getMapLayout,
+  getTeamSpawnZone,
   serializePacket
 } from "./shared/protocol.js";
 
@@ -456,6 +457,68 @@ function getPlayerState(payload, playerId) {
       .find((player) => player.id === playerId) ??
       null
   );
+}
+
+async function movePlayerOutOfSpawnZone(socket, playerId, teamId, inputSeqStart, label) {
+  const zone = getTeamSpawnZone(teamId);
+  const movesTowardCenter =
+    zone.spawnSide === "left"
+      ? { left: false, right: true }
+      : { left: true, right: false };
+  const crossedThreshold = zone.spawnSide === "left" ? zone.right + 120 : zone.left - 120;
+  let resolved = false;
+
+  const crossedStatePromise = waitForState(
+    socket,
+    (payload) => {
+      const player = getPlayerState(payload, playerId);
+      if (!player) {
+        return false;
+      }
+
+      if ((payload.you?.lastProcessedInputSeq ?? 0) < inputSeqStart) {
+        return false;
+      }
+
+      return zone.spawnSide === "left" ? player.x >= crossedThreshold : player.x <= crossedThreshold;
+    },
+    label
+  );
+  crossedStatePromise.then(() => {
+    resolved = true;
+  });
+
+  let nextSeq = inputSeqStart;
+  for (let attempt = 0; attempt < 170 && !resolved; attempt += 1) {
+    sendInput(socket, {
+      seq: nextSeq++,
+      clientSentAt: Date.now(),
+      forward: false,
+      back: false,
+      left: movesTowardCenter.left,
+      right: movesTowardCenter.right,
+      shoot: false,
+      turretAngle: 0
+    });
+    await new Promise((resolve) => setTimeout(resolve, 35));
+  }
+
+  const crossedState = await crossedStatePromise;
+  sendInput(socket, {
+    seq: nextSeq++,
+    clientSentAt: Date.now(),
+    forward: false,
+    back: false,
+    left: false,
+    right: false,
+    shoot: false,
+    turretAngle: 0
+  });
+
+  return {
+    crossedState,
+    nextSeq
+  };
 }
 
 function getReplicatedPlayers(payload) {
@@ -1512,6 +1575,7 @@ try {
   const alphaPlayerId = alphaJoined.playerId;
   const bravoPlayerId = bravoJoined.playerId;
   let alphaInputSeq = 1;
+  let bravoInputSeq = 1;
 
   const alphaClone = await connectClient("AlphaClone");
   const alphaCloneJoinedPromise = waitForMessage(alphaClone, (payload) => payload.type === MESSAGE_TYPES.JOINED);
@@ -1555,6 +1619,24 @@ try {
   if (!alphaPlayerId || !stagingAlphaPlayer) {
     throw new Error("Expected a replicated local player state immediately after joining the room");
   }
+
+  const alphaSpawnExit = await movePlayerOutOfSpawnZone(
+    alpha,
+    alphaPlayerId,
+    "alpha",
+    alphaInputSeq,
+    "alpha-side spawn exit"
+  );
+  alphaInputSeq = alphaSpawnExit.nextSeq;
+
+  const bravoSpawnExit = await movePlayerOutOfSpawnZone(
+    bravo,
+    bravoPlayerId,
+    "bravo",
+    bravoInputSeq,
+    "bravo-side spawn exit"
+  );
+  bravoInputSeq = bravoSpawnExit.nextSeq;
 
   const stagingMoveInput = findClearMovementInput(stagingAlphaPlayer);
   const stagingMoveSeqStart = alphaInputSeq;
