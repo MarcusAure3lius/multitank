@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Multitank</title>
-    <link rel="stylesheet" href="/style.css?v=0.2.6">
+    <link rel="stylesheet" href="/style.css?v=0.2.8">
   </head>
   <body>
     <div id="dev-badge" class="dev-badge" hidden>LOCAL DEV</div>
@@ -43,6 +43,16 @@
             Spectate
           </button>
           <button
+            id="start-debug-tab"
+            class="start-nav-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="start-debug-panel"
+          >
+            Debug
+          </button>
+          <button
             id="start-settings-tab"
             class="start-nav-button"
             type="button"
@@ -77,6 +87,22 @@
           <button id="spectate-button" class="play-button spectate-button" type="button">SPECTATE</button>
           <p class="start-mode-copy">Watch the live arena with a free camera instead of spawning a tank.</p>
           <p class="controls-hint">WASD / Arrow Keys to fly, Mouse Wheel or +/- to zoom, 0 to recenter</p>
+        </section>
+
+        <section
+          id="start-debug-panel"
+          class="start-panel debug-panel"
+          role="tabpanel"
+          aria-labelledby="start-debug-tab"
+          hidden
+        >
+          <button id="debug-play-button" class="play-button debug-button" type="button">PLAY DEBUG</button>
+          <p class="start-mode-copy">Launch the normal live match client with the full debug HUD, issue feed, and diagnostics already on-screen.</p>
+          <div class="debug-mode-list" aria-label="Debug mode details">
+            <div class="debug-mode-item">Mirror of the regular match view with ping, jitter, packet loss, snapshots, reconciliation, and server loop stats.</div>
+            <div class="debug-mode-item">Automatic issue panel that lights up when movement, prediction, input, or snapshot flow starts drifting.</div>
+            <div class="debug-mode-item">Same controls as normal play: WASD / Arrow Keys to move, Mouse to aim, Click to fire.</div>
+          </div>
         </section>
 
         <section
@@ -149,6 +175,6 @@
       </div>
     </div>
 
-    <script type="module" src="/client.js?v=0.2.5"></script>
+    <script type="module" src="/client.js?v=0.2.8"></script>
   </body>
 </html>

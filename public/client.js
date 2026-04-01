@@ -56,13 +56,16 @@ const createRoomButton = document.getElementById("create-room-button");
 const nameInput = document.getElementById("name-input");
 const startHomeTabButton = document.getElementById("start-home-tab");
 const startSpectateTabButton = document.getElementById("start-spectate-tab");
+const startDebugTabButton = document.getElementById("start-debug-tab");
 const startSettingsTabButton = document.getElementById("start-settings-tab");
 const startHomePanel = document.getElementById("start-home-panel");
 const startSpectatePanel = document.getElementById("start-spectate-panel");
+const startDebugPanel = document.getElementById("start-debug-panel");
 const startSettingsPanel = document.getElementById("start-settings-panel");
 const fullscreenButton = document.getElementById("fullscreen-button");
 const fullscreenStatusElement = document.getElementById("fullscreen-status");
 const spectateButton = document.getElementById("spectate-button");
+const debugPlayButton = document.getElementById("debug-play-button");
 const roomInput = document.getElementById("room-input");
 const spectateInput = document.getElementById("spectate-input");
 const lobbyRoomCodeElement = document.getElementById("lobby-room-code");
@@ -88,6 +91,7 @@ const STORAGE_KEYS = {
   room: "multitank.room",
   profileId: "multitank.profileId",
   spectate: "multitank.spectate",
+  debugMode: "multitank.debugMode",
   authToken: "multitank.authToken"
 };
 
@@ -349,7 +353,16 @@ const BASIC_SPECIALIZATION_MENU_OPTIONS = Object.freeze([
 
 const currentUrl = new URL(window.location.href);
 const initialRoomFromUrl = currentUrl.searchParams.get("room");
-const debugUiEnabled = currentUrl.searchParams.get("debug") === "1";
+const urlDebugMode = currentUrl.searchParams.get("debug");
+let debugUiEnabled =
+  urlDebugMode === "1"
+    ? true
+    : urlDebugMode === "0"
+      ? false
+      : localStorage.getItem(STORAGE_KEYS.debugMode) === "1";
+if (urlDebugMode === "1" || urlDebugMode === "0") {
+  localStorage.setItem(STORAGE_KEYS.debugMode, debugUiEnabled ? "1" : "0");
+}
 nameInput.value = localStorage.getItem(STORAGE_KEYS.name) ?? nameInput.value;
 roomInput.value = initialRoomFromUrl ?? localStorage.getItem(STORAGE_KEYS.room) ?? roomInput.value;
 spectateInput.checked = localStorage.getItem(STORAGE_KEYS.spectate) === "1";
@@ -396,6 +409,36 @@ function rotateClientSessionId() {
     // Session storage can be unavailable in hardened browser modes.
   }
   return clientSessionId;
+}
+
+function syncSessionUrl(options = {}) {
+  const url = new URL(window.location.href);
+  const roomValue = options.room ?? roomInput?.value ?? currentRoomId ?? "default";
+  url.searchParams.set("room", roomValue || "default");
+
+  if (debugUiEnabled) {
+    url.searchParams.set("debug", "1");
+  } else {
+    url.searchParams.delete("debug");
+  }
+
+  window.history.replaceState({}, "", url);
+}
+
+function setDebugUiEnabled(enabled, options = {}) {
+  const { persist = true, updateUrl = true } = options;
+  debugUiEnabled = Boolean(enabled);
+
+  if (persist) {
+    localStorage.setItem(STORAGE_KEYS.debugMode, debugUiEnabled ? "1" : "0");
+  }
+
+  if (updateUrl) {
+    syncSessionUrl();
+  }
+
+  updateLocalDevBadge();
+  updateDiagnosticBanner();
 }
 
 function requestCompatibilityRefresh(reason) {
@@ -3984,6 +4027,7 @@ function dispatchLocalInput(options = {}) {
     return null;
   }
 
+  const previousDispatchAt = lastInputDispatchAt;
   const inputFrame = createInputFrame(liveInputState);
   send(serializeInputFrame(inputFrame));
   lastInputDispatchAt = inputFrame.clientSentAt;
@@ -4002,6 +4046,24 @@ function dispatchLocalInput(options = {}) {
     localPlayer.lastPredictedShotAt = Date.now();
     spawnPredictedProjectile(localPlayer, inputFrame);
   }
+
+  const visualState = ensureLocalVisualState(localPlayer);
+  const predictionScale = getPredictionScaleForGapMs(getStatePacketAgeMs(inputFrame.clientSentAt));
+  const predictionStepSeconds =
+    previousDispatchAt > 0
+      ? clamp((inputFrame.clientSentAt - previousDispatchAt) / 1000, 1 / 120, CLIENT_TICK.fixedDeltaSeconds)
+      : CLIENT_TICK.fixedDeltaSeconds;
+  const predicted = simulateTankMovement(
+    {
+      x: visualState?.x ?? localPlayer.renderX ?? localPlayer.x,
+      y: visualState?.y ?? localPlayer.renderY ?? localPlayer.y,
+      angle: visualState?.angle ?? localPlayer.renderAngle ?? localPlayer.angle,
+      turretAngle: visualState?.turretAngle ?? localPlayer.renderTurretAngle ?? localPlayer.turretAngle
+    },
+    inputFrame,
+    predictionStepSeconds * predictionScale
+  );
+  applyLocalPredictedState(localPlayer, predicted);
 
   return inputFrame;
 }
@@ -4867,6 +4929,11 @@ function connect(options = {}) {
   localStorage.setItem(STORAGE_KEYS.spectate, spectateInput.checked ? "1" : "0");
   const url = new URL(window.location.href);
   url.searchParams.set("room", roomInput.value || "default");
+  if (debugUiEnabled) {
+    url.searchParams.set("debug", "1");
+  } else {
+    url.searchParams.delete("debug");
+  }
   window.history.replaceState({}, "", url);
 
   if (!isReconnect) {
@@ -7018,11 +7085,20 @@ const startBgCanvas = document.getElementById("bg-canvas") ?? document.getElemen
 const START_MENU_VIEWS = Object.freeze({
   home: "home",
   spectate: "spectate",
+  debug: "debug",
   settings: "settings"
 });
-let activeStartMenuView = spectateInput.checked ? START_MENU_VIEWS.spectate : START_MENU_VIEWS.home;
+let activeStartMenuView = debugUiEnabled
+  ? START_MENU_VIEWS.debug
+  : spectateInput.checked
+    ? START_MENU_VIEWS.spectate
+    : START_MENU_VIEWS.home;
 
 function getPreferredStartMenuView() {
+  if (debugUiEnabled) {
+    return START_MENU_VIEWS.debug;
+  }
+
   return spectateInput.checked ? START_MENU_VIEWS.spectate : START_MENU_VIEWS.home;
 }
 
@@ -7034,17 +7110,22 @@ function setStartMenuView(view) {
   activeStartMenuView =
     view === START_MENU_VIEWS.settings
       ? START_MENU_VIEWS.settings
+      : view === START_MENU_VIEWS.debug
+        ? START_MENU_VIEWS.debug
       : view === START_MENU_VIEWS.spectate
         ? START_MENU_VIEWS.spectate
         : START_MENU_VIEWS.home;
   const showHome = activeStartMenuView === START_MENU_VIEWS.home;
   const showSpectate = activeStartMenuView === START_MENU_VIEWS.spectate;
+  const showDebug = activeStartMenuView === START_MENU_VIEWS.debug;
   const showSettings = activeStartMenuView === START_MENU_VIEWS.settings;
 
   startHomeTabButton?.classList.toggle("is-active", showHome);
   startHomeTabButton?.setAttribute("aria-selected", String(showHome));
   startSpectateTabButton?.classList.toggle("is-active", showSpectate);
   startSpectateTabButton?.setAttribute("aria-selected", String(showSpectate));
+  startDebugTabButton?.classList.toggle("is-active", showDebug);
+  startDebugTabButton?.setAttribute("aria-selected", String(showDebug));
   startSettingsTabButton?.classList.toggle("is-active", showSettings);
   startSettingsTabButton?.setAttribute("aria-selected", String(showSettings));
 
@@ -7053,6 +7134,9 @@ function setStartMenuView(view) {
   }
   if (startSpectatePanel) {
     startSpectatePanel.hidden = !showSpectate;
+  }
+  if (startDebugPanel) {
+    startDebugPanel.hidden = !showDebug;
   }
   if (startSettingsPanel) {
     startSettingsPanel.hidden = !showSettings;
@@ -7130,12 +7214,16 @@ function hideStartMenu() {
 }
 
 function startMenuPlay(options = {}) {
-  const { spectate = false } = options;
+  const { spectate = false, debug = false } = options;
   const nameVal = nameInput?.value?.trim() || createCommanderName();
   if (nameInput) {
     nameInput.value = nameVal;
   }
   spectateInput.checked = spectate;
+  setDebugUiEnabled(debug, {
+    persist: true,
+    updateUrl: false
+  });
   hideStartMenu();
   unlockAudio();
   void startQuickJoin({ spectate });
@@ -7143,12 +7231,16 @@ function startMenuPlay(options = {}) {
 
 if (playButton) {
   playButton.addEventListener("click", () => {
-    startMenuPlay({ spectate: false });
+    startMenuPlay({ spectate: false, debug: false });
   });
 }
 
 spectateButton?.addEventListener("click", () => {
-  startMenuPlay({ spectate: true });
+  startMenuPlay({ spectate: true, debug: false });
+});
+
+debugPlayButton?.addEventListener("click", () => {
+  startMenuPlay({ spectate: false, debug: true });
 });
 
 startHomeTabButton?.addEventListener("click", () => {
@@ -7157,6 +7249,10 @@ startHomeTabButton?.addEventListener("click", () => {
 
 startSpectateTabButton?.addEventListener("click", () => {
   setStartMenuView(START_MENU_VIEWS.spectate);
+});
+
+startDebugTabButton?.addEventListener("click", () => {
+  setStartMenuView(START_MENU_VIEWS.debug);
 });
 
 startSettingsTabButton?.addEventListener("click", () => {
@@ -7177,7 +7273,8 @@ if (nameInput && startMenuEl) {
         return;
       }
       startMenuPlay({
-        spectate: activeStartMenuView === START_MENU_VIEWS.spectate
+        spectate: activeStartMenuView === START_MENU_VIEWS.spectate,
+        debug: activeStartMenuView === START_MENU_VIEWS.debug
       });
     }
   });

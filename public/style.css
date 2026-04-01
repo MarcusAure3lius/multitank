@@ -321,6 +321,10 @@ body {
   align-items: stretch;
 }
 
+.debug-panel {
+  align-items: stretch;
+}
+
 .settings-heading {
   color: var(--accent);
   font-size: 1.4rem;
@@ -446,6 +450,16 @@ body {
   box-shadow: 0 8px 30px rgba(255,159,67,0.42);
 }
 
+.debug-button {
+  color: #07131a;
+  background: linear-gradient(135deg, #8cf7ff, #ffd166);
+  box-shadow: 0 4px 20px rgba(140,247,255,0.34);
+}
+
+.debug-button:hover {
+  box-shadow: 0 8px 30px rgba(140,247,255,0.42);
+}
+
 .play-button:active {
   transform: translateY(0);
 }
@@ -455,6 +469,21 @@ body {
   font-size: 0.82rem;
   text-align: center;
   line-height: 1.5;
+}
+
+.debug-mode-list {
+  display: grid;
+  gap: 10px;
+}
+
+.debug-mode-item {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(140,247,255,0.16);
+  background: rgba(0,0,0,0.28);
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.45;
 }
 
 /* ── GAME SCREEN ── */
