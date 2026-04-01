@@ -128,6 +128,7 @@ export const VFX_CUES = Object.freeze({
 export const REPLICATION_KINDS = Object.freeze({
   PLAYER: "player",
   BULLET: "bullet",
+  SHAPE: "shape",
   OBJECTIVE: "objective"
 });
 
@@ -331,6 +332,8 @@ export const GAME_CONFIG = Object.freeze({
     maxBotsPerRoom: 4,
     thinkRate: 10,
     preferredRange: 300,
+    preferredRangeJitter: 60,
+    preferredRangeTolerance: 55,
     shootRange: 520,
     aimToleranceRadians: 0.3,
     obstacleClearance: 34,
@@ -343,7 +346,19 @@ export const GAME_CONFIG = Object.freeze({
     flankDistance: 150,
     retreatDistance: 190,
     maxRouteNodes: 10,
-    targetSwitchScoreBias: 120
+    targetSwitchScoreBias: 120,
+    damageRetreatMs: 1200,
+    lowHealthRetreatRatio: 0.45,
+    reengageHealthRatio: 0.72,
+    strafeIntervalMs: 650,
+    strafeJitterMs: 350,
+    strafeWeight: 0.95,
+    dodgeLookaheadMs: 450,
+    dodgeRadius: 160,
+    dodgeWeight: 1.2,
+    coverSearchDistance: 280,
+    personalSpaceDistance: 115,
+    personalSpaceWeight: 0.72
   }),
   session: Object.freeze({
     maxHumanPlayersPerRoom: 4,
@@ -404,12 +419,7 @@ export const MAP_LAYOUTS = Object.freeze({
       ]),
       alpha_pentagon: Object.freeze([Object.freeze({ x: 4800, y: 2700, radius: 360 })])
     }),
-    obstacles: Object.freeze([
-      Object.freeze({ id: "frontier-n", x: 4240, y: 1920, width: 1120, height: 180 }),
-      Object.freeze({ id: "frontier-s", x: 4240, y: 3300, width: 1120, height: 180 }),
-      Object.freeze({ id: "frontier-w", x: 3680, y: 2280, width: 200, height: 840 }),
-      Object.freeze({ id: "frontier-e", x: 5720, y: 2280, width: 200, height: 840 })
-    ])
+    obstacles: Object.freeze([])
   }),
   switchyard: Object.freeze({
     id: "switchyard",
@@ -456,8 +466,6 @@ export const MAP_LAYOUTS = Object.freeze({
     obstacles: Object.freeze([
       Object.freeze({ id: "switchyard-west-n", x: 2780, y: 900, width: 240, height: 1320 }),
       Object.freeze({ id: "switchyard-west-s", x: 2780, y: 3180, width: 240, height: 1320 }),
-      Object.freeze({ id: "switchyard-mid-n", x: 4540, y: 1120, width: 260, height: 960 }),
-      Object.freeze({ id: "switchyard-mid-s", x: 4540, y: 3320, width: 260, height: 960 }),
       Object.freeze({ id: "switchyard-east-n", x: 6400, y: 900, width: 240, height: 1320 }),
       Object.freeze({ id: "switchyard-east-s", x: 6400, y: 3180, width: 240, height: 1320 })
     ])
@@ -506,16 +514,7 @@ export const MAP_LAYOUTS = Object.freeze({
       ]),
       alpha_pentagon: Object.freeze([Object.freeze({ x: 4800, y: 2700, radius: 260 })])
     }),
-    obstacles: Object.freeze([
-      Object.freeze({ id: "citadel-n", x: 4120, y: 1280, width: 1360, height: 220 }),
-      Object.freeze({ id: "citadel-s", x: 4120, y: 3900, width: 1360, height: 220 }),
-      Object.freeze({ id: "citadel-w", x: 2940, y: 2140, width: 260, height: 1120 }),
-      Object.freeze({ id: "citadel-e", x: 6400, y: 2140, width: 260, height: 1120 }),
-      Object.freeze({ id: "citadel-core-nw", x: 4160, y: 2120, width: 280, height: 280 }),
-      Object.freeze({ id: "citadel-core-ne", x: 5160, y: 2120, width: 280, height: 280 }),
-      Object.freeze({ id: "citadel-core-sw", x: 4160, y: 3000, width: 280, height: 280 }),
-      Object.freeze({ id: "citadel-core-se", x: 5160, y: 3000, width: 280, height: 280 })
-    ])
+    obstacles: Object.freeze([])
   })
 });
 
@@ -1175,7 +1174,9 @@ export function createReplicationRecord(record) {
         ? createPlayerSnapshot(state)
         : kind === REPLICATION_KINDS.BULLET
           ? createBulletSnapshot(state)
-          : createObjectiveSnapshot(state)
+          : kind === REPLICATION_KINDS.SHAPE
+            ? createShapeSnapshot(state)
+            : createObjectiveSnapshot(state)
   };
 }
 

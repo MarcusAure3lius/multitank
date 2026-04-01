@@ -11,6 +11,7 @@ import {
   MATCH_PHASES,
   MAX_LEVEL,
   MESSAGE_TYPES,
+  REPLICATION_KINDS,
   SHAPE_TYPES,
   SOUND_CUES,
   STAT_NAMES,
@@ -119,6 +120,7 @@ const predictedProjectiles = new Map();
 const combatEffects = [];
 const killFeedEntries = [];
 const shapeParticles = [];
+const shapeSpriteCache = new Map();
 let minimapBackgroundCache = {
   key: "",
   canvas: null
@@ -2410,6 +2412,7 @@ function applyReplication(replication, serverTime, previousSnapshotSeq) {
 
   const fullPlayerIds = replication.mode === "full" ? new Set() : null;
   const fullBulletIds = replication.mode === "full" ? new Set() : null;
+  const fullShapeIds = replication.mode === "full" ? new Set() : null;
 
   if (replication.mode === "full") {
     if (latestObjective) {
@@ -2420,20 +2423,26 @@ function applyReplication(replication, serverTime, previousSnapshotSeq) {
   }
 
   for (const record of replication.spawns ?? []) {
-    if (record.kind === "player") {
+    if (record.kind === REPLICATION_KINDS.PLAYER) {
       fullPlayerIds?.add(record.id);
-      upsertEntity(players, record.state, { alive: true, ready: false }, { kind: "player", serverTime });
+      upsertEntity(players, record.state, { alive: true, ready: false }, { kind: REPLICATION_KINDS.PLAYER, serverTime });
       continue;
     }
 
-    if (record.kind === "bullet") {
+    if (record.kind === REPLICATION_KINDS.BULLET) {
       reconcilePredictedProjectile(record.state);
       fullBulletIds?.add(record.id);
-      upsertEntity(bullets, record.state, {}, { kind: "bullet", serverTime });
+      upsertEntity(bullets, record.state, {}, { kind: REPLICATION_KINDS.BULLET, serverTime });
       continue;
     }
 
-    if (record.kind === "objective") {
+    if (record.kind === REPLICATION_KINDS.SHAPE) {
+      fullShapeIds?.add(record.id);
+      upsertEntity(shapes, record.state, {}, { kind: REPLICATION_KINDS.SHAPE, serverTime });
+      continue;
+    }
+
+    if (record.kind === REPLICATION_KINDS.OBJECTIVE) {
       latestObjective = {
         ...(latestObjective ?? {}),
         ...record.state
@@ -2442,27 +2451,39 @@ function applyReplication(replication, serverTime, previousSnapshotSeq) {
   }
 
   for (const record of replication.updates ?? []) {
-    if (record.kind === "player") {
+    if (record.kind === REPLICATION_KINDS.PLAYER) {
       fullPlayerIds?.add(record.id);
       const previous = players.get(record.id) ?? {};
       upsertEntity(
         players,
         { ...previous, ...record.state, id: record.id },
         { alive: true, ready: false },
-        { kind: "player", serverTime }
+        { kind: REPLICATION_KINDS.PLAYER, serverTime }
       );
       continue;
     }
 
-    if (record.kind === "bullet") {
+    if (record.kind === REPLICATION_KINDS.BULLET) {
       fullBulletIds?.add(record.id);
       const previous = bullets.get(record.id) ?? {};
       reconcilePredictedProjectile({ ...previous, ...record.state, id: record.id });
-      upsertEntity(bullets, { ...previous, ...record.state, id: record.id }, {}, { kind: "bullet", serverTime });
+      upsertEntity(
+        bullets,
+        { ...previous, ...record.state, id: record.id },
+        {},
+        { kind: REPLICATION_KINDS.BULLET, serverTime }
+      );
       continue;
     }
 
-    if (record.kind === "objective") {
+    if (record.kind === REPLICATION_KINDS.SHAPE) {
+      fullShapeIds?.add(record.id);
+      const previous = shapes.get(record.id) ?? {};
+      upsertEntity(shapes, { ...previous, ...record.state, id: record.id }, {}, { kind: REPLICATION_KINDS.SHAPE, serverTime });
+      continue;
+    }
+
+    if (record.kind === REPLICATION_KINDS.OBJECTIVE) {
       latestObjective = {
         ...(latestObjective ?? {}),
         ...record.state
@@ -2471,13 +2492,22 @@ function applyReplication(replication, serverTime, previousSnapshotSeq) {
   }
 
   for (const record of replication.despawns ?? []) {
-    if (record.kind === "player") {
+    if (record.kind === REPLICATION_KINDS.PLAYER) {
       players.delete(record.id);
       continue;
     }
 
-    if (record.kind === "bullet") {
+    if (record.kind === REPLICATION_KINDS.BULLET) {
       bullets.delete(record.id);
+      continue;
+    }
+
+    if (record.kind === REPLICATION_KINDS.SHAPE) {
+      const shape = shapes.get(record.id);
+      if (shape) {
+        maybeSpawnShapeDeathParticles(shape);
+        shapes.delete(record.id);
+      }
     }
   }
 
@@ -2491,6 +2521,16 @@ function applyReplication(replication, serverTime, previousSnapshotSeq) {
     for (const bulletId of Array.from(bullets.keys())) {
       if (!fullBulletIds.has(bulletId)) {
         bullets.delete(bulletId);
+      }
+    }
+
+    for (const shapeId of Array.from(shapes.keys())) {
+      if (!fullShapeIds.has(shapeId)) {
+        const shape = shapes.get(shapeId);
+        if (shape) {
+          maybeSpawnShapeDeathParticles(shape);
+          shapes.delete(shapeId);
+        }
       }
     }
   }
@@ -2699,24 +2739,19 @@ function applySnapshot(payload) {
     }
   }
 
-  // Shapes are only authoritative on full snapshots right now. Delta snapshots
-  // intentionally omit them, so treating an empty list as a full replacement
-  // creates fake "deaths" and particle bursts every frame.
-  if (payload.replication?.mode === "full" && Array.isArray(payload.shapes)) {
+  // Fallback for baseline or resync cases where shape replication was not applied.
+  if (replicationStatus !== "applied" && payload.replication?.mode === "full" && Array.isArray(payload.shapes)) {
     const shapeIds = new Set(payload.shapes.map((s) => s.id));
     for (const [id, shape] of shapes.entries()) {
       if (!shapeIds.has(id)) {
-        spawnShapeDeathParticles(shape);
+        maybeSpawnShapeDeathParticles(shape);
         shapes.delete(id);
       }
     }
-    for (const shape of payload.shapes) {
-      if (shape && shape.id) {
-        const existing = shapes.get(shape.id);
-        if (existing) shape.renderAngle = existing.renderAngle ?? existing.angle;
-        shapes.set(shape.id, shape);
-      }
-    }
+    updateEntityMap(shapes, payload.shapes, {}, {
+      kind: REPLICATION_KINDS.SHAPE,
+      serverTime: payload.serverTime
+    });
   }
 
   // Update local XP/level state from 'you' field
@@ -3410,9 +3445,35 @@ function updateRenderState(deltaSeconds, frameAt) {
     player.displayHp = lerp(player.displayHp ?? player.hp, player.hp, clamp(1 - Math.exp(-10 * deltaSeconds), 0.1, 0.6));
   }
 
+  const shapeFollowAmount = clamp(1 - Math.exp(-9 * deltaSeconds), 0.12, 0.38);
   const shapeAngleSmoothing = clamp(1 - Math.exp(-6 * deltaSeconds), 0.08, 0.4);
   for (const shape of shapes.values()) {
-    shape.renderAngle = lerpAngle(shape.renderAngle ?? shape.angle ?? 0, shape.angle ?? 0, shapeAngleSmoothing);
+    const sample = sampleNetworkHistory(shape, REPLICATION_KINDS.SHAPE, renderServerTime) ?? {
+      x: shape.x,
+      y: shape.y,
+      angle: shape.angle ?? 0,
+      speed: 0
+    };
+    const currentShapeX = shape.renderX ?? shape.x;
+    const currentShapeY = shape.renderY ?? shape.y;
+    const dx = sample.x - currentShapeX;
+    const dy = sample.y - currentShapeY;
+    const shouldSnap =
+      (shape.teleportFrames ?? 0) > 0 ||
+      dx * dx + dy * dy > NETWORK_RENDER.snapDistance * NETWORK_RENDER.snapDistance;
+
+    if (shouldSnap) {
+      shape.renderX = sample.x;
+      shape.renderY = sample.y;
+    } else {
+      shape.renderX = lerp(currentShapeX, sample.x, shapeFollowAmount);
+      shape.renderY = lerp(currentShapeY, sample.y, shapeFollowAmount);
+    }
+
+    shape.renderAngle = lerpAngle(shape.renderAngle ?? sample.angle, sample.angle, shapeAngleSmoothing);
+    shape.displayX = shape.renderX;
+    shape.displayY = shape.renderY;
+    shape.teleportFrames = Math.max(0, (shape.teleportFrames ?? 0) - 1);
   }
 
   for (const bullet of bullets.values()) {
@@ -3841,46 +3902,101 @@ function drawCombatEffects() {
   }
 }
 
+const SHAPE_VISUALS = Object.freeze({
+  triangle: Object.freeze({ sides: 3, fillColor: "#00d4aa" }),
+  square: Object.freeze({ sides: 4, fillColor: "#ffb703" }),
+  pentagon: Object.freeze({ sides: 5, fillColor: "#4488ff" }),
+  alpha_pentagon: Object.freeze({ sides: 5, fillColor: "#aa44ff" })
+});
+
+function getShapeVisualDefinition(shapeType) {
+  return SHAPE_VISUALS[shapeType] ?? SHAPE_VISUALS.square;
+}
+
+function traceRegularPolygon(renderContext, sides, radius) {
+  renderContext.beginPath();
+  for (let i = 0; i < sides; i++) {
+    const angle = (i / sides) * Math.PI * 2 - Math.PI / 2;
+    const x = Math.cos(angle) * radius;
+    const y = Math.sin(angle) * radius;
+    if (i === 0) {
+      renderContext.moveTo(x, y);
+    } else {
+      renderContext.lineTo(x, y);
+    }
+  }
+  renderContext.closePath();
+}
+
+function getOrCreateShapeSprite(shapeType, radius) {
+  const safeRadius = Math.max(1, Math.round(radius));
+  const cacheKey = `${shapeType}:${safeRadius}`;
+  const cached = shapeSpriteCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const spriteSize = Math.ceil(safeRadius * 2 + 12);
+  const resolution = 2;
+  const spriteCanvas = document.createElement("canvas");
+  spriteCanvas.width = spriteSize * resolution;
+  spriteCanvas.height = spriteSize * resolution;
+  const spriteContext = spriteCanvas.getContext("2d");
+  if (!spriteContext) {
+    return null;
+  }
+
+  const { sides, fillColor } = getShapeVisualDefinition(shapeType);
+  spriteContext.scale(resolution, resolution);
+  spriteContext.translate(spriteSize / 2, spriteSize / 2);
+  traceRegularPolygon(spriteContext, sides, safeRadius);
+  spriteContext.fillStyle = fillColor;
+  spriteContext.fill();
+  spriteContext.lineWidth = 2.5;
+  spriteContext.strokeStyle = "#1a1a2e";
+  spriteContext.stroke();
+
+  const sprite = {
+    canvas: spriteCanvas,
+    size: spriteSize
+  };
+  shapeSpriteCache.set(cacheKey, sprite);
+  return sprite;
+}
+
+function isWorldCircleVisible(x, y, radius, padding = 0, viewport = getVisibleViewportSize()) {
+  const left = camera.x - padding;
+  const top = camera.y - padding;
+  const right = camera.x + viewport.width + padding;
+  const bottom = camera.y + viewport.height + padding;
+  return x + radius >= left && x - radius <= right && y + radius >= top && y - radius <= bottom;
+}
+
 function drawShape(shape) {
   if (!shape) {
     return;
   }
 
   // Called inside the camera-transform context (world coordinates)
-  const sx = shape.x;
-  const sy = shape.y;
+  const sx = shape.renderX ?? shape.x;
+  const sy = shape.renderY ?? shape.y;
   const r = shape.radius ?? 20;
-
-  let fillColor = "#ffb703";
-  const sides = shape.type === SHAPE_TYPES.TRIANGLE ? 3 : shape.type === SHAPE_TYPES.SQUARE ? 4 : shape.type === SHAPE_TYPES.PENTAGON ? 5 : 5;
-  if (shape.type === SHAPE_TYPES.TRIANGLE) {
-    fillColor = "#00d4aa";
-  } else if (shape.type === SHAPE_TYPES.SQUARE) {
-    fillColor = "#ffb703";
-  } else if (shape.type === SHAPE_TYPES.PENTAGON) {
-    fillColor = "#4488ff";
-  } else if (shape.type === SHAPE_TYPES.ALPHA_PENTAGON) {
-    fillColor = "#aa44ff";
-  }
+  const { sides, fillColor } = getShapeVisualDefinition(shape.type);
+  const sprite = getOrCreateShapeSprite(shape.type, r);
 
   context.save();
   context.translate(sx, sy);
   context.rotate(shape.renderAngle ?? shape.angle ?? 0);
-  context.beginPath();
-  for (let i = 0; i < sides; i++) {
-    const angle = (i / sides) * Math.PI * 2 - Math.PI / 2;
-    if (i === 0) {
-      context.moveTo(Math.cos(angle) * r, Math.sin(angle) * r);
-    } else {
-      context.lineTo(Math.cos(angle) * r, Math.sin(angle) * r);
-    }
+  if (sprite) {
+    context.drawImage(sprite.canvas, -sprite.size / 2, -sprite.size / 2, sprite.size, sprite.size);
+  } else {
+    traceRegularPolygon(context, sides, r);
+    context.fillStyle = fillColor;
+    context.fill();
+    context.lineWidth = 2.5;
+    context.strokeStyle = "#1a1a2e";
+    context.stroke();
   }
-  context.closePath();
-  context.fillStyle = fillColor;
-  context.fill();
-  context.lineWidth = 2.5;
-  context.strokeStyle = "#1a1a2e";
-  context.stroke();
   context.restore();
 
   // Health bar if damaged (in world space)
@@ -3901,7 +4017,14 @@ function drawShape(shape) {
 }
 
 function drawShapes() {
+  const viewport = getVisibleViewportSize();
   for (const shape of shapes.values()) {
+    const sx = shape.renderX ?? shape.x;
+    const sy = shape.renderY ?? shape.y;
+    const r = shape.radius ?? 20;
+    if (!isWorldCircleVisible(sx, sy, r, 64, viewport)) {
+      continue;
+    }
     drawShape(shape);
   }
 }
@@ -3938,6 +4061,21 @@ function spawnShapeDeathParticles(shape) {
       lifeMs
     });
   }
+}
+
+function maybeSpawnShapeDeathParticles(shape) {
+  if (!shape) {
+    return;
+  }
+
+  const x = shape.renderX ?? shape.x;
+  const y = shape.renderY ?? shape.y;
+  const radius = shape.radius ?? 20;
+  if (!isWorldCircleVisible(x, y, radius, 96)) {
+    return;
+  }
+
+  spawnShapeDeathParticles(shape);
 }
 
 function drawShapeParticles(now) {
@@ -4109,22 +4247,6 @@ function drawMinimap() {
     context.fillStyle = "rgba(0,0,0,0.56)";
     context.beginPath();
     context.roundRect(panelX, panelY, panelWidth, panelHeight, 10);
-    context.fill();
-  }
-
-  for (const shape of shapes.values()) {
-    const size = shape.type === SHAPE_TYPES.ALPHA_PENTAGON ? 4 : shape.type === SHAPE_TYPES.PENTAGON ? 3 : 1.75;
-    const color =
-      shape.type === SHAPE_TYPES.ALPHA_PENTAGON
-        ? "#c084fc"
-        : shape.type === SHAPE_TYPES.PENTAGON
-          ? "#60a5fa"
-          : shape.type === SHAPE_TYPES.TRIANGLE
-            ? "#2dd4bf"
-            : "#fbbf24";
-    context.fillStyle = color;
-    context.beginPath();
-    context.arc(projectX(shape.x), projectY(shape.y), size, 0, Math.PI * 2);
     context.fill();
   }
 
