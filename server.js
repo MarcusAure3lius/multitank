@@ -2309,7 +2309,7 @@ function isShapePointSafe(room, x, y, radius) {
   }
 
   for (const objectiveZone of getRoomObjectiveZones(room)) {
-    const objectiveBuffer = objectiveZone.radius + radius + 60;
+    const objectiveBuffer = objectiveZone.radius + radius + 24;
     const objectiveDx = x - objectiveZone.x;
     const objectiveDy = y - objectiveZone.y;
     if (objectiveDx * objectiveDx + objectiveDy * objectiveDy < objectiveBuffer * objectiveBuffer) {
