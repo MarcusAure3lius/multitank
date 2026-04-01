@@ -130,7 +130,12 @@ const CLIENT_TICK = Object.freeze({
 
 const LOCAL_INPUT_RESPONSE = Object.freeze({
   maxSendRate: Math.max(CLIENT_TICK.rate, Math.min(40, GAME_CONFIG.antiCheat?.maxInputsPerSecond ?? 40)),
-  maxPredictionStepSeconds: 1 / 30
+  maxPredictionStepSeconds: 1 / 30,
+  immediateStateChangeMinIntervalMs: 12
+});
+
+const LOCAL_AIM_RESPONSE = Object.freeze({
+  inputGraceMs: Math.max(120, Math.ceil(1000 / CLIENT_TICK.rate) * 2)
 });
 
 const WORLD_RENDER = Object.freeze({
@@ -248,6 +253,7 @@ let joinInProgress = false;
 let nextInputSeq = 1;
 let lastInputDispatchAt = 0;
 let lastLocalInputChangedAt = 0;
+let lastAimInputChangedAt = 0;
 let lastDispatchedInputState = null;
 let nextReliableMessageId = 1;
 let roomBrowserRefreshInFlight = false;
@@ -736,6 +742,15 @@ function markLocalInputChanged(now = Date.now()) {
   lastLocalInputChangedAt = now;
 }
 
+function markLocalAimChanged(now = Date.now()) {
+  lastAimInputChangedAt = now;
+  markLocalInputChanged(now);
+}
+
+function hasRecentAimInputActive(now = Date.now()) {
+  return pointerPrimaryDown || now - lastAimInputChangedAt <= LOCAL_AIM_RESPONSE.inputGraceMs;
+}
+
 function captureLiveInputState(now = Date.now()) {
   const localPlayer = getLocalPlayer();
   const visualState = ensureLocalVisualState(localPlayer);
@@ -913,9 +928,18 @@ function hasPlayableSession() {
   return Boolean(currentRoomId && hasSeenLocalPlayerSnapshot && localPlayer && !localPlayer.isSpectator);
 }
 
+function syncClassTabsVisibility() {
+  if (!classTabsPanelElement) {
+    return;
+  }
+
+  classTabsPanelElement.hidden = !hasPlayableSession();
+}
+
 function updateSessionChrome() {
   document.body.classList.toggle("in-session", hasPlayableSession());
   document.body.classList.toggle("joining-session", false);
+  syncClassTabsVisibility();
   syncJoinMatchButton();
   refreshDeathOverlay();
   updateDiagnosticBanner();
@@ -2131,8 +2155,15 @@ function updateCamera(deltaSeconds) {
     canSimulateLocalPlayer() &&
     localPlayer.alive
   );
+  const localMovementActive = responsiveLocalCamera && hasMovementInputActive();
+  if (localMovementActive) {
+    camera.x = target.x;
+    camera.y = target.y;
+    return;
+  }
+
   const followAmount = responsiveLocalCamera
-    ? clamp(1 - Math.exp(-(hasMovementInputActive() ? 26 : 20) * deltaSeconds), 0.22, 0.82)
+    ? clamp(1 - Math.exp(-24 * deltaSeconds), 0.26, 0.92)
     : clamp(1 - Math.exp(-14 * deltaSeconds), 0.12, 0.55);
   camera.x = lerp(camera.x, target.x, followAmount);
   camera.y = lerp(camera.y, target.y, followAmount);
@@ -2897,11 +2928,16 @@ function getLocalInputDispatchMinIntervalMs() {
 }
 
 function dispatchLocalInput(options = {}) {
-  const { force = false } = options;
+  const { force = false, preferImmediate = false } = options;
   const now = Date.now();
   const liveInputState = captureLiveInputState(now);
+  const stateChanged = !areInputStatesEquivalent(lastDispatchedInputState, liveInputState);
+  const minIntervalMs =
+    preferImmediate && stateChanged
+      ? LOCAL_INPUT_RESPONSE.immediateStateChangeMinIntervalMs
+      : getLocalInputDispatchMinIntervalMs();
 
-  if (now - lastInputDispatchAt < getLocalInputDispatchMinIntervalMs()) {
+  if (now - lastInputDispatchAt < minIntervalMs) {
     return null;
   }
 
@@ -2914,7 +2950,7 @@ function dispatchLocalInput(options = {}) {
     return null;
   }
 
-  if (!force && areInputStatesEquivalent(lastDispatchedInputState, liveInputState)) {
+  if (!force && !stateChanged) {
     return null;
   }
 
@@ -3289,9 +3325,9 @@ function computePredictedLocalState(
     );
     activeInput = liveInput;
     segmentStartMs = liveInputChangeAt;
-  } else if (!activeInput && liveInput && liveInputChangeAt > replayStartMs) {
+  } else if (!activeInput && liveInput) {
     activeInput = liveInput;
-    segmentStartMs = liveInputChangeAt;
+    segmentStartMs = liveInputChangeAt > replayStartMs ? liveInputChangeAt : replayStartMs;
   }
 
   // Replay by elapsed time instead of packet count so redundant or batched input
@@ -3399,7 +3435,8 @@ function applyPredictionCorrection(localPlayer, correctedState) {
     visualState.turretAngle = correctedState.turretAngle;
   }
 
-  if (!localRenderState || !hasMovementInputActive()) {
+  const hasResponsiveLocalControl = hasMovementInputActive() || hasRecentAimInputActive();
+  if (!localRenderState || !hasResponsiveLocalControl) {
     localRenderState = {
       x: correctedState.x,
       y: correctedState.y,
@@ -3739,6 +3776,7 @@ function connect(options = {}) {
     nextInputSeq = 1;
     lastInputDispatchAt = 0;
     lastLocalInputChangedAt = 0;
+    lastAimInputChangedAt = 0;
     lastDispatchedInputState = null;
     nextReliableMessageId = 1;
     latestMatch = null;
@@ -3951,6 +3989,7 @@ function connect(options = {}) {
       pendingInputs.length = 0;
       lastInputDispatchAt = 0;
       lastLocalInputChangedAt = 0;
+      lastAimInputChangedAt = 0;
       lastDispatchedInputState = null;
       currentRoomId ||= roomInput.value || "default";
       scheduleReconnect();
@@ -3976,6 +4015,7 @@ function connect(options = {}) {
       pendingInputs.length = 0;
       lastInputDispatchAt = 0;
       lastLocalInputChangedAt = 0;
+      lastAimInputChangedAt = 0;
       lastDispatchedInputState = null;
       scheduleReconnect();
       return;
@@ -4014,6 +4054,7 @@ function connect(options = {}) {
     pendingInputs.length = 0;
     lastInputDispatchAt = 0;
     lastLocalInputChangedAt = 0;
+    lastAimInputChangedAt = 0;
     lastDispatchedInputState = null;
     lastStallWarningAt = 0;
     localXp = 0;
@@ -5538,14 +5579,14 @@ window.addEventListener("keydown", (event) => {
   keys.add(event.code);
   if (!hadKey) {
     markLocalInputChanged();
-    dispatchLocalInput();
+    dispatchLocalInput({ preferImmediate: true });
   }
 });
 
 window.addEventListener("keyup", (event) => {
   if (keys.delete(event.code)) {
     markLocalInputChanged();
-    dispatchLocalInput();
+    dispatchLocalInput({ preferImmediate: true });
   }
 });
 
@@ -5553,18 +5594,19 @@ window.addEventListener("resize", resizeCanvas);
 
 canvas.addEventListener("pointermove", (event) => {
   updateTrackedPointerPosition(event);
-  markLocalInputChanged();
+  markLocalAimChanged();
+  dispatchLocalInput();
 });
 
 canvas.addEventListener("pointerdown", (event) => {
   unlockAudio();
   updateTrackedPointerPosition(event);
+  markLocalAimChanged();
   if (event.button === 0) {
     const wasPrimaryDown = pointerPrimaryDown;
     pointerPrimaryDown = true;
     if (!wasPrimaryDown) {
-      markLocalInputChanged();
-      dispatchLocalInput();
+      dispatchLocalInput({ preferImmediate: true });
     }
   }
 });
@@ -5574,7 +5616,7 @@ window.addEventListener("pointerup", (event) => {
     pointerPrimaryDown = false;
     if (wasPrimaryDown) {
       markLocalInputChanged();
-      dispatchLocalInput();
+      dispatchLocalInput({ preferImmediate: true });
     }
   }
 });
@@ -5583,7 +5625,7 @@ window.addEventListener("pointercancel", () => {
   pointerPrimaryDown = false;
   if (wasPrimaryDown) {
     markLocalInputChanged();
-    dispatchLocalInput();
+    dispatchLocalInput({ preferImmediate: true });
   }
 });
 window.addEventListener("blur", () => {
@@ -5592,7 +5634,7 @@ window.addEventListener("blur", () => {
   pointerPrimaryDown = false;
   if (hadMovementInput) {
     markLocalInputChanged();
-    dispatchLocalInput();
+    dispatchLocalInput({ preferImmediate: true });
   }
 });
 canvas.addEventListener("wheel", (event) => {
@@ -5925,6 +5967,7 @@ updateSessionChrome = function updateSessionChromeWithStartMenu() {
 // Initial state: show start menu
 updateFullscreenControls();
 showStartMenu();
+syncClassTabsVisibility();
 
 resizeCanvas();
 render();
