@@ -20,6 +20,7 @@ import {
   VFX_CUES,
   XP_PER_LEVEL,
   deserializePacket,
+  getLobbyClassProfile,
   getLockedCameraZoom,
   getMapLayout,
   getTankRadiusForClassId,
@@ -54,11 +55,14 @@ const readyButton = document.getElementById("ready-button");
 const createRoomButton = document.getElementById("create-room-button");
 const nameInput = document.getElementById("name-input");
 const startHomeTabButton = document.getElementById("start-home-tab");
+const startSpectateTabButton = document.getElementById("start-spectate-tab");
 const startSettingsTabButton = document.getElementById("start-settings-tab");
 const startHomePanel = document.getElementById("start-home-panel");
+const startSpectatePanel = document.getElementById("start-spectate-panel");
 const startSettingsPanel = document.getElementById("start-settings-panel");
 const fullscreenButton = document.getElementById("fullscreen-button");
 const fullscreenStatusElement = document.getElementById("fullscreen-status");
+const spectateButton = document.getElementById("spectate-button");
 const roomInput = document.getElementById("room-input");
 const spectateInput = document.getElementById("spectate-input");
 const lobbyRoomCodeElement = document.getElementById("lobby-room-code");
@@ -141,6 +145,16 @@ const LOCAL_AIM_RESPONSE = Object.freeze({
 const WORLD_RENDER = Object.freeze({
   gridSize: 64,
   cameraFollow: 0.14
+});
+
+const SPECTATOR_CAMERA = Object.freeze({
+  defaultZoom: 0.5,
+  maxZoom: 2.4,
+  zoomKeyFactor: 1.14,
+  wheelZoomStrength: 0.0016,
+  minMoveSpeed: 650,
+  maxMoveSpeed: 3400,
+  fastMoveMultiplier: 1.85
 });
 
 const players = new Map();
@@ -725,6 +739,10 @@ function resetCameraAnchor() {
   localRenderState = null;
 }
 
+function isSpectatorSession(localPlayer = getLocalPlayer(), you = latestYou) {
+  return Boolean(you?.isSpectator ?? localPlayer?.isSpectator ?? false);
+}
+
 function hasMovementInputActive() {
   return (
     keys.has("KeyW") ||
@@ -815,11 +833,12 @@ function ensureLocalVisualState(localPlayer = getLocalPlayer()) {
   }
 
   if (!localVisualState) {
+    const displayedLocalPose = localPlayer?.id === localPlayerId ? localRenderState : null;
     localVisualState = {
-      x: getPlayerVisualX(localPlayer),
-      y: getPlayerVisualY(localPlayer),
-      angle: getPlayerVisualAngle(localPlayer),
-      turretAngle: getPlayerVisualTurretAngle(localPlayer)
+      x: displayedLocalPose?.x ?? getPlayerVisualX(localPlayer),
+      y: displayedLocalPose?.y ?? getPlayerVisualY(localPlayer),
+      angle: displayedLocalPose?.angle ?? getPlayerVisualAngle(localPlayer),
+      turretAngle: displayedLocalPose?.turretAngle ?? getPlayerVisualTurretAngle(localPlayer)
     };
   }
 
@@ -963,6 +982,7 @@ function updateDiagnosticBanner() {
     `Room: ${currentRoomId ?? "-"} | Snapshot: ${snapshotState} | Players: ${players.size}\n` +
     `Local Player: ${playerSummary}\n` +
     `Playable: ${hasPlayableSession() ? "yes" : "no"} | Spectator: ${spectatorState ? "yes" : "no"} | Zoom: ${cameraZoom.toFixed(2)}` +
+    (spectatorState ? "\nFree Cam: WASD/Arrows move | Mouse Wheel or +/- zoom | 0 recenters" : "") +
     (shouldShowCloseSummary ? `\nLast Close: ${formatSocketCloseInfo(lastSocketCloseInfo)}` : "") +
     (renderFailure ? `\nRender Error: ${renderFailure}` : "");
 
@@ -1149,6 +1169,7 @@ function setSelectedLobbyClass(classId, options = {}) {
   const changed = classSelect.value !== nextClassId;
   classSelect.value = nextClassId;
   refreshClassTabs();
+  syncLockedCameraZoom();
 
   if (changed && notifyServer && currentRoomId && socket?.readyState === WebSocket.OPEN) {
     sendLobbyUpdate("class", {
@@ -1210,12 +1231,14 @@ function syncJoinMatchButton() {
   joinMatchButton.textContent = joinInProgress ? "Joining..." : "Join Match";
 }
 
-function ensureQuickJoinDefaults() {
+function ensureQuickJoinDefaults(options = {}) {
+  const { spectate = false } = options;
+
   if (!nameInput.value.trim()) {
     nameInput.value = createCommanderName();
   }
 
-  spectateInput.checked = false;
+  spectateInput.checked = spectate;
   mapSelect.value = GAME_CONFIG.lobby.maps[0].id;
   teamSelect.value = GAME_CONFIG.lobby.teams[0].id;
   classSelect.value = getLobbyClassConfig(classSelect.value)?.id ?? GAME_CONFIG.lobby.classes[0].id;
@@ -1238,16 +1261,41 @@ function getPreferredQuickJoinRoomCode() {
   return candidate;
 }
 
-function compareRoomsForQuickJoin(left, right) {
+function getQuickJoinPhaseRank(room, options = {}) {
+  const { spectate = false } = options;
+
+  switch (room?.phase) {
+    case MATCH_PHASES.LIVE_ROUND:
+    case MATCH_PHASES.OVERTIME:
+      return spectate ? 5 : 1;
+    case MATCH_PHASES.WARMUP:
+      return spectate ? 4 : 1;
+    case MATCH_PHASES.WAITING:
+      return 3;
+    case MATCH_PHASES.ROUND_END:
+    case MATCH_PHASES.RESULTS:
+      return 2;
+    default:
+      return 0;
+  }
+}
+
+function compareRoomsForQuickJoin(left, right, options = {}) {
+  const { spectate = false } = options;
+  const joinProperty = spectate ? "canJoinAsSpectator" : "canJoinAsPlayer";
+
   return (
+    getQuickJoinPhaseRank(right, options) - getQuickJoinPhaseRank(left, options) ||
     (right.activePlayers ?? 0) - (left.activePlayers ?? 0) ||
-    Number(Boolean(right.canJoinAsPlayer)) - Number(Boolean(left.canJoinAsPlayer)) ||
+    (right.spectators ?? 0) - (left.spectators ?? 0) ||
+    Number(Boolean(right[joinProperty])) - Number(Boolean(left[joinProperty])) ||
     String(right.lastActivityAt ?? "").localeCompare(String(left.lastActivityAt ?? "")) ||
     String(left.roomCode ?? "").localeCompare(String(right.roomCode ?? ""))
   );
 }
 
-async function resolveQuickJoinRoomCode() {
+async function resolveQuickJoinRoomCode(options = {}) {
+  const { spectate = false } = options;
   const preferredRoomCode = getPreferredQuickJoinRoomCode();
   if (preferredRoomCode) {
     return preferredRoomCode;
@@ -1266,29 +1314,31 @@ async function resolveQuickJoinRoomCode() {
 
   const payload = await response.json();
   const joinableRooms = (payload.rooms ?? [])
-    .filter((room) => room?.canJoinAsPlayer)
-    .sort(compareRoomsForQuickJoin);
+    .filter((room) => spectate ? room?.canJoinAsSpectator : room?.canJoinAsPlayer)
+    .sort((left, right) => compareRoomsForQuickJoin(left, right, { spectate }));
 
   return joinableRooms[0]?.roomCode ?? createRoomCode();
 }
 
-async function startQuickJoin() {
+async function startQuickJoin(options = {}) {
+  const { spectate = false } = options;
+
   if (joinInProgress || currentRoomId) {
     return;
   }
 
-  ensureQuickJoinDefaults();
-  setStatus("Finding match...");
-  matchStatusElement.textContent = "Finding an open arena";
+  ensureQuickJoinDefaults({ spectate });
+  setStatus(spectate ? "Finding a live arena to spectate..." : "Finding match...");
+  matchStatusElement.textContent = spectate ? "Finding an arena to spectate" : "Finding an open arena";
 
   try {
-    roomInput.value = await resolveQuickJoinRoomCode();
+    roomInput.value = await resolveQuickJoinRoomCode({ spectate });
   } catch (error) {
     roomInput.value = createRoomCode();
   }
 
-  setStatus("Joining match...");
-  matchStatusElement.textContent = "Joining arena";
+  setStatus(spectate ? "Joining as spectator..." : "Joining match...");
+  matchStatusElement.textContent = spectate ? "Joining arena as spectator" : "Joining arena";
   connect();
 }
 
@@ -1967,12 +2017,141 @@ function getLocalLobbyClassId(localPlayer = getLocalPlayer()) {
   );
 }
 
+function getDisplayedLobbyClassId(player = null) {
+  if (player?.id === localPlayerId) {
+    return getLocalLobbyClassId(player);
+  }
+
+  const classId = player?.classId;
+  return typeof classId === "string" && classId ? classId : GAME_CONFIG.lobby.classes[0]?.id ?? "basic";
+}
+
+function getLobbyClassMultiplier(classId, fieldName, fallback = 1) {
+  const value = Number(getLobbyClassProfile(classId)?.[fieldName]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function getLocalLobbyClassProfile(localPlayer = getLocalPlayer()) {
+  return getLobbyClassProfile(getLocalLobbyClassId(localPlayer));
+}
+
 function getLocalBodyRadius(localPlayer = getLocalPlayer()) {
   return getTankRadiusForClassId(getLocalLobbyClassId(localPlayer));
 }
 
+function getSpectatorCameraZoomBounds() {
+  const fitWorldZoom = Math.max(
+    canvas.width / GAME_CONFIG.world.width,
+    canvas.height / GAME_CONFIG.world.height
+  );
+
+  return {
+    min: Math.max(fitWorldZoom, 0.18),
+    max: Math.max(SPECTATOR_CAMERA.maxZoom, fitWorldZoom)
+  };
+}
+
+function clampSpectatorZoom(zoom) {
+  const bounds = getSpectatorCameraZoomBounds();
+  return clamp(zoom, bounds.min, bounds.max);
+}
+
+function getSpectatorCameraDefaultZoom() {
+  return clampSpectatorZoom(SPECTATOR_CAMERA.defaultZoom);
+}
+
+function getSpectatorCameraDefaultFocus() {
+  const liveCandidates = Array.from(players.values())
+    .filter((player) => player && !player.isSpectator && player.connected !== false)
+    .sort(
+      (left, right) =>
+        Number(Boolean(right.alive)) - Number(Boolean(left.alive)) ||
+        (right.lastCombatEventAt ?? 0) - (left.lastCombatEventAt ?? 0) ||
+        (right.score ?? 0) - (left.score ?? 0)
+    );
+
+  const focusedPlayer = liveCandidates[0] ?? null;
+  if (focusedPlayer) {
+    return {
+      x: getPlayerVisualX(focusedPlayer),
+      y: getPlayerVisualY(focusedPlayer)
+    };
+  }
+
+  if (latestObjective) {
+    return getObjectiveReferencePoint(latestObjective);
+  }
+
+  return {
+    x: GAME_CONFIG.world.width / 2,
+    y: GAME_CONFIG.world.height / 2
+  };
+}
+
+function centerSpectatorCamera(options = {}) {
+  const { zoom = getSpectatorCameraDefaultZoom() } = options;
+
+  cameraZoom = clampSpectatorZoom(zoom);
+  const focus = getSpectatorCameraDefaultFocus();
+  const viewport = getVisibleViewportSize();
+  const clamped = clampCameraPosition(focus.x - viewport.width / 2, focus.y - viewport.height / 2);
+  camera.x = clamped.x;
+  camera.y = clamped.y;
+  cameraNeedsSnap = false;
+  refreshPointerWorldPosition();
+}
+
+function applySpectatorCameraZoom(nextZoom, options = {}) {
+  const viewportBefore = getVisibleViewportSize();
+  const anchorWorldPosition = options.anchorWorldPosition ?? {
+    x: camera.x + viewportBefore.width / 2,
+    y: camera.y + viewportBefore.height / 2
+  };
+  const normalizedX = viewportBefore.width > 0
+    ? clamp((anchorWorldPosition.x - camera.x) / viewportBefore.width, 0, 1)
+    : 0.5;
+  const normalizedY = viewportBefore.height > 0
+    ? clamp((anchorWorldPosition.y - camera.y) / viewportBefore.height, 0, 1)
+    : 0.5;
+  const clampedZoom = clampSpectatorZoom(nextZoom);
+
+  if (Math.abs(clampedZoom - cameraZoom) <= 0.0001) {
+    return false;
+  }
+
+  cameraZoom = clampedZoom;
+  const viewportAfter = getVisibleViewportSize();
+  const nextCameraX = anchorWorldPosition.x - normalizedX * viewportAfter.width;
+  const nextCameraY = anchorWorldPosition.y - normalizedY * viewportAfter.height;
+  const clampedCamera = clampCameraPosition(nextCameraX, nextCameraY);
+  camera.x = clampedCamera.x;
+  camera.y = clampedCamera.y;
+  cameraNeedsSnap = false;
+  refreshPointerWorldPosition();
+  return true;
+}
+
 function syncLockedCameraZoom() {
-  cameraZoom = getLockedCameraZoom(canvas.width, canvas.height);
+  if (isSpectatorSession()) {
+    const nextZoom = clampSpectatorZoom(cameraZoom || getSpectatorCameraDefaultZoom());
+    if (Math.abs(nextZoom - cameraZoom) > 0.0001) {
+      cameraZoom = nextZoom;
+      refreshPointerWorldPosition();
+    }
+    return;
+  }
+
+  const nextZoom = getLockedCameraZoom(canvas.width, canvas.height, getLocalLobbyClassId());
+  if (!Number.isFinite(nextZoom) || nextZoom <= 0) {
+    return;
+  }
+
+  if (Math.abs(nextZoom - cameraZoom) <= 0.0001) {
+    return;
+  }
+
+  cameraZoom = nextZoom;
+  refreshPointerWorldPosition();
 }
 
 function resizeCanvas() {
@@ -1983,10 +2162,32 @@ function resizeCanvas() {
     return;
   }
 
+  const previousViewport = getVisibleViewportSize();
+  const preserveSpectatorCenter = isSpectatorSession();
+  const spectatorCenter = preserveSpectatorCenter
+    ? {
+        x: camera.x + previousViewport.width / 2,
+        y: camera.y + previousViewport.height / 2
+      }
+    : null;
+
   canvas.width = nextWidth;
   canvas.height = nextHeight;
   syncLockedCameraZoom();
-  cameraNeedsSnap = true;
+
+  if (preserveSpectatorCenter && spectatorCenter) {
+    const viewport = getVisibleViewportSize();
+    const clamped = clampCameraPosition(
+      spectatorCenter.x - viewport.width / 2,
+      spectatorCenter.y - viewport.height / 2
+    );
+    camera.x = clamped.x;
+    camera.y = clamped.y;
+    cameraNeedsSnap = false;
+  } else {
+    cameraNeedsSnap = true;
+  }
+
   refreshPointerWorldPosition();
 }
 
@@ -2136,7 +2337,51 @@ function getCameraFocusTarget() {
   };
 }
 
+function updateSpectatorCamera(deltaSeconds) {
+  if (cameraNeedsSnap) {
+    centerSpectatorCamera({
+      zoom: cameraZoom || getSpectatorCameraDefaultZoom()
+    });
+    return;
+  }
+
+  const moveX = (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0) - (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0);
+  const moveY = (keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0) - (keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0);
+  const moveMagnitude = Math.hypot(moveX, moveY);
+
+  if (moveMagnitude <= 0) {
+    const clamped = clampCameraPosition(camera.x, camera.y);
+    camera.x = clamped.x;
+    camera.y = clamped.y;
+    return;
+  }
+
+  const speedMultiplier =
+    keys.has("ShiftLeft") || keys.has("ShiftRight")
+      ? SPECTATOR_CAMERA.fastMoveMultiplier
+      : 1;
+  const moveSpeed = clamp(
+    SPECTATOR_CAMERA.minMoveSpeed / Math.sqrt(Math.max(cameraZoom, 0.18)),
+    SPECTATOR_CAMERA.minMoveSpeed,
+    SPECTATOR_CAMERA.maxMoveSpeed
+  ) * speedMultiplier;
+  const normalizedMoveX = moveX / moveMagnitude;
+  const normalizedMoveY = moveY / moveMagnitude;
+  const clamped = clampCameraPosition(
+    camera.x + normalizedMoveX * moveSpeed * deltaSeconds,
+    camera.y + normalizedMoveY * moveSpeed * deltaSeconds
+  );
+  camera.x = clamped.x;
+  camera.y = clamped.y;
+  refreshPointerWorldPosition();
+}
+
 function updateCamera(deltaSeconds) {
+  if (isSpectatorSession()) {
+    updateSpectatorCamera(deltaSeconds);
+    return;
+  }
+
   const focus = getCameraFocusTarget();
   const viewport = getVisibleViewportSize();
   const target = clampCameraPosition(focus.x - viewport.width / 2, focus.y - viewport.height / 2);
@@ -2255,13 +2500,15 @@ function getLocalStatValue(statName) {
 }
 
 function getEffectiveLocalMoveSpeed() {
-  return GAME_CONFIG.tank.speed * (1 + getLocalStatValue("movementSpeed") * 0.07);
+  const classSpeedMultiplier = getLobbyClassMultiplier(getLocalLobbyClassId(), "movementSpeedMultiplier", 1);
+  return GAME_CONFIG.tank.speed * classSpeedMultiplier * (1 + getLocalStatValue("movementSpeed") * 0.07);
 }
 
 function getEffectiveLocalReloadMs() {
   const classDef = getLocalTankClassDef();
   const classReloadMs = classDef.reloadMs ?? GAME_CONFIG.tank.shootCooldownMs;
-  return Math.max(50, classReloadMs * (1 - getLocalStatValue("reload") * 0.065));
+  const classReloadTimeMultiplier = getLobbyClassMultiplier(getLocalLobbyClassId(), "reloadTimeMultiplier", 1);
+  return Math.max(50, classReloadMs * classReloadTimeMultiplier * (1 - getLocalStatValue("reload") * 0.065));
 }
 
 function getEffectiveLocalBulletSpeed() {
@@ -2271,6 +2518,18 @@ function getEffectiveLocalBulletSpeed() {
 
 function getEffectiveLocalBulletRadius() {
   return getLocalTankClassDef().bulletRadius ?? GAME_CONFIG.bullet.radius;
+}
+
+function getRenderedBarrelLength(barrel, barrelLengthMultiplier = 1) {
+  return Math.max(0, (barrel?.w ?? 0) * barrelLengthMultiplier);
+}
+
+function getBarrelMuzzleDistance(bodyRadius, barrel, barrelLengthMultiplier = 1) {
+  const extraForwardLength =
+    (barrel?.x ?? 0) > 0
+      ? Math.max(0, getRenderedBarrelLength(barrel, barrelLengthMultiplier) - (barrel?.w ?? 0))
+      : 0;
+  return bodyRadius + 8 + extraForwardLength;
 }
 
 function formatRespawnDelay(ms) {
@@ -2808,6 +3067,7 @@ function spawnPredictedProjectile(localPlayer, inputFrame) {
     x: getPlayerVisualX(localPlayer),
     y: getPlayerVisualY(localPlayer)
   };
+  const barrelLengthMultiplier = getLobbyClassMultiplier(getLocalLobbyClassId(localPlayer), "barrelLengthMultiplier", 1);
   const classDef = getLocalTankClassDef();
   const shotBarrels = classDef.barrels ?? [{ x: 40, y: 0, w: 40, h: 14 }];
   const projectileRadius = getEffectiveLocalBulletRadius();
@@ -2820,7 +3080,7 @@ function spawnPredictedProjectile(localPlayer, inputFrame) {
     const lateralOffset = barrel.y ?? 0;
     const bRightX = -Math.sin(barrelAngle);
     const bRightY = Math.cos(barrelAngle);
-    const muzzleDistance = getLocalBodyRadius(localPlayer) + 8;
+    const muzzleDistance = getBarrelMuzzleDistance(getLocalBodyRadius(localPlayer), barrel, barrelLengthMultiplier);
     const muzzleX =
       origin.x + Math.cos(barrelAngle) * muzzleDistance + bRightX * lateralOffset;
     const muzzleY =
@@ -2954,6 +3214,7 @@ function dispatchLocalInput(options = {}) {
     return null;
   }
 
+  const previousDispatchAt = lastInputDispatchAt;
   const inputFrame = createInputFrame(liveInputState);
   send(serializeInputFrame(inputFrame));
   lastInputDispatchAt = inputFrame.clientSentAt;
@@ -2972,6 +3233,24 @@ function dispatchLocalInput(options = {}) {
     localPlayer.lastPredictedShotAt = Date.now();
     spawnPredictedProjectile(localPlayer, inputFrame);
   }
+
+  const visualState = ensureLocalVisualState(localPlayer);
+  const predictionScale = getPredictionScaleForGapMs(getStatePacketAgeMs(inputFrame.clientSentAt));
+  const predictionStepSeconds =
+    previousDispatchAt > 0
+      ? clamp((inputFrame.clientSentAt - previousDispatchAt) / 1000, 1 / 120, CLIENT_TICK.fixedDeltaSeconds)
+      : CLIENT_TICK.fixedDeltaSeconds;
+  const predicted = simulateTankMovement(
+    {
+      x: visualState?.x ?? localPlayer.renderX ?? localPlayer.x,
+      y: visualState?.y ?? localPlayer.renderY ?? localPlayer.y,
+      angle: visualState?.angle ?? localPlayer.renderAngle ?? localPlayer.angle,
+      turretAngle: visualState?.turretAngle ?? localPlayer.renderTurretAngle ?? localPlayer.turretAngle
+    },
+    inputFrame,
+    predictionStepSeconds * predictionScale
+  );
+  applyLocalPredictedState(localPlayer, predicted);
 
   return inputFrame;
 }
@@ -3109,6 +3388,15 @@ function upsertEntity(store, entity, defaults = {}, options = {}) {
 }
 
 function captureCurrentVisualState(player) {
+  if (player?.id === localPlayerId && localRenderState) {
+    return {
+      x: localRenderState.x,
+      y: localRenderState.y,
+      angle: localRenderState.angle,
+      turretAngle: localRenderState.turretAngle
+    };
+  }
+
   return {
     x: getPlayerVisualX(player),
     y: getPlayerVisualY(player),
@@ -3902,10 +4190,18 @@ function connect(options = {}) {
       };
       roomLabelElement.textContent = currentRoomId;
       cameraNeedsSnap = true;
+      if (payload.isSpectator) {
+        resetCameraAnchor();
+        cameraZoom = clampSpectatorZoom(isReconnect ? cameraZoom : getSpectatorCameraDefaultZoom());
+      }
       updateSessionChrome();
       refreshLobbyUi(null, latestYou);
       if (payload.isSpectator) {
-        setStatus(payload.queuedForSlot ? "Connected as spectator, queued for a player slot" : "Connected as spectator");
+        setStatus(
+          payload.queuedForSlot
+            ? "Connected as spectator, queued for a player slot. Free cam is live: move with WASD or Arrows and zoom with the mouse wheel."
+            : "Connected as spectator. Free cam is live: move with WASD or Arrows and zoom with the mouse wheel."
+        );
       } else {
         setStatus("Match joined. Waiting for first player snapshot...");
       }
@@ -4554,6 +4850,81 @@ function getTeamName(teamId) {
   return getTeamConfig(teamId)?.name ?? (typeof teamId === "string" && teamId ? teamId : "Team");
 }
 
+function getLobbyClassRenderProfile(lobbyClassId, bodyRadius) {
+  const bodyStyle = getLobbyClassProfile(lobbyClassId)?.bodyStyle === "rectangle" ? "rectangle" : "round";
+  const barrelLengthMultiplier = getLobbyClassMultiplier(lobbyClassId, "barrelLengthMultiplier", 1);
+  const turretScale = getLobbyClassMultiplier(lobbyClassId, "turretScale", 1);
+
+  if (bodyStyle === "rectangle") {
+    const bodyWidth = bodyRadius * 3.2;
+    const bodyHeight = bodyRadius * 2.05;
+    return {
+      bodyStyle,
+      barrelLengthMultiplier,
+      barrelHeightMultiplier: 1.12,
+      turretScale,
+      bodyWidth,
+      bodyHeight,
+      bodyCornerRadius: bodyRadius * 0.34,
+      verticalExtent: bodyHeight * 0.5,
+      shieldRadius: Math.hypot(bodyWidth * 0.5, bodyHeight * 0.5) + 10,
+      turretWidth: bodyRadius * 1.72 * turretScale,
+      turretHeight: bodyRadius * 0.92 * turretScale,
+      turretOffsetX: bodyRadius * 0.22
+    };
+  }
+
+  return {
+    bodyStyle,
+    barrelLengthMultiplier,
+    barrelHeightMultiplier: 1,
+    turretScale,
+    verticalExtent: bodyRadius,
+    shieldRadius: bodyRadius + 14,
+    turretWidth: bodyRadius * 0.92 * turretScale,
+    turretHeight: bodyRadius * 0.62 * turretScale,
+    turretOffsetX: 0
+  };
+}
+
+function drawTankTurretBase(x, y, turretAngle, renderProfile, alpha) {
+  if (!renderProfile || (renderProfile.bodyStyle !== "rectangle" && renderProfile.turretScale <= 1.02)) {
+    return;
+  }
+
+  context.save();
+  context.globalAlpha = alpha;
+  context.translate(x, y);
+  context.rotate(turretAngle);
+  context.translate(renderProfile.turretOffsetX ?? 0, 0);
+  context.fillStyle = "#d9e2ec";
+  context.strokeStyle = "#1a1a2e";
+  context.lineWidth = 2;
+
+  if (renderProfile.bodyStyle === "rectangle") {
+    const turretWidth = renderProfile.turretWidth;
+    const turretHeight = renderProfile.turretHeight;
+    context.beginPath();
+    context.roundRect(
+      -turretWidth * 0.48,
+      -turretHeight * 0.5,
+      turretWidth,
+      turretHeight,
+      turretHeight * 0.34
+    );
+    context.fill();
+    context.stroke();
+  } else {
+    const turretRadius = Math.max(8, renderProfile.turretWidth * 0.5);
+    context.beginPath();
+    context.arc(0, 0, turretRadius, 0, Math.PI * 2);
+    context.fill();
+    context.stroke();
+  }
+
+  context.restore();
+}
+
 function drawTank(player, pose = getTankRenderPose(player), frameNow = performance.now()) {
   if (!player || player.isSpectator || !player.alive) {
     return;
@@ -4565,6 +4936,9 @@ function drawTank(player, pose = getTankRenderPose(player), frameNow = performan
   const turretAngle = pose.turretAngle;
   const bodyRadius = getPlayerBodyRadius(player);
   const isLocalPlayer = player.id === localPlayerId;
+  const lobbyClassId = getDisplayedLobbyClassId(player);
+  const renderProfile = getLobbyClassRenderProfile(lobbyClassId, bodyRadius);
+  const visualVerticalExtent = renderProfile.verticalExtent ?? bodyRadius;
   const bodyColor = player.color ?? getTeamConfig(player.teamId)?.color ?? "#ff4d00";
   const alpha = player.connected === false ? 0.42 : 1;
 
@@ -4589,9 +4963,9 @@ function drawTank(player, pose = getTankRenderPose(player), frameNow = performan
     context.fillStyle = "#555566";
     context.strokeStyle = "#1a1a2e";
     context.lineWidth = 2;
-    const bx = barrel.x > 0 ? 0 : barrel.x - barrel.w / 2;
-    const bLen = barrel.w;
-    const bH = barrel.h;
+    const bLen = getRenderedBarrelLength(barrel, renderProfile.barrelLengthMultiplier ?? 1);
+    const bH = (barrel.h ?? 0) * (renderProfile.barrelHeightMultiplier ?? 1);
+    const bx = barrel.x > 0 ? 0 : barrel.x - bLen / 2;
     context.fillRect(bx, barrel.y - bH / 2, bLen, bH);
     context.strokeRect(bx, barrel.y - bH / 2, bLen, bH);
     context.restore();
@@ -4604,18 +4978,32 @@ function drawTank(player, pose = getTankRenderPose(player), frameNow = performan
   context.translate(x, y);
   context.rotate(bodyAngle);
   context.fillStyle = bodyColor;
-  context.beginPath();
-  context.arc(0, 0, bodyRadius, 0, Math.PI * 2);
-  context.fill();
+  if (renderProfile.bodyStyle === "rectangle") {
+    context.beginPath();
+    context.roundRect(
+      -renderProfile.bodyWidth / 2,
+      -renderProfile.bodyHeight / 2,
+      renderProfile.bodyWidth,
+      renderProfile.bodyHeight,
+      renderProfile.bodyCornerRadius
+    );
+    context.fill();
+  } else {
+    context.beginPath();
+    context.arc(0, 0, bodyRadius, 0, Math.PI * 2);
+    context.fill();
+  }
   context.lineWidth = 3;
   context.strokeStyle = "#1a1a2e";
   context.stroke();
   context.restore();
 
+  drawTankTurretBase(x, y, turretAngle, renderProfile, alpha);
+
   const shieldRemainingMs = player.combat?.shieldRemainingMs ?? 0;
   if (shieldRemainingMs > 0) {
     const shieldPulse = 1 + Math.sin(frameNow / 140) * 0.04;
-    const shieldRadius = (bodyRadius + 14) * shieldPulse;
+    const shieldRadius = (renderProfile.shieldRadius ?? (bodyRadius + 14)) * shieldPulse;
     context.save();
     context.globalAlpha = Math.min(alpha, 0.9);
     context.translate(x, y);
@@ -4638,7 +5026,7 @@ function drawTank(player, pose = getTankRenderPose(player), frameNow = performan
     context.font = "bold 12px Segoe UI";
     context.textAlign = "center";
     context.fillStyle = "#ffffff";
-    context.fillText(player.name ?? "", x, y - bodyRadius - 22);
+    context.fillText(player.name ?? "", x, y - visualVerticalExtent - 22);
     context.restore();
   }
 
@@ -4646,7 +5034,7 @@ function drawTank(player, pose = getTankRenderPose(player), frameNow = performan
   const hpRatio = clamp((Number(player.displayHp ?? player.hp) || 0) / Math.max(1, Number(player.maxHp) || GAME_CONFIG.tank.hitPoints), 0, 1);
   const healthBarWidth = 52;
   const healthBarHeight = 7;
-  const healthBarY = isLocalPlayer ? y + bodyRadius + 10 : y - bodyRadius - 16;
+  const healthBarY = isLocalPlayer ? y + visualVerticalExtent + 10 : y - visualVerticalExtent - 16;
   const healthBarX = x - healthBarWidth / 2;
 
   context.save();
@@ -4969,12 +5357,6 @@ function drawXpBar() {
   const xpRatio = localLevel >= MAX_LEVEL ? 1 : clamp(xpIntoLevel / xpNeeded, 0, 1);
   const classDef = getLocalTankClassDef();
   const localPlayerName = getLocalPlayer()?.name ?? nameInput?.value?.trim() ?? "Player";
-  const upgradeHint =
-    localPendingUpgrades.length > 0
-      ? "Upgrade ready"
-      : classDef.upgradesAt && localLevel < classDef.upgradesAt
-        ? `Next class unlock: Lv ${classDef.upgradesAt}`
-        : "Final class";
 
   context.save();
   // Background
@@ -4995,10 +5377,6 @@ function drawXpBar() {
   context.strokeText(localPlayerName, barX + barWidth / 2, barY - 24);
   context.fillStyle = "#000000";
   context.fillText(localPlayerName, barX + barWidth / 2, barY - 24);
-
-  context.font = "bold 11px Segoe UI";
-  context.fillStyle = localPendingUpgrades.length > 0 ? "#ffd166" : "#dbeafe";
-  context.fillText(upgradeHint, barX + barWidth / 2, barY - 8);
 
   // Bar text
   context.font = "bold 10px Segoe UI";
@@ -5419,12 +5797,12 @@ function render(frameAt = performance.now()) {
   try {
     const deltaSeconds = Math.min(0.05, Math.max(0.001, (frameAt - lastRenderFrameAt) / 1000));
     lastRenderFrameAt = frameAt;
+    syncLockedCameraZoom();
     const shouldRenderGameScreen = !document.hidden && (!gameScreenEl || !gameScreenEl.hidden);
 
     if (shouldRenderGameScreen) {
       refreshTimedUi(frameAt);
 
-      updateResponsiveLocalPrediction(deltaSeconds);
       updateRenderState(deltaSeconds, frameAt);
       updateLocalRenderState(deltaSeconds);
       updateCamera(deltaSeconds);
@@ -5575,6 +5953,26 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
+  if (isSpectatorSession() && !event.repeat) {
+    if (["Equal", "NumpadAdd"].includes(event.code)) {
+      event.preventDefault();
+      applySpectatorCameraZoom(cameraZoom * SPECTATOR_CAMERA.zoomKeyFactor);
+      return;
+    }
+
+    if (["Minus", "NumpadSubtract"].includes(event.code)) {
+      event.preventDefault();
+      applySpectatorCameraZoom(cameraZoom / SPECTATOR_CAMERA.zoomKeyFactor);
+      return;
+    }
+
+    if (["Digit0", "Numpad0"].includes(event.code)) {
+      event.preventDefault();
+      centerSpectatorCamera();
+      return;
+    }
+  }
+
   const hadKey = keys.has(event.code);
   keys.add(event.code);
   if (!hadKey) {
@@ -5639,6 +6037,16 @@ window.addEventListener("blur", () => {
 });
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
+
+  if (!isSpectatorSession()) {
+    return;
+  }
+
+  const anchorWorldPosition = updateTrackedPointerPosition(event);
+  const zoomFactor = Math.exp(-event.deltaY * SPECTATOR_CAMERA.wheelZoomStrength);
+  applySpectatorCameraZoom(cameraZoom * zoomFactor, {
+    anchorWorldPosition
+  });
 }, { passive: false });
 
 setInterval(() => {
@@ -5702,25 +6110,42 @@ const playButton = document.getElementById("play-button");
 const startBgCanvas = document.getElementById("bg-canvas") ?? document.getElementById("start-bg");
 const START_MENU_VIEWS = Object.freeze({
   home: "home",
+  spectate: "spectate",
   settings: "settings"
 });
-let activeStartMenuView = START_MENU_VIEWS.home;
+let activeStartMenuView = spectateInput.checked ? START_MENU_VIEWS.spectate : START_MENU_VIEWS.home;
+
+function getPreferredStartMenuView() {
+  return spectateInput.checked ? START_MENU_VIEWS.spectate : START_MENU_VIEWS.home;
+}
 
 function isStartMenuHidden() {
   return startMenuEl ? (startMenuEl.hidden || startMenuEl.classList.contains("hidden")) : true;
 }
 
 function setStartMenuView(view) {
-  activeStartMenuView = view === START_MENU_VIEWS.settings ? START_MENU_VIEWS.settings : START_MENU_VIEWS.home;
+  activeStartMenuView =
+    view === START_MENU_VIEWS.settings
+      ? START_MENU_VIEWS.settings
+      : view === START_MENU_VIEWS.spectate
+        ? START_MENU_VIEWS.spectate
+        : START_MENU_VIEWS.home;
+  const showHome = activeStartMenuView === START_MENU_VIEWS.home;
+  const showSpectate = activeStartMenuView === START_MENU_VIEWS.spectate;
   const showSettings = activeStartMenuView === START_MENU_VIEWS.settings;
 
-  startHomeTabButton?.classList.toggle("is-active", !showSettings);
-  startHomeTabButton?.setAttribute("aria-selected", String(!showSettings));
+  startHomeTabButton?.classList.toggle("is-active", showHome);
+  startHomeTabButton?.setAttribute("aria-selected", String(showHome));
+  startSpectateTabButton?.classList.toggle("is-active", showSpectate);
+  startSpectateTabButton?.setAttribute("aria-selected", String(showSpectate));
   startSettingsTabButton?.classList.toggle("is-active", showSettings);
   startSettingsTabButton?.setAttribute("aria-selected", String(showSettings));
 
   if (startHomePanel) {
-    startHomePanel.hidden = showSettings;
+    startHomePanel.hidden = !showHome;
+  }
+  if (startSpectatePanel) {
+    startSpectatePanel.hidden = !showSpectate;
   }
   if (startSettingsPanel) {
     startSettingsPanel.hidden = !showSettings;
@@ -5780,7 +6205,7 @@ function showStartMenu() {
     playAreaEl.classList.remove("active");
   }
   if (wasHidden) {
-    setStartMenuView(START_MENU_VIEWS.home);
+    setStartMenuView(getPreferredStartMenuView());
   }
 }
 
@@ -5797,24 +6222,34 @@ function hideStartMenu() {
   }
 }
 
-function startMenuPlay() {
+function startMenuPlay(options = {}) {
+  const { spectate = false } = options;
   const nameVal = nameInput?.value?.trim() || createCommanderName();
   if (nameInput) {
     nameInput.value = nameVal;
   }
+  spectateInput.checked = spectate;
   hideStartMenu();
   unlockAudio();
-  void startQuickJoin();
+  void startQuickJoin({ spectate });
 }
 
 if (playButton) {
   playButton.addEventListener("click", () => {
-    startMenuPlay();
+    startMenuPlay({ spectate: false });
   });
 }
 
+spectateButton?.addEventListener("click", () => {
+  startMenuPlay({ spectate: true });
+});
+
 startHomeTabButton?.addEventListener("click", () => {
   setStartMenuView(START_MENU_VIEWS.home);
+});
+
+startSpectateTabButton?.addEventListener("click", () => {
+  setStartMenuView(START_MENU_VIEWS.spectate);
 });
 
 startSettingsTabButton?.addEventListener("click", () => {
@@ -5831,7 +6266,12 @@ document.addEventListener("fullscreenchange", updateFullscreenControls);
 if (nameInput && startMenuEl) {
   nameInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
-      startMenuPlay();
+      if (activeStartMenuView === START_MENU_VIEWS.settings) {
+        return;
+      }
+      startMenuPlay({
+        spectate: activeStartMenuView === START_MENU_VIEWS.spectate
+      });
     }
   });
 }
@@ -5966,6 +6406,7 @@ updateSessionChrome = function updateSessionChromeWithStartMenu() {
 
 // Initial state: show start menu
 updateFullscreenControls();
+setStartMenuView(activeStartMenuView);
 showStartMenu();
 syncClassTabsVisibility();
 

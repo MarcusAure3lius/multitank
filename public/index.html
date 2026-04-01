@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Multitank</title>
-    <link rel="stylesheet" href="/style.css?v=0.2.5">
+    <link rel="stylesheet" href="/style.css?v=0.2.6">
   </head>
   <body>
     <div id="dev-badge" class="dev-badge" hidden>LOCAL DEV</div>
@@ -33,6 +33,16 @@
             Play
           </button>
           <button
+            id="start-spectate-tab"
+            class="start-nav-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="start-spectate-panel"
+          >
+            Spectate
+          </button>
+          <button
             id="start-settings-tab"
             class="start-nav-button"
             type="button"
@@ -44,14 +54,29 @@
           </button>
         </div>
 
-        <section id="start-home-panel" class="start-panel" role="tabpanel" aria-labelledby="start-home-tab">
+        <div class="start-header">
           <h1 class="game-title">MULTITANK</h1>
           <p class="game-subtitle">Multiplayer Arena</p>
           <div class="name-row">
             <input id="name-input" type="text" maxlength="16" placeholder="Enter your name..." autocomplete="off" spellcheck="false">
           </div>
+        </div>
+
+        <section id="start-home-panel" class="start-panel" role="tabpanel" aria-labelledby="start-home-tab">
           <button id="play-button" class="play-button">PLAY</button>
           <p class="controls-hint">WASD / Arrow Keys to move, Mouse to aim, Click to fire</p>
+        </section>
+
+        <section
+          id="start-spectate-panel"
+          class="start-panel spectate-panel"
+          role="tabpanel"
+          aria-labelledby="start-spectate-tab"
+          hidden
+        >
+          <button id="spectate-button" class="play-button spectate-button" type="button">SPECTATE</button>
+          <p class="start-mode-copy">Watch the live arena with a free camera instead of spawning a tank.</p>
+          <p class="controls-hint">WASD / Arrow Keys to fly, Mouse Wheel or +/- to zoom, 0 to recenter</p>
         </section>
 
         <section
@@ -124,6 +149,6 @@
       </div>
     </div>
 
-    <script type="module" src="/client.js?v=0.2.4"></script>
+    <script type="module" src="/client.js?v=0.2.5"></script>
   </body>
 </html>

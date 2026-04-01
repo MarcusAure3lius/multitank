@@ -13,7 +13,8 @@
   --shadow: 0 8px 40px rgba(0,0,0,0.6);
   --hud-square-size: clamp(140px, 20vmin, 190px);
   --hud-square-radius: 20px;
-  --scoreboard-square-size: clamp(120px, 15vw, 160px);
+  --scoreboard-width: clamp(140px, 16vw, 210px);
+  --scoreboard-height: clamp(180px, 34vh, 360px);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -124,9 +125,9 @@ body {
   z-index: 120;
   display: flex;
   flex-direction: column;
-  width: var(--scoreboard-square-size);
-  height: var(--scoreboard-square-size);
-  padding: 10px;
+  width: var(--scoreboard-width);
+  height: min(var(--scoreboard-height), calc(100vh - 28px));
+  padding: 8px;
   pointer-events: none;
   user-select: none;
   overflow: hidden;
@@ -156,20 +157,22 @@ body {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 4px;
   width: 100%;
   height: 100%;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .scoreboard-entry {
   display: grid;
-  grid-template-columns: 4px minmax(0, 1fr) auto;
-  gap: 6px;
+  grid-template-columns: 3px minmax(0, 1fr) auto;
+  gap: 5px;
   align-items: center;
-  padding: 6px 7px;
+  padding: 4px 6px;
   border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 12px;
+  border-radius: 10px;
   background: transparent;
 }
 
@@ -183,15 +186,16 @@ body {
 }
 
 .scoreboard-entry-team {
-  width: 4px;
+  width: 3px;
   height: 100%;
-  min-height: 22px;
+  min-height: 18px;
   border-radius: 999px;
   background: var(--team-color, rgba(255,255,255,0.4));
 }
 
 .scoreboard-entry-body {
   min-width: 0;
+  line-height: 1.05;
 }
 
 .scoreboard-entry-name,
@@ -204,7 +208,7 @@ body {
 
 .scoreboard-entry-name {
   color: #000;
-  font-size: 0.64rem;
+  font-size: 0.58rem;
   font-weight: 800;
 }
 
@@ -215,9 +219,11 @@ body {
 
 .scoreboard-entry-score {
   color: #000;
-  font-size: 0.78rem;
+  font-size: 0.7rem;
   font-weight: 900;
+  line-height: 1;
   letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── START SCREEN ── */
@@ -246,7 +252,7 @@ body {
   border: 1px solid rgba(0,229,255,0.2);
   border-radius: 24px;
   box-shadow: var(--shadow), 0 0 60px rgba(0,229,255,0.08);
-  width: min(460px, calc(100vw - 32px));
+  width: min(540px, calc(100vw - 32px));
   min-width: 0;
 }
 
@@ -299,9 +305,20 @@ body {
   display: none;
 }
 
+.start-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+}
+
 .settings-panel {
   align-items: stretch;
   gap: 16px;
+}
+
+.spectate-panel {
+  align-items: stretch;
 }
 
 .settings-heading {
@@ -368,6 +385,13 @@ body {
   width: 100%;
 }
 
+.start-mode-copy {
+  color: var(--muted);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
 .name-row input {
   width: 100%;
   padding: 14px 20px;
@@ -412,6 +436,16 @@ body {
   box-shadow: 0 8px 30px rgba(0,229,255,0.5);
 }
 
+.spectate-button {
+  color: #111827;
+  background: linear-gradient(135deg, #ffd166, #ff9f43);
+  box-shadow: 0 4px 20px rgba(255,159,67,0.35);
+}
+
+.spectate-button:hover {
+  box-shadow: 0 8px 30px rgba(255,159,67,0.42);
+}
+
 .play-button:active {
   transform: translateY(0);
 }
@@ -420,6 +454,7 @@ body {
   color: var(--muted);
   font-size: 0.82rem;
   text-align: center;
+  line-height: 1.5;
 }
 
 /* ── GAME SCREEN ── */
@@ -507,18 +542,18 @@ body {
   }
 
   .scoreboard-panel {
-    width: clamp(104px, 26vmin, 132px);
-    height: clamp(104px, 26vmin, 132px);
-    padding: 8px;
+    width: clamp(112px, 30vmin, 148px);
+    height: min(clamp(150px, 42vmin, 220px), calc(100vh - 28px));
+    padding: 7px;
   }
 
   .scoreboard {
-    gap: 4px;
+    gap: 3px;
   }
 
   .scoreboard-entry {
-    padding: 5px 6px;
-    gap: 5px;
+    padding: 4px 5px;
+    gap: 4px;
   }
 
   .start-card {

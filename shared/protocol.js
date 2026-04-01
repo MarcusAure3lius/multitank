@@ -258,36 +258,64 @@ export const GAME_CONFIG = Object.freeze({
         critChance: 0.1,
         critMultiplier: 1.35,
         sizeMultiplier: 1,
+        maxHealthMultiplier: 1,
+        movementSpeedMultiplier: 1,
+        reloadTimeMultiplier: 1,
+        visionMultiplier: 1,
+        barrelLengthMultiplier: 1,
+        turretScale: 1,
+        bodyStyle: "round",
         statusEffect: STATUS_EFFECTS.NONE,
         statusChance: 0,
         statusDurationMs: 0
       }),
       sniper: Object.freeze({
-        damageMultiplier: 1,
+        damageMultiplier: 1.2,
         armorMultiplier: 1,
         critChance: 0.1,
         critMultiplier: 1.35,
-        sizeMultiplier: 1.25,
+        sizeMultiplier: 1,
+        maxHealthMultiplier: 1,
+        movementSpeedMultiplier: 1,
+        reloadTimeMultiplier: 1.25,
+        visionMultiplier: 1.25,
+        barrelLengthMultiplier: 1.5,
+        turretScale: 1.05,
+        bodyStyle: "round",
         statusEffect: STATUS_EFFECTS.NONE,
         statusChance: 0,
         statusDurationMs: 0
       }),
       tank: Object.freeze({
-        damageMultiplier: 1,
+        damageMultiplier: 1.6,
         armorMultiplier: 1,
         critChance: 0.1,
         critMultiplier: 1.35,
         sizeMultiplier: 1.1,
+        maxHealthMultiplier: 2,
+        movementSpeedMultiplier: 1.25,
+        reloadTimeMultiplier: 1,
+        visionMultiplier: 1,
+        barrelLengthMultiplier: 1.08,
+        turretScale: 1.5,
+        bodyStyle: "rectangle",
         statusEffect: STATUS_EFFECTS.NONE,
         statusChance: 0,
         statusDurationMs: 0
       }),
       heavy: Object.freeze({
-        damageMultiplier: 1,
+        damageMultiplier: 1.05,
         armorMultiplier: 1,
         critChance: 0.1,
         critMultiplier: 1.35,
         sizeMultiplier: 1,
+        maxHealthMultiplier: 2,
+        movementSpeedMultiplier: 0.8,
+        reloadTimeMultiplier: 0.9,
+        visionMultiplier: 1,
+        barrelLengthMultiplier: 1,
+        turretScale: 1.08,
+        bodyStyle: "round",
         statusEffect: STATUS_EFFECTS.NONE,
         statusChance: 0,
         statusDurationMs: 0
@@ -332,10 +360,10 @@ export const GAME_CONFIG = Object.freeze({
       })
     ]),
     classes: Object.freeze([
-      Object.freeze({ id: "basic", name: "Basic", summary: "Starter placeholder class" }),
-      Object.freeze({ id: "sniper", name: "Sniper", summary: "Long-range placeholder class" }),
-      Object.freeze({ id: "tank", name: "Tank", summary: "Frontline placeholder class" }),
-      Object.freeze({ id: "heavy", name: "Heavy", summary: "High-mass placeholder class" })
+      Object.freeze({ id: "basic", name: "Basic", summary: "Balanced starter loadout" }),
+      Object.freeze({ id: "sniper", name: "Sniper", summary: "25% more vision, longer barrel, slower fire, heavier hits" }),
+      Object.freeze({ id: "tank", name: "Tank", summary: "Fast bruiser with a large hull, double health, and huge damage" }),
+      Object.freeze({ id: "heavy", name: "Heavy", summary: "Slow double-health frame with sturdier reload and damage" })
     ])
   }),
   antiCheat: Object.freeze({
@@ -590,10 +618,15 @@ export function getTankRadiusForClassId(classId) {
   return GAME_CONFIG.tank.radius * getTankScaleForClassId(classId);
 }
 
-export function getLockedCameraZoom(viewportWidth, viewportHeight) {
+export function getLockedCameraZoom(viewportWidth, viewportHeight, classId = null) {
   const width = Math.max(1, Number(viewportWidth) || 0);
   const height = Math.max(1, Number(viewportHeight) || 0);
-  const sightRadius = Math.max(1, Number(GAME_CONFIG.camera.lockedSightRadius) || 1);
+  const visionMultiplier = Number(getLobbyClassProfile(classId)?.visionMultiplier);
+  const sightRadius = Math.max(
+    1,
+    (Number(GAME_CONFIG.camera.lockedSightRadius) || 1) *
+      (Number.isFinite(visionMultiplier) && visionMultiplier > 0 ? visionMultiplier : 1)
+  );
   return Math.max(1, Math.hypot(width, height) / (sightRadius * 2));
 }
 

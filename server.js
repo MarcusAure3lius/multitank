@@ -382,6 +382,15 @@ function getCombatClassProfile(classId) {
   };
 }
 
+function getCombatProfileMultiplier(classId, fieldName, fallback = 1) {
+  const value = Number(getCombatClassProfile(classId)?.[fieldName]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function getPlayerVisionRadius(player, baseRadius = GAME_CONFIG.visibility.playerVisionRadius) {
+  return Math.max(1, baseRadius * getCombatProfileMultiplier(player?.classId, "visionMultiplier", 1));
+}
+
 function getPlayerTankRadius(player) {
   return player?.isBot ? GAME_CONFIG.tank.radius : getTankRadiusForClassId(player?.classId);
 }
@@ -427,11 +436,15 @@ function getPlayerStatValue(player, statName) {
 
 function getPlayerMaxHitPoints(player) {
   const bonusLevels = getPlayerStatValue(player, "maxHealth");
+  const classHealthMultiplier = getCombatProfileMultiplier(player?.classId, "maxHealthMultiplier", 1);
   const specializationBonus =
     player?.basicSpecializationChoice === BASIC_CLASS_SPECIALIZATIONS.EXTRA_HP
       ? GAME_CONFIG.basicSpecialization.extraHpBonus
       : 0;
-  return Math.max(1, Math.round(GAME_CONFIG.tank.hitPoints * (1 + bonusLevels * 0.12)) + specializationBonus);
+  return Math.max(
+    1,
+    Math.round(GAME_CONFIG.tank.hitPoints * classHealthMultiplier * (1 + bonusLevels * 0.12)) + specializationBonus
+  );
 }
 
 function hasActiveShield(player, now = Date.now()) {
@@ -3068,6 +3081,9 @@ function syncPlayerCombatProfile(player, now) {
   existing.statusEffect = existing.stunUntil > now ? STATUS_EFFECTS.STUN : STATUS_EFFECTS.NONE;
   existing.stunned = existing.stunUntil > now;
   player.combat = existing;
+  if (Number.isFinite(Number(player?.hp))) {
+    player.hp = Math.min(Number(player.hp), getPlayerMaxHitPoints(player));
+  }
 }
 
 function pruneRecentAttackers(player, now) {
@@ -3357,14 +3373,15 @@ function createReplicationSnapshot(kind, entity, viewer = null) {
   };
 }
 
-function canViewerSeePosition(room, viewer, x, y, radius = 0, maxDistance = GAME_CONFIG.visibility.playerVisionRadius) {
+function canViewerSeePosition(room, viewer, x, y, radius = 0, maxDistance = undefined) {
   if (!viewer || viewer.isSpectator) {
     return true;
   }
 
+  const effectiveMaxDistance = Number.isFinite(maxDistance) ? maxDistance : getPlayerVisionRadius(viewer);
   const dx = viewer.x - x;
   const dy = viewer.y - y;
-  if (dx * dx + dy * dy > maxDistance * maxDistance) {
+  if (dx * dx + dy * dy > effectiveMaxDistance * effectiveMaxDistance) {
     return false;
   }
 
@@ -3439,7 +3456,7 @@ function getVisiblePlayersForViewer(room, viewer) {
     interestIndex.playerCells,
     viewer.x,
     viewer.y,
-    GAME_CONFIG.visibility.playerVisionRadius
+    getPlayerVisionRadius(viewer)
   );
   const candidates = new Map([[viewer.id, viewer]]);
 
@@ -3483,7 +3500,7 @@ function canViewerSeeBullet(room, viewer, bullet) {
     bullet.x,
     bullet.y,
     GAME_CONFIG.bullet.radius,
-    GAME_CONFIG.visibility.bulletVisionRadius
+    getPlayerVisionRadius(viewer, GAME_CONFIG.visibility.bulletVisionRadius)
   );
 }
 
@@ -3497,7 +3514,7 @@ function getVisibleBulletsForViewer(room, viewer) {
     interestIndex.bulletCells,
     viewer.x,
     viewer.y,
-    Math.max(GAME_CONFIG.visibility.bulletVisionRadius, GAME_CONFIG.replication.bulletInterestRadius)
+    Math.max(getPlayerVisionRadius(viewer, GAME_CONFIG.visibility.bulletVisionRadius), GAME_CONFIG.replication.bulletInterestRadius)
   );
   const candidates = new Map();
 
@@ -3536,7 +3553,7 @@ function canViewerSeeShape(room, viewer, shape) {
     shape.x,
     shape.y,
     radius,
-    GAME_CONFIG.visibility.playerVisionRadius + radius
+    getPlayerVisionRadius(viewer) + radius
   );
 }
 
@@ -3550,7 +3567,7 @@ function getVisibleShapesForViewer(room, viewer) {
     interestIndex.shapeCells,
     viewer.x,
     viewer.y,
-    GAME_CONFIG.visibility.playerVisionRadius + 96
+    getPlayerVisionRadius(viewer) + 96
   );
   const candidates = new Map();
 
@@ -11380,6 +11397,7 @@ function resolvePendingShots(room, now) {
     const baseBulletRadius = shotClassDef.bulletRadius ?? GAME_CONFIG.bullet.radius;
     const shotBarrels = shotClassDef.barrels ?? [{ x: 40, y: 0, w: 40, h: 14 }];
     const tankRadius = getPlayerTankRadius(player);
+    const barrelLengthMultiplier = getCombatProfileMultiplier(player.classId, "barrelLengthMultiplier", 1);
 
     for (const barrel of shotBarrels) {
       const barrelAngle = barrel.autoRotate
@@ -11388,12 +11406,16 @@ function resolvePendingShots(room, now) {
       const rightX = -Math.sin(barrelAngle);
       const rightY = Math.cos(barrelAngle);
       const lateralOffset = barrel.y ?? 0;
+      const extraForwardLength =
+        (barrel.x ?? 0) > 0
+          ? Math.max(0, (barrel.w ?? 0) * barrelLengthMultiplier - (barrel.w ?? 0))
+          : 0;
       const bulletId = `${room.id}-${room.nextBulletId++}`;
       const bullet = {
         id: bulletId,
         ownerId: player.id,
-        x: shooterState.x + Math.cos(barrelAngle) * (tankRadius + 8) + rightX * lateralOffset,
-        y: shooterState.y + Math.sin(barrelAngle) * (tankRadius + 8) + rightY * lateralOffset,
+        x: shooterState.x + Math.cos(barrelAngle) * (tankRadius + 8 + extraForwardLength) + rightX * lateralOffset,
+        y: shooterState.y + Math.sin(barrelAngle) * (tankRadius + 8 + extraForwardLength) + rightY * lateralOffset,
         angle: barrelAngle,
         speed: baseBulletSpeed,
         damage: baseBulletDamage,
@@ -11475,7 +11497,11 @@ function updatePlayer(room, player, deltaSeconds, now) {
     const normalizedMoveX = moveMagnitude > 0 ? moveX / moveMagnitude : 0;
     const normalizedMoveY = moveMagnitude > 0 ? moveY / moveMagnitude : 0;
     const moveSpeedStat = player.stats?.movementSpeed ?? 0;
-    const moveSpeed = moveMagnitude > 0 ? GAME_CONFIG.tank.speed * (1 + moveSpeedStat * 0.07) : 0;
+    const classMoveSpeedMultiplier = getCombatProfileMultiplier(player.classId, "movementSpeedMultiplier", 1);
+    const moveSpeed =
+      moveMagnitude > 0
+        ? GAME_CONFIG.tank.speed * classMoveSpeedMultiplier * (1 + moveSpeedStat * 0.07)
+        : 0;
 
     if (moveMagnitude > 0) {
       player.angle = Math.atan2(normalizedMoveY, normalizedMoveX);
@@ -11494,7 +11520,8 @@ function updatePlayer(room, player, deltaSeconds, now) {
     const classDef = CLASS_TREE[player.tankClassId] ?? CLASS_TREE.basic;
     const reloadStat = player.stats?.reload ?? 0;
     const classReloadMs = classDef.reloadMs ?? GAME_CONFIG.tank.shootCooldownMs;
-    const effectiveReloadMs = Math.max(50, classReloadMs * (1 - reloadStat * 0.065));
+    const classReloadTimeMultiplier = getCombatProfileMultiplier(player.classId, "reloadTimeMultiplier", 1);
+    const effectiveReloadMs = Math.max(50, classReloadMs * classReloadTimeMultiplier * (1 - reloadStat * 0.065));
     if (fireContext.fireTime - player.lastShotAt >= effectiveReloadMs) {
       player.lastShotAt = fireContext.fireTime;
       room.pendingShots.push({
