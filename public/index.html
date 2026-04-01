@@ -8,9 +8,13 @@
   </head>
   <body>
     <div id="dev-badge" class="dev-badge" hidden>LOCAL DEV</div>
-    <aside id="class-tabs-panel" class="class-tabs-panel" aria-label="Tank class selection">
+    <aside id="class-tabs-panel" class="hud-panel class-tabs-panel" aria-label="Tank class selection">
       <div class="class-tabs-title">Class</div>
       <div id="class-tabs" class="class-tabs" role="tablist" aria-label="Tank classes"></div>
+    </aside>
+    <aside id="scoreboard-panel" class="hud-panel scoreboard-panel" aria-label="Scoreboard" hidden>
+      <div class="hud-panel-title">Scoreboard</div>
+      <ul id="scoreboard" class="scoreboard" aria-live="polite"></ul>
     </aside>
 
     <!-- START SCREEN -->
@@ -87,7 +91,6 @@
       <p id="player-label"></p>
       <p id="profile-label"></p>
       <p id="round-label"></p>
-      <ul id="scoreboard"></ul>
       <ul id="kill-feed"></ul>
       <form id="join-form">
         <button id="join-match-button" type="submit"></button>

@@ -2037,16 +2037,54 @@ function rememberSafePlayerState(player) {
   };
 }
 
-function restoreLastSafePlayerState(player) {
-  const safeState = player?.antiCheat?.lastSafeState;
-  if (!safeState) {
+function isRestorablePlayerState(room, player, state) {
+  if (
+    !state ||
+    !Number.isFinite(Number(state.x)) ||
+    !Number.isFinite(Number(state.y)) ||
+    !Number.isFinite(Number(state.angle)) ||
+    !Number.isFinite(Number(state.turretAngle))
+  ) {
+    return false;
+  }
+
+  const x = Number(state.x);
+  const y = Number(state.y);
+  if (
+    x < GAME_CONFIG.world.padding ||
+    x > GAME_CONFIG.world.width - GAME_CONFIG.world.padding ||
+    y < GAME_CONFIG.world.padding ||
+    y > GAME_CONFIG.world.height - GAME_CONFIG.world.padding
+  ) {
+    return false;
+  }
+
+  return !collidesWithObstacle(x, y, getPlayerTankRadius(player), getRoomMapLayout(room));
+}
+
+function restorePlayerState(player, state) {
+  if (!player || !state) {
     return;
   }
 
-  player.x = safeState.x;
-  player.y = safeState.y;
-  player.angle = safeState.angle;
-  player.turretAngle = safeState.turretAngle;
+  player.x = Number(state.x);
+  player.y = Number(state.y);
+  player.angle = Number(state.angle);
+  player.turretAngle = Number(state.turretAngle);
+}
+
+function restoreLastSafePlayerState(room, player, fallbackState = null) {
+  if (isRestorablePlayerState(room, player, fallbackState)) {
+    restorePlayerState(player, fallbackState);
+    return;
+  }
+
+  const safeState = player?.antiCheat?.lastSafeState;
+  if (!isRestorablePlayerState(room, player, safeState)) {
+    return;
+  }
+
+  restorePlayerState(player, safeState);
 }
 
 function normalizePlayerInventory(player) {
@@ -2099,7 +2137,7 @@ function validatePlayerSimulationState(room, player, previousState, deltaSeconds
 
   if (player.isBot) {
     if (!positionIsFinite || !angleIsFinite || outOfBounds || insideObstacle) {
-      restoreLastSafePlayerState(player);
+      restoreLastSafePlayerState(room, player, previousState);
       resetBotAiState(player, now);
       return;
     }
@@ -2109,7 +2147,7 @@ function validatePlayerSimulationState(room, player, previousState, deltaSeconds
   }
 
   if (!positionIsFinite || !angleIsFinite || outOfBounds || insideObstacle) {
-    restoreLastSafePlayerState(player);
+    restoreLastSafePlayerState(room, player, previousState);
     if (player.isBot) {
       resetBotAiState(player, now);
     }
@@ -2621,6 +2659,11 @@ const SHAPE_BOUNCE = Object.freeze({
   impulseDecayPerSecond: 3.5
 });
 
+function getShapeXpReward(shapeType) {
+  const baseXp = SHAPE_XP[shapeType] ?? 10;
+  return shapeType === SHAPE_TYPES.PENTAGON || shapeType === SHAPE_TYPES.ALPHA_PENTAGON ? baseXp * 10 : baseXp;
+}
+
 function countShapesByType(room, type) {
   let count = 0;
   for (const shape of room?.shapes?.values?.() ?? []) {
@@ -2877,7 +2920,7 @@ function checkBulletShapeCollisions(room, bullet, now) {
       // Award XP/score to shooter
       const shooter = room.players.get(bullet.ownerId);
       if (shooter) {
-        awardXpToPlayer(shooter, SHAPE_XP[shape.type] ?? 10, room);
+        awardXpToPlayer(shooter, getShapeXpReward(shape.type), room);
         shooter.score += SHAPE_SCORE[shape.type] ?? 1;
       }
       room.shapes.delete(shape.id);

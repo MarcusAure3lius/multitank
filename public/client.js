@@ -45,6 +45,7 @@ const roomLabelElement = document.getElementById("room-label");
 const playerLabelElement = document.getElementById("player-label");
 const profileLabelElement = document.getElementById("profile-label");
 const roundLabelElement = document.getElementById("round-label");
+const scoreboardPanelElement = document.getElementById("scoreboard-panel");
 const scoreboardElement = document.getElementById("scoreboard");
 const killFeedElement = document.getElementById("kill-feed");
 const joinForm = document.getElementById("join-form");
@@ -101,6 +102,11 @@ const NETWORK_RENDER = Object.freeze({
   snapDistance: 120,
   remoteSmoothing: 0.52,
   clockSmoothing: 0.18
+});
+
+const LOCAL_PROJECTILE_HANDOFF = Object.freeze({
+  maxMatchDistance: 160,
+  settleRate: 18
 });
 
 const NETWORK_RECOVERY = Object.freeze({
@@ -213,6 +219,7 @@ let clientSimulationTick = 0;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
 let serverTimeOffset = 0;
+let serverWallTimeOffset = 0;
 let lastResyncRequestAt = 0;
 let lastStallWarningAt = 0;
 let latestLatencyMs = 0;
@@ -243,6 +250,7 @@ let lastScoreboardRenderKey = "";
 let lastResultsRenderKey = "";
 let lastDiagnosticBannerText = "";
 let lastRoomBrowserRenderKey = "";
+let lastTimedUiRefreshAt = 0;
 const assetState = {
   manifest: null,
   images: new Map(),
@@ -380,21 +388,100 @@ function buildLeaderboardRenderKey(leaderboard = latestLeaderboard) {
   ).join("|");
 }
 
+function buildScoreboardStatusText(player) {
+  const states = [];
+  if (player.ready) {
+    states.push("ready");
+  }
+  if (player.afk) {
+    states.push("afk");
+  }
+  if (player.slotReserved) {
+    states.push("reserved");
+  }
+  if (player.queuedForSlot) {
+    states.push("queued");
+  }
+  if (player.connected === false) {
+    states.push("dc");
+  }
+  return states.join(" / ");
+}
+
+function createScoreboardEntry(player) {
+  const item = document.createElement("li");
+  item.className = "scoreboard-entry";
+  if (player.id === localPlayerId) {
+    item.classList.add("is-local");
+  }
+  if (player.connected === false) {
+    item.classList.add("is-offline");
+  }
+
+  const teamAccent = document.createElement("span");
+  teamAccent.className = "scoreboard-entry-team";
+  teamAccent.style.setProperty("--team-color", getTeamConfig(player.teamId)?.color ?? "#7f8aa5");
+
+  const body = document.createElement("div");
+  body.className = "scoreboard-entry-body";
+
+  const name = document.createElement("div");
+  name.className = "scoreboard-entry-name";
+  name.textContent =
+    `${player.name ?? "?"}` +
+    `${player.isBot ? " [BOT]" : ""}` +
+    `${player.isSpectator ? " [SPEC]" : ""}`;
+
+  const meta = document.createElement("div");
+  meta.className = "scoreboard-entry-meta";
+  meta.textContent = `${getTeamName(player.teamId)} / ${getLobbyClassName(player.classId)}`;
+
+  const stats = document.createElement("div");
+  stats.className = "scoreboard-entry-stats";
+  const statusText = buildScoreboardStatusText(player);
+  stats.textContent =
+    `A ${player.assists ?? 0} / D ${player.deaths ?? 0} | ${player.credits ?? 0}cr` +
+    `${statusText ? ` | ${statusText}` : ""}`;
+
+  body.append(name, meta, stats);
+
+  const score = document.createElement("div");
+  score.className = "scoreboard-entry-score";
+  score.textContent = `${player.score ?? 0}`;
+
+  item.append(teamAccent, body, score);
+  return item;
+}
+
 function renderScoreboard(leaderboard = latestLeaderboard) {
+  if (!scoreboardElement) {
+    return;
+  }
+
   const resolvedLeaderboard = Array.isArray(leaderboard) ? leaderboard : [];
+  const shouldShow = Boolean(currentRoomId && resolvedLeaderboard.length > 0);
+  if (scoreboardPanelElement) {
+    scoreboardPanelElement.hidden = !shouldShow;
+  }
+  if (!shouldShow) {
+    if (lastScoreboardRenderKey) {
+      lastScoreboardRenderKey = "";
+      scoreboardElement.replaceChildren();
+    }
+    return;
+  }
+
   const renderKey = buildLeaderboardRenderKey(resolvedLeaderboard);
   if (renderKey === lastScoreboardRenderKey) {
     return;
   }
 
   lastScoreboardRenderKey = renderKey;
-  scoreboardElement.innerHTML = "";
-
+  const fragment = document.createDocumentFragment();
   for (const player of resolvedLeaderboard) {
-    const item = document.createElement("li");
-    item.innerHTML = `<strong>${player.name}${player.isBot ? " [BOT]" : ""}${player.isSpectator ? " [SPEC]" : ""}</strong><span>${getTeamName(player.teamId)} / ${getLobbyClassName(player.classId)} | ${player.score} / ${player.assists ?? 0} / ${player.deaths} | ${player.credits}cr${player.ready ? " / ready" : ""}${player.afk ? " / afk" : ""}${player.slotReserved ? " / reserved" : ""}${player.queuedForSlot ? " / queued" : ""}${player.connected ? "" : " / dc"}</span>`;
-    scoreboardElement.append(item);
+    fragment.append(createScoreboardEntry(player));
   }
+  scoreboardElement.replaceChildren(fragment);
 }
 
 function buildResultsRenderKey() {
@@ -1003,9 +1090,10 @@ function populateClassTabs() {
   refreshClassTabs();
 }
 
-function getTopRightHudInset() {
-  const panelHeight = Math.max(0, Math.ceil(classTabsPanelElement?.getBoundingClientRect?.().height ?? 0));
-  return 14 + panelHeight + 10;
+function getTopLeftHudInset() {
+  const classTabsBottom = Math.max(0, Math.ceil(classTabsPanelElement?.getBoundingClientRect?.().bottom ?? 0));
+  const devBadgeBottom = devBadgeElement?.hidden ? 0 : Math.max(0, Math.ceil(devBadgeElement?.getBoundingClientRect?.().bottom ?? 0));
+  return Math.max(14, classTabsBottom + 10, devBadgeBottom + 10);
 }
 
 function createRoomCode() {
@@ -1401,9 +1489,26 @@ function syncServerClock(serverTime, frameAt = performance.now()) {
   }
 
   const targetOffset = serverTime - frameAt;
+  const targetWallOffset = serverTime - Date.now();
   serverTimeOffset = lastAppliedSnapshotSeq === 0
     ? targetOffset
     : lerp(serverTimeOffset, targetOffset, NETWORK_RENDER.clockSmoothing);
+  serverWallTimeOffset = lastAppliedSnapshotSeq === 0
+    ? targetWallOffset
+    : lerp(serverWallTimeOffset, targetWallOffset, NETWORK_RENDER.clockSmoothing);
+}
+
+function estimateClientWallTimeForServerTime(serverTime, now = Date.now()) {
+  if (!Number.isFinite(serverTime)) {
+    return Math.max(0, now - getRemoteInterpolationBackTimeMs());
+  }
+
+  const estimatedClientTime = serverTime - serverWallTimeOffset;
+  if (!Number.isFinite(estimatedClientTime)) {
+    return Math.max(0, now - getRemoteInterpolationBackTimeMs());
+  }
+
+  return clamp(estimatedClientTime, 0, now);
 }
 
 function interpolateAngle(start, end, amount) {
@@ -1464,6 +1569,19 @@ function clampCorrectionOffset(x, y, maxDistance = LOCAL_PREDICTION.maxCorrectio
     x: x * scale,
     y: y * scale
   };
+}
+
+function simulatePredictedMovementForDuration(state, input, durationMs, predictionScale = 1) {
+  if (!state || !input) {
+    return state;
+  }
+
+  const simulatedDurationSeconds = Math.max(0, durationMs) * predictionScale / 1000;
+  if (simulatedDurationSeconds <= 0.0005) {
+    return state;
+  }
+
+  return simulateTankMovement(state, input, simulatedDurationSeconds);
 }
 
 function getTurretVisualSmoothing(deltaSeconds) {
@@ -2601,6 +2719,7 @@ function spawnPredictedProjectile(localPlayer, inputFrame) {
       x: muzzleX,
       y: muzzleY,
       angle: barrelAngle,
+      speed: projectileSpeed,
       radius: projectileRadius,
       renderX: muzzleX,
       renderY: muzzleY,
@@ -2616,28 +2735,63 @@ function spawnPredictedProjectile(localPlayer, inputFrame) {
   triggerShotRecoil(localPlayer, now, { predicted: true });
 }
 
-function reconcilePredictedProjectile(authoritativeBullet) {
+function takePredictedProjectileMatch(authoritativeBullet) {
   if (!authoritativeBullet || authoritativeBullet.ownerId !== localPlayerId || predictedProjectiles.size === 0) {
-    return;
+    return null;
   }
 
   let bestMatchId = null;
+  let bestMatch = null;
   let bestDistanceSquared = Infinity;
 
   for (const projectile of predictedProjectiles.values()) {
-    const dx = projectile.x - authoritativeBullet.x;
-    const dy = projectile.y - authoritativeBullet.y;
+    const projectileX = projectile.renderX ?? projectile.x;
+    const projectileY = projectile.renderY ?? projectile.y;
+    const dx = projectileX - authoritativeBullet.x;
+    const dy = projectileY - authoritativeBullet.y;
     const distanceSquared = dx * dx + dy * dy;
 
     if (distanceSquared < bestDistanceSquared) {
       bestDistanceSquared = distanceSquared;
       bestMatchId = projectile.id;
+      bestMatch = projectile;
     }
   }
 
-  if (bestMatchId && bestDistanceSquared <= 140 * 140) {
+  const maxMatchDistance =
+    LOCAL_PROJECTILE_HANDOFF.maxMatchDistance * LOCAL_PROJECTILE_HANDOFF.maxMatchDistance;
+  if (bestMatchId && bestDistanceSquared <= maxMatchDistance) {
     predictedProjectiles.delete(bestMatchId);
+    return bestMatch;
   }
+
+  return null;
+}
+
+function bridgeAuthoritativeBulletToPrediction(current, authoritativeBullet, predictedProjectile) {
+  if (!current || !authoritativeBullet || !predictedProjectile) {
+    return;
+  }
+
+  const predictedX = predictedProjectile.renderX ?? predictedProjectile.x ?? authoritativeBullet.x ?? 0;
+  const predictedY = predictedProjectile.renderY ?? predictedProjectile.y ?? authoritativeBullet.y ?? 0;
+  const predictedAngle = predictedProjectile.renderAngle ?? predictedProjectile.angle ?? authoritativeBullet.angle ?? 0;
+
+  current.renderX = predictedX;
+  current.renderY = predictedY;
+  current.previousRenderX = predictedProjectile.previousRenderX ?? predictedX;
+  current.previousRenderY = predictedProjectile.previousRenderY ?? predictedY;
+  current.renderAngle = predictedAngle;
+  current.renderSpeed =
+    predictedProjectile.renderSpeed ??
+    predictedProjectile.speed ??
+    authoritativeBullet.speed ??
+    GAME_CONFIG.bullet.speed;
+  current.displayX = predictedX;
+  current.displayY = predictedY;
+  current.displayAngle = predictedAngle;
+  current.handoffOffsetX = predictedX - (authoritativeBullet.x ?? predictedX);
+  current.handoffOffsetY = predictedY - (authoritativeBullet.y ?? predictedY);
 }
 
 function createInputFrame() {
@@ -2685,6 +2839,7 @@ function updateEntityMap(store, entities, defaults = {}, options = {}) {
 
   for (const entity of entities) {
     activeIds.add(entity.id);
+    const isNewEntity = !store.has(entity.id);
     const current = store.get(entity.id) ?? {
       ...defaults,
       renderX: entity.x,
@@ -2708,6 +2863,10 @@ function updateEntityMap(store, entities, defaults = {}, options = {}) {
     }
 
     Object.assign(current, entity);
+    if (isNewEntity && kind === REPLICATION_KINDS.BULLET) {
+      const predictedProjectile = takePredictedProjectileMatch(entity);
+      bridgeAuthoritativeBulletToPrediction(current, entity, predictedProjectile);
+    }
     recordNetworkSample(current, kind, serverTime);
     store.set(entity.id, current);
   }
@@ -2725,6 +2884,7 @@ function upsertEntity(store, entity, defaults = {}, options = {}) {
   }
 
   const { kind = "player", serverTime = NaN } = options;
+  const isNewEntity = !store.has(entity.id);
   const current = store.get(entity.id) ?? {
     ...defaults,
     renderX: entity.x ?? 0,
@@ -2758,6 +2918,10 @@ function upsertEntity(store, entity, defaults = {}, options = {}) {
   }
 
   Object.assign(current, entity);
+  if (isNewEntity && kind === REPLICATION_KINDS.BULLET) {
+    const predictedProjectile = takePredictedProjectileMatch(entity);
+    bridgeAuthoritativeBulletToPrediction(current, entity, predictedProjectile);
+  }
   recordNetworkSample(current, kind, serverTime);
   store.set(entity.id, current);
 }
@@ -2800,7 +2964,6 @@ function applyReplication(replication, serverTime, previousSnapshotSeq) {
     }
 
     if (record.kind === REPLICATION_KINDS.BULLET) {
-      reconcilePredictedProjectile(record.state);
       fullBulletIds?.add(record.id);
       upsertEntity(bullets, record.state, {}, { kind: REPLICATION_KINDS.BULLET, serverTime });
       continue;
@@ -2836,7 +2999,6 @@ function applyReplication(replication, serverTime, previousSnapshotSeq) {
     if (record.kind === REPLICATION_KINDS.BULLET) {
       fullBulletIds?.add(record.id);
       const previous = bullets.get(record.id) ?? {};
-      reconcilePredictedProjectile({ ...previous, ...record.state, id: record.id });
       upsertEntity(
         bullets,
         { ...previous, ...record.state, id: record.id },
@@ -2921,7 +3083,12 @@ function dropAcknowledgedPendingInputs(lastProcessedInputSeq, lastProcessedInput
   }
 }
 
-function computePredictedLocalState(localPlayer, lastProcessedInputSeq, lastProcessedInputClientSentAt) {
+function computePredictedLocalState(
+  localPlayer,
+  lastProcessedInputSeq,
+  lastProcessedInputClientSentAt,
+  authoritativeClientTime = Date.now()
+) {
   dropAcknowledgedPendingInputs(lastProcessedInputSeq, lastProcessedInputClientSentAt);
 
   let predicted = {
@@ -2931,20 +3098,48 @@ function computePredictedLocalState(localPlayer, lastProcessedInputSeq, lastProc
     turretAngle: localPlayer.turretAngle
   };
 
-  const replayGapMs = getStatePacketAgeMs();
+  const now = Date.now();
+  const replayGapMs = getStatePacketAgeMs(now);
   const predictionScale = getPredictionScaleForGapMs(replayGapMs);
   const replayCutoffMs =
     replayGapMs >= LOCAL_PREDICTION.stallSoftLimitMs
-      ? Date.now() - LOCAL_PREDICTION.maxReplayWindowMs
+      ? now - LOCAL_PREDICTION.maxReplayWindowMs
       : -Infinity;
+  const replayStartMs = Math.min(
+    now,
+    Math.max(lastProcessedInputClientSentAt, authoritativeClientTime, replayCutoffMs)
+  );
+  let activeInput = null;
+  let segmentStartMs = replayStartMs;
 
   for (const input of pendingInputs) {
     if (input.clientSentAt < replayCutoffMs) {
       continue;
     }
 
-    predicted = simulateTankMovement(predicted, input, CLIENT_TICK.fixedDeltaSeconds * predictionScale);
+    if (input.clientSentAt <= replayStartMs) {
+      activeInput = input;
+      continue;
+    }
+
+    predicted = simulatePredictedMovementForDuration(
+      predicted,
+      activeInput,
+      input.clientSentAt - segmentStartMs,
+      predictionScale
+    );
+    activeInput = input;
+    segmentStartMs = input.clientSentAt;
   }
+
+  // Replay by elapsed time instead of packet count so redundant or batched input
+  // packets do not make the local tank jump ahead and then get tugged backward.
+  predicted = simulatePredictedMovementForDuration(
+    predicted,
+    activeInput,
+    now - segmentStartMs,
+    predictionScale
+  );
 
   return predicted;
 }
@@ -2953,14 +3148,16 @@ function simulatePredictedProjectiles(deltaSeconds) {
   const now = performance.now();
 
   for (const [projectileId, projectile] of predictedProjectiles.entries()) {
+    const projectileSpeed = projectile.speed ?? GAME_CONFIG.bullet.speed;
+    const projectileRadius = projectile.radius ?? GAME_CONFIG.bullet.radius;
     projectile.previousRenderX = projectile.renderX ?? projectile.x;
     projectile.previousRenderY = projectile.renderY ?? projectile.y;
-    projectile.x += Math.cos(projectile.angle) * GAME_CONFIG.bullet.speed * deltaSeconds;
-    projectile.y += Math.sin(projectile.angle) * GAME_CONFIG.bullet.speed * deltaSeconds;
+    projectile.x += Math.cos(projectile.angle) * projectileSpeed * deltaSeconds;
+    projectile.y += Math.sin(projectile.angle) * projectileSpeed * deltaSeconds;
     projectile.renderX = projectile.x;
     projectile.renderY = projectile.y;
     projectile.renderAngle = projectile.angle;
-    projectile.renderSpeed = GAME_CONFIG.bullet.speed;
+    projectile.renderSpeed = projectileSpeed;
 
     if (
       now >= projectile.expiresAt ||
@@ -2968,8 +3165,8 @@ function simulatePredictedProjectiles(deltaSeconds) {
       projectile.x > GAME_CONFIG.world.width ||
       projectile.y < 0 ||
       projectile.y > GAME_CONFIG.world.height ||
-      collidesWithObstacle(projectile.x, projectile.y, GAME_CONFIG.bullet.radius) ||
-      collidesWithBlockingShape(projectile.x, projectile.y, GAME_CONFIG.bullet.radius)
+      collidesWithObstacle(projectile.x, projectile.y, projectileRadius) ||
+      collidesWithBlockingShape(projectile.x, projectile.y, projectileRadius)
     ) {
       predictedProjectiles.delete(projectileId);
     }
@@ -3050,11 +3247,17 @@ function applyPredictionCorrection(localPlayer, correctedState) {
   }
 }
 
-function replayPendingInputs(localPlayer, lastProcessedInputSeq, lastProcessedInputClientSentAt) {
+function replayPendingInputs(
+  localPlayer,
+  lastProcessedInputSeq,
+  lastProcessedInputClientSentAt,
+  authoritativeClientTime
+) {
   const predicted = computePredictedLocalState(
     localPlayer,
     lastProcessedInputSeq,
-    lastProcessedInputClientSentAt
+    lastProcessedInputClientSentAt,
+    authoritativeClientTime
   );
 
   applyPredictionCorrection(localPlayer, predicted);
@@ -3104,10 +3307,6 @@ function applySnapshot(payload) {
       kind: "bullet",
       serverTime: payload.serverTime
     });
-
-    for (const bullet of payload.bullets ?? []) {
-      reconcilePredictedProjectile(bullet);
-    }
   }
 
   // Fallback for baseline or resync cases where shape replication was not applied.
@@ -3173,7 +3372,8 @@ function applySnapshot(payload) {
       replayPendingInputs(
         localPlayer,
         payload.you.lastProcessedInputSeq ?? 0,
-        payload.you.lastProcessedInputClientSentAt ?? 0
+        payload.you.lastProcessedInputClientSentAt ?? 0,
+        estimateClientWallTimeForServerTime(payload.serverTime)
       );
       setElementText(
         profileLabelElement,
@@ -3326,6 +3526,17 @@ function buildMatchStatusText() {
   return `${latestMatch.message}${spectatorSuffix}`;
 }
 
+function refreshTimedUi(frameAt = performance.now(), force = false) {
+  if (!force && frameAt - lastTimedUiRefreshAt < 96) {
+    return;
+  }
+
+  lastTimedUiRefreshAt = frameAt;
+  refreshDeathOverlay();
+  setElementText(matchStatusElement, buildMatchStatusText());
+  updateDiagnosticBanner();
+}
+
 function connect(options = {}) {
   const { isReconnect = false } = options;
 
@@ -3377,10 +3588,12 @@ function connect(options = {}) {
     clientSimulationTick = 0;
     lastStatePacketAt = 0;
     serverTimeOffset = 0;
+    serverWallTimeOffset = 0;
     lastStallWarningAt = 0;
     latestLatencyMs = 0;
     lastServerMessageAt = 0;
     lastRenderFrameAt = performance.now();
+    lastTimedUiRefreshAt = 0;
     localXp = 0;
     displayXp = 0;
     localLevel = 1;
@@ -3615,6 +3828,8 @@ function connect(options = {}) {
     lastStatePacketAt = 0;
     lastServerMessageAt = 0;
     serverTimeOffset = 0;
+    serverWallTimeOffset = 0;
+    lastTimedUiRefreshAt = 0;
     stateChunks.clear();
     processedEventIds.clear();
     processedEventOrder.length = 0;
@@ -3732,7 +3947,10 @@ function updateVisualAnimationState(player, fallbackMoveBlend = 0) {
 }
 
 function updateRenderState(deltaSeconds, frameAt) {
-  const smoothing = players.size > 1 ? 0.22 : 0.35;
+  const smoothing = players.size > 1
+    ? clamp(1 - Math.exp(-15 * deltaSeconds), 0.12, 0.3)
+    : clamp(1 - Math.exp(-20 * deltaSeconds), 0.18, 0.42);
+  const correctionDecay = clamp(1 - Math.exp(-8 * deltaSeconds), 0.06, 0.2);
   const renderServerTime = estimateServerTime(frameAt) - getRemoteInterpolationBackTimeMs();
 
   for (const player of players.values()) {
@@ -3757,13 +3975,13 @@ function updateRenderState(deltaSeconds, frameAt) {
         player.targetTurretAngle ?? player.turretAngle,
         smoothing
       );
-      player.correctionOffsetX = lerp(player.correctionOffsetX ?? 0, 0, 0.22);
-      player.correctionOffsetY = lerp(player.correctionOffsetY ?? 0, 0, 0.22);
-      player.correctionOffsetAngle = lerpAngle(player.correctionOffsetAngle ?? 0, 0, 0.22);
+      player.correctionOffsetX = lerp(player.correctionOffsetX ?? 0, 0, correctionDecay);
+      player.correctionOffsetY = lerp(player.correctionOffsetY ?? 0, 0, correctionDecay);
+      player.correctionOffsetAngle = lerpAngle(player.correctionOffsetAngle ?? 0, 0, correctionDecay);
       player.correctionOffsetTurretAngle = lerpAngle(
         player.correctionOffsetTurretAngle ?? 0,
         0,
-        0.22
+        correctionDecay
       );
       player.displayX = player.renderX + (player.correctionOffsetX ?? 0);
       player.displayY = player.renderY + (player.correctionOffsetY ?? 0);
@@ -3856,12 +4074,16 @@ function updateRenderState(deltaSeconds, frameAt) {
       x: bullet.x,
       y: bullet.y,
       angle: bullet.angle,
-      speed: GAME_CONFIG.bullet.speed
+      speed: bullet.speed ?? GAME_CONFIG.bullet.speed
     };
     const currentBulletX = bullet.renderX ?? bullet.x;
     const currentBulletY = bullet.renderY ?? bullet.y;
-    const dx = sample.x - currentBulletX;
-    const dy = sample.y - currentBulletY;
+    const handoffOffsetX = bullet.handoffOffsetX ?? 0;
+    const handoffOffsetY = bullet.handoffOffsetY ?? 0;
+    const targetBulletX = sample.x + handoffOffsetX;
+    const targetBulletY = sample.y + handoffOffsetY;
+    const dx = targetBulletX - currentBulletX;
+    const dy = targetBulletY - currentBulletY;
     const bulletFollowAmount = 0.82;
     const shouldSnap =
       (bullet.teleportFrames ?? 0) > 0 ||
@@ -3870,19 +4092,32 @@ function updateRenderState(deltaSeconds, frameAt) {
     bullet.previousRenderX = currentBulletX;
     bullet.previousRenderY = currentBulletY;
     if (shouldSnap) {
-      bullet.renderX = sample.x;
-      bullet.renderY = sample.y;
+      bullet.renderX = targetBulletX;
+      bullet.renderY = targetBulletY;
       bullet.renderAngle = sample.angle;
     } else {
-      bullet.renderX = lerp(currentBulletX, sample.x, bulletFollowAmount);
-      bullet.renderY = lerp(currentBulletY, sample.y, bulletFollowAmount);
+      bullet.renderX = lerp(currentBulletX, targetBulletX, bulletFollowAmount);
+      bullet.renderY = lerp(currentBulletY, targetBulletY, bulletFollowAmount);
       bullet.renderAngle = lerpAngle(bullet.renderAngle ?? bullet.angle, sample.angle, bulletFollowAmount);
     }
-    bullet.renderSpeed = sample.speed ?? GAME_CONFIG.bullet.speed;
+    bullet.renderSpeed = sample.speed ?? bullet.speed ?? GAME_CONFIG.bullet.speed;
+
+    if (handoffOffsetX !== 0 || handoffOffsetY !== 0) {
+      const handoffDecay = clamp(
+        1 - Math.exp(-LOCAL_PROJECTILE_HANDOFF.settleRate * deltaSeconds),
+        0.16,
+        0.5
+      );
+      bullet.handoffOffsetX = lerp(handoffOffsetX, 0, handoffDecay);
+      bullet.handoffOffsetY = lerp(handoffOffsetY, 0, handoffDecay);
+      if (Math.hypot(bullet.handoffOffsetX, bullet.handoffOffsetY) < 0.5) {
+        bullet.handoffOffsetX = 0;
+        bullet.handoffOffsetY = 0;
+      }
+    }
 
     bullet.teleportFrames = Math.max(0, (bullet.teleportFrames ?? 0) - 1);
   }
-  setElementText(matchStatusElement, buildMatchStatusText());
 }
 
 function drawBackground() {
@@ -4687,50 +4922,6 @@ function drawMinimap() {
   context.restore();
 }
 
-function drawCanvasLeaderboard() {
-  if (!currentRoomId || !latestLeaderboard || latestLeaderboard.length === 0) {
-    return;
-  }
-
-  const entries = latestLeaderboard.slice(0, 8);
-  const lineH = 20;
-  const padX = 14;
-  const padY = 10;
-  const panelW = 200;
-  const panelH = padY * 2 + (entries.length + 1) * lineH;
-  const panelX = canvas.width - panelW - 14;
-  const panelY = getTopRightHudInset();
-
-  context.save();
-  context.fillStyle = "rgba(0,0,0,0.55)";
-  context.beginPath();
-  context.roundRect(panelX, panelY, panelW, panelH, 8);
-  context.fill();
-
-  context.font = "bold 12px Segoe UI";
-  context.fillStyle = "#00c8dc";
-  context.textAlign = "left";
-  context.fillText("SCOREBOARD", panelX + padX, panelY + padY + 12);
-
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    const y = panelY + padY + (i + 2) * lineH;
-    const isLocal = entry.id === localPlayerId;
-    context.font = isLocal ? "bold 11px Segoe UI" : "11px Segoe UI";
-    context.fillStyle = isLocal ? "#ffd166" : (entry.connected === false ? "#666" : "#dde");
-    const teamColor = getTeamConfig(entry.teamId)?.color ?? "#888";
-    context.fillStyle = teamColor;
-    context.fillRect(panelX + padX, y - 9, 4, 12);
-    context.fillStyle = isLocal ? "#ffd166" : (entry.connected === false ? "#666" : "#dde");
-    const nameText = (entry.isBot ? "[B] " : "") + (entry.name ?? "?");
-    context.fillText(nameText.slice(0, 14), panelX + padX + 8, y);
-    context.textAlign = "right";
-    context.fillText(`${entry.score ?? 0}`, panelX + panelW - padX, y);
-    context.textAlign = "left";
-  }
-  context.restore();
-}
-
 function drawCanvasKillFeed() {
   if (killFeedEntries.length === 0) {
     return;
@@ -4738,7 +4929,7 @@ function drawCanvasKillFeed() {
 
   const now = performance.now();
   const feedX = 14;
-  let feedY = 14;
+  let feedY = getTopLeftHudInset();
   const lineH = 22;
 
   context.save();
@@ -5000,7 +5191,7 @@ function render(frameAt = performance.now()) {
     const shouldRenderGameScreen = !document.hidden && (!gameScreenEl || !gameScreenEl.hidden);
 
     if (shouldRenderGameScreen) {
-      refreshDeathOverlay();
+      refreshTimedUi(frameAt);
 
       updateRenderState(deltaSeconds, frameAt);
       updateLocalRenderState(deltaSeconds);
@@ -5054,7 +5245,6 @@ function render(frameAt = performance.now()) {
       context.restore();
 
       // Canvas HUD (drawn in screen space, not world space)
-      drawCanvasLeaderboard();
       drawCanvasKillFeed();
       drawMinimap();
       displayXp = lerp(displayXp, localXp, clamp(1 - Math.exp(-8 * deltaSeconds), 0.1, 0.5));
@@ -5072,7 +5262,7 @@ function render(frameAt = performance.now()) {
     renderLoopStopped = true;
   }
 
-  updateDiagnosticBanner();
+  refreshTimedUi(frameAt, Boolean(renderFailure));
   if (!renderLoopStopped) {
     requestAnimationFrame(render);
   }
