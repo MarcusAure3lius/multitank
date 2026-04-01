@@ -11,6 +11,7 @@ import {
   ANIMATION_POSES,
   ASSET_BUNDLE_VERSION,
   AUTO_BARREL_ROT_SPEED,
+  BASIC_CLASS_SPECIALIZATIONS,
   BOT_AI_INTENTS,
   COMBAT_EVENT_ACTIONS,
   CLASS_TREE,
@@ -379,15 +380,19 @@ function getCombatClassProfile(classId) {
 function createPlayerCombatState(player, now = Date.now()) {
   const profile = getCombatClassProfile(player?.classId);
   const stunUntil = Number.isFinite(Number(player?.combat?.stunUntil)) ? Number(player.combat.stunUntil) : 0;
+  const shieldUntil = Number.isFinite(Number(player?.combat?.shieldUntil)) ? Number(player.combat.shieldUntil) : 0;
   return {
     armorMultiplier: profile.armorMultiplier,
     damageMultiplier: profile.damageMultiplier,
     critChance: profile.critChance,
     critMultiplier: profile.critMultiplier,
     statusEffect: stunUntil > now ? STATUS_EFFECTS.STUN : STATUS_EFFECTS.NONE,
+    shielded: shieldUntil > now,
+    shieldRemainingMs: Math.max(0, shieldUntil - now),
     stunRemainingMs: Math.max(0, stunUntil - now),
     statusDurationMs: Math.max(0, stunUntil - now),
     stunned: stunUntil > now,
+    shieldUntil,
     stunUntil,
     lastDamagedAt: Number.isFinite(Number(player?.combat?.lastDamagedAt)) ? Number(player.combat.lastDamagedAt) : null,
     recentAttackers: Array.isArray(player?.combat?.recentAttackers)
@@ -413,7 +418,43 @@ function getPlayerStatValue(player, statName) {
 
 function getPlayerMaxHitPoints(player) {
   const bonusLevels = getPlayerStatValue(player, "maxHealth");
-  return Math.max(1, Math.round(GAME_CONFIG.tank.hitPoints * (1 + bonusLevels * 0.12)));
+  const specializationBonus =
+    player?.basicSpecializationChoice === BASIC_CLASS_SPECIALIZATIONS.EXTRA_HP
+      ? GAME_CONFIG.basicSpecialization.extraHpBonus
+      : 0;
+  return Math.max(1, Math.round(GAME_CONFIG.tank.hitPoints * (1 + bonusLevels * 0.12)) + specializationBonus);
+}
+
+function hasActiveShield(player, now = Date.now()) {
+  return Math.max(0, Number(player?.combat?.shieldUntil ?? 0) - now) > 0;
+}
+
+function maybeUnlockBasicSpecialization(player) {
+  if (!player || player.isBot || player.isSpectator) {
+    return;
+  }
+
+  if ((player.level ?? 1) < GAME_CONFIG.basicSpecialization.unlockLevel) {
+    return;
+  }
+
+  if (player.tankClassId !== "basic" || player.basicSpecializationChoice) {
+    return;
+  }
+
+  player.basicSpecializationPending = true;
+}
+
+function activateShieldBubble(player, now = Date.now()) {
+  if (!player) {
+    return;
+  }
+
+  const combat = player.combat ?? createPlayerCombatState(player, now);
+  combat.shieldUntil = Math.max(Number(combat.shieldUntil ?? 0), now + GAME_CONFIG.basicSpecialization.shieldDurationMs);
+  combat.shieldRemainingMs = Math.max(0, combat.shieldUntil - now);
+  combat.shielded = combat.shieldRemainingMs > 0;
+  player.combat = combat;
 }
 
 function applyPassiveRegeneration(player, deltaSeconds, now) {
@@ -1972,6 +2013,8 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     level: 1,
     statPoints: 0,
     tankClassId: 'basic',
+    basicSpecializationPending: false,
+    basicSpecializationChoice: null,
     pendingUpgrades: [],
     stats: createAllocatedStats(),
     assists: 0,
@@ -2241,6 +2284,7 @@ function createRoomEventId(room, type) {
 // ---- XP / LEVEL SYSTEM ----
 function checkLevelUp(player, room) {
   if (!player || player.level >= MAX_LEVEL) {
+    maybeUnlockBasicSpecialization(player);
     return;
   }
   while (player.level < MAX_LEVEL) {
@@ -2256,6 +2300,8 @@ function checkLevelUp(player, room) {
       player.pendingUpgrades = classDef.upgradesTo.slice();
     }
   }
+
+  maybeUnlockBasicSpecialization(player);
 
   if (player.isBot) {
     maybeAutoProgressBot(player);
@@ -2605,10 +2651,13 @@ function queueCombatStateEvent(room, payload) {
 function syncPlayerCombatProfile(player, now) {
   const profile = getCombatClassProfile(player.classId);
   const existing = player.combat ?? createPlayerCombatState(player, now);
+  const shieldUntil = Number.isFinite(Number(existing.shieldUntil)) ? Number(existing.shieldUntil) : 0;
   existing.armorMultiplier = profile.armorMultiplier;
   existing.damageMultiplier = profile.damageMultiplier;
   existing.critChance = profile.critChance;
   existing.critMultiplier = profile.critMultiplier;
+  existing.shieldRemainingMs = Math.max(0, shieldUntil > now ? shieldUntil - now : 0);
+  existing.shielded = shieldUntil > now;
   existing.stunRemainingMs = Math.max(0, existing.stunUntil > now ? existing.stunUntil - now : 0);
   existing.statusDurationMs = Math.max(0, existing.stunUntil > now ? existing.stunUntil - now : 0);
   existing.statusEffect = existing.stunUntil > now ? STATUS_EFFECTS.STUN : STATUS_EFFECTS.NONE;
@@ -8770,6 +8819,161 @@ function handleResync(socket) {
   markSocketForFullSync(socket);
 }
 
+function applyGrenadeExplosion(room, attacker, now = Date.now()) {
+  if (!room || !attacker || !attacker.alive) {
+    return;
+  }
+
+  const aimAngle = Number.isFinite(Number(attacker.input?.turretAngle))
+    ? normalizeAngle(attacker.input.turretAngle)
+    : normalizeAngle(attacker.turretAngle);
+  const throwDistance = GAME_CONFIG.basicSpecialization.grenadeRange;
+  const explosionRadius = GAME_CONFIG.basicSpecialization.grenadeRadius;
+  const explosionCenter = clampTankPosition(
+    attacker.x + Math.cos(aimAngle) * throwDistance,
+    attacker.y + Math.sin(aimAngle) * throwDistance
+  );
+
+  for (const target of room.players.values()) {
+    if (!target || !target.alive || target.isSpectator || target.id === attacker.id) {
+      continue;
+    }
+
+    if (isFriendlyCombatPair(attacker, target) || hasSpawnProtection(target, now) || hasActiveShield(target, now)) {
+      continue;
+    }
+
+    const hitDistance = explosionRadius + GAME_CONFIG.tank.radius;
+    const dx = target.x - explosionCenter.x;
+    const dy = target.y - explosionCenter.y;
+    if (dx * dx + dy * dy > hitDistance * hitDistance) {
+      continue;
+    }
+
+    const grenadeBaseDamage =
+      target.tankClassId === "basic"
+        ? Math.max(
+            GAME_CONFIG.basicSpecialization.grenadeDamage,
+            Math.round(getPlayerMaxHitPoints(target) * GAME_CONFIG.basicSpecialization.grenadeBasicDamageRatio)
+          )
+        : GAME_CONFIG.basicSpecialization.grenadeDamage;
+    const resolution = resolveCombatHit(room, attacker, target, now, grenadeBaseDamage);
+    target.hp = Math.max(0, target.hp - resolution.damage);
+
+    recordDamageContribution(target, attacker.id, resolution.damage, now);
+    syncPlayerCombatProfile(target, now);
+    target.combat.lastDamagedAt = now;
+
+    queueHealthStateEvent(room, target, -resolution.damage, now);
+    queueAnimationStateEvent(room, target, ANIMATION_ACTIONS.HIT, now);
+    queueCombatStateEvent(room, {
+      serverTime: now,
+      action: COMBAT_EVENT_ACTIONS.DAMAGE,
+      attackerId: attacker.id,
+      attackerName: attacker.name,
+      targetId: target.id,
+      targetName: target.name,
+      damage: resolution.damage,
+      hpAfter: target.hp,
+      isCritical: resolution.isCritical,
+      armorBlocked: resolution.armorBlocked,
+      statusEffect: resolution.statusEffect,
+      statusDurationMs: resolution.statusDurationMs,
+      soundCue: resolution.soundCue,
+      vfxCue: resolution.vfxCue,
+      message: `${attacker.name} grenaded ${target.name} for ${resolution.damage}`
+    });
+
+    if (resolution.statusEffect !== STATUS_EFFECTS.NONE && target.hp > 0) {
+      applyStatusEffect(room, attacker, target, resolution, now);
+    }
+
+    if (target.hp !== 0) {
+      continue;
+    }
+
+    const assistContributors = getAssistContributors(room, target, attacker.id, now);
+    target.alive = false;
+    target.deaths += 1;
+    target.respawnAt = isRoomSurvivalMode(room) ? null : now + GAME_CONFIG.respawnDelayMs;
+    target.credits += GAME_CONFIG.economy.deathCredits;
+    target.combat.stunUntil = 0;
+    target.combat.stunRemainingMs = 0;
+    target.combat.statusEffect = STATUS_EFFECTS.NONE;
+    target.combat.statusDurationMs = 0;
+    target.combat.stunned = false;
+    target.combat.shieldUntil = 0;
+    target.combat.shieldRemainingMs = 0;
+    target.combat.shielded = false;
+    queueAnimationStateEvent(room, target, ANIMATION_ACTIONS.DEATH, now);
+    queueScoreStateEvent(room, target, "death", now);
+    queueInventoryStateEvent(room, target, now);
+    updateProfileStats(target.profileId, (stats) => {
+      stats.deaths += 1;
+    });
+
+    attacker.score += 1;
+    attacker.credits += GAME_CONFIG.economy.killCredits;
+    awardXpToPlayer(attacker, 250 + (target.level ?? 1) * 25, room);
+    queueScoreStateEvent(room, attacker, "kill", now);
+    queueInventoryStateEvent(room, attacker, now);
+    updateProfileStats(attacker.profileId, (stats) => {
+      stats.kills += 1;
+    });
+
+    queueCombatStateEvent(room, {
+      serverTime: now,
+      action: COMBAT_EVENT_ACTIONS.KILL,
+      attackerId: attacker.id,
+      attackerName: attacker.name,
+      targetId: target.id,
+      targetName: target.name,
+      assistantIds: assistContributors.map((entry) => entry.attackerId),
+      assistantNames: assistContributors
+        .map((entry) => room.players.get(entry.attackerId)?.name ?? null)
+        .filter(Boolean),
+      damage: resolution.damage,
+      hpAfter: target.hp,
+      isCritical: resolution.isCritical,
+      armorBlocked: resolution.armorBlocked,
+      statusEffect: STATUS_EFFECTS.NONE,
+      statusDurationMs: 0,
+      soundCue: SOUND_CUES.KILL,
+      vfxCue: VFX_CUES.KILL_BURST,
+      message: `${attacker.name} blasted ${target.name}`
+    });
+
+    for (const contribution of assistContributors) {
+      const assistant = room.players.get(contribution.attackerId);
+      if (!assistant) {
+        continue;
+      }
+
+      assistant.assists += 1;
+      assistant.credits += GAME_CONFIG.combat.assistCredits;
+      queueScoreStateEvent(room, assistant, "assist", now);
+      queueInventoryStateEvent(room, assistant, now);
+      queueCombatStateEvent(room, {
+        serverTime: now,
+        action: COMBAT_EVENT_ACTIONS.ASSIST,
+        attackerId: assistant.id,
+        attackerName: assistant.name,
+        targetId: target.id,
+        targetName: target.name,
+        damage: contribution.damage,
+        hpAfter: target.hp,
+        isCritical: false,
+        armorBlocked: 0,
+        statusEffect: STATUS_EFFECTS.NONE,
+        statusDurationMs: 0,
+        soundCue: SOUND_CUES.ASSIST,
+        vfxCue: VFX_CUES.ASSIST_RING,
+        message: `${assistant.name} assisted against ${target.name}`
+      });
+    }
+  }
+}
+
 function handleUpgrade(socket, payload) {
   const room = rooms.get(socket.data?.roomId);
   const player = room?.players.get(socket.data?.playerId);
@@ -8785,6 +8989,79 @@ function handleUpgrade(socket, payload) {
   }
   player.tankClassId = requestedClassId;
   player.pendingUpgrades = [];
+  if (requestedClassId !== "basic" && !player.basicSpecializationChoice) {
+    player.basicSpecializationPending = false;
+  }
+}
+
+function handleSpecialization(socket, payload) {
+  const room = rooms.get(socket.data?.roomId);
+  const player = room?.players.get(socket.data?.playerId);
+  if (!room || !player || player.isBot || player.isSpectator) {
+    return;
+  }
+
+  const now = Date.now();
+  markPlayerActive(player, now);
+  markRoomActive(room, now);
+
+  if (
+    !player.basicSpecializationPending ||
+    player.basicSpecializationChoice ||
+    player.tankClassId !== "basic" ||
+    (player.level ?? 1) < GAME_CONFIG.basicSpecialization.unlockLevel
+  ) {
+    return;
+  }
+
+  const specializationId = String(payload.specializationId ?? "");
+  if (
+    (specializationId === BASIC_CLASS_SPECIALIZATIONS.SHIELD_BUBBLE ||
+      specializationId === BASIC_CLASS_SPECIALIZATIONS.GRENADE) &&
+    !player.alive
+  ) {
+    return;
+  }
+
+  const previousMaxHp = getPlayerMaxHitPoints(player);
+  player.basicSpecializationPending = false;
+  player.basicSpecializationChoice = specializationId;
+
+  if (specializationId === BASIC_CLASS_SPECIALIZATIONS.EXTRA_HP) {
+    const nextMaxHp = getPlayerMaxHitPoints(player);
+    if (player.alive) {
+      player.hp = Math.min(nextMaxHp, Math.max(0, player.hp) + (nextMaxHp - previousMaxHp));
+      queueHealthStateEvent(room, player, player.hp, now);
+    }
+    return;
+  }
+
+  if (specializationId === BASIC_CLASS_SPECIALIZATIONS.SHIELD_BUBBLE) {
+    activateShieldBubble(player, now);
+    syncPlayerCombatProfile(player, now);
+    queueCombatStateEvent(room, {
+      serverTime: now,
+      action: COMBAT_EVENT_ACTIONS.EFFECT,
+      attackerId: player.id,
+      attackerName: player.name,
+      targetId: player.id,
+      targetName: player.name,
+      damage: 0,
+      hpAfter: player.hp,
+      isCritical: false,
+      armorBlocked: 0,
+      statusEffect: STATUS_EFFECTS.NONE,
+      statusDurationMs: 0,
+      soundCue: SOUND_CUES.ARMOR,
+      vfxCue: VFX_CUES.ARMOR_SPARK,
+      message: `${player.name} activated a shield bubble`
+    });
+    return;
+  }
+
+  if (specializationId === BASIC_CLASS_SPECIALIZATIONS.GRENADE) {
+    applyGrenadeExplosion(room, player, now);
+  }
 }
 
 function handleStatPoint(socket, payload) {
@@ -10442,6 +10719,8 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq) {
           level: player.level ?? 1,
           statPoints: player.statPoints ?? 0,
           pendingUpgrades: player.pendingUpgrades ?? [],
+          basicSpecializationPending: Boolean(player.basicSpecializationPending),
+          basicSpecializationChoice: player.basicSpecializationChoice ?? null,
           stats: createAllocatedStats(player.stats),
           queuedForSlot: player.queuedForSlot,
           slotReserved: player.slotReserved,
