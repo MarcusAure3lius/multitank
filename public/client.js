@@ -2,6 +2,7 @@ import {
   ANIMATION_ACTIONS,
   ASSET_BUNDLE_VERSION,
   AUTO_BARREL_ROT_SPEED,
+  BASIC_CLASS_SPECIALIZATIONS,
   CLASS_TREE,
   clamp,
   COMBAT_EVENT_ACTIONS,
@@ -151,9 +152,12 @@ let localXp = 0;
 let displayXp = 0;
 let localLevel = 1;
 let localPendingUpgrades = [];
+let localBasicSpecializationPending = false;
+let localBasicSpecializationChoice = null;
 let localTankClassId = "basic";
 let localStats = createEmptyAllocatedStats();
 let upgradeMenuOpen = false;
+let basicSpecializationMenuOpen = false;
 const keys = new Set();
 const pendingInputs = [];
 const pendingReliableMessages = new Map();
@@ -228,6 +232,27 @@ const assetState = {
   failedImages: new Set(),
   loadingImages: new Map()
 };
+const basicSpecializationButtonRects = [];
+const BASIC_SPECIALIZATION_MENU_OPTIONS = Object.freeze([
+  Object.freeze({
+    specializationId: BASIC_CLASS_SPECIALIZATIONS.EXTRA_HP,
+    title: "+25 HP",
+    accent: "#5dd39e",
+    description: `Permanent +${GAME_CONFIG.basicSpecialization.extraHpBonus} max HP`
+  }),
+  Object.freeze({
+    specializationId: BASIC_CLASS_SPECIALIZATIONS.SHIELD_BUBBLE,
+    title: "Shield",
+    accent: "#67b7ff",
+    description: `Block all damage for ${Math.round(GAME_CONFIG.basicSpecialization.shieldDurationMs / 1000)}s`
+  }),
+  Object.freeze({
+    specializationId: BASIC_CLASS_SPECIALIZATIONS.GRENADE,
+    title: "Grenade",
+    accent: "#ff9f43",
+    description: `Blast nearby Basics for ${Math.round(GAME_CONFIG.basicSpecialization.grenadeBasicDamageRatio * 100)}% HP`
+  })
+]);
 
 const currentUrl = new URL(window.location.href);
 const initialRoomFromUrl = currentUrl.searchParams.get("room");
@@ -2923,13 +2948,22 @@ function applySnapshot(payload) {
   // Update local XP/level state from 'you' field
   if (payload.you) {
     const prevUpgrades = localPendingUpgrades;
+    const prevBasicSpecializationPending = localBasicSpecializationPending;
     localXp = payload.you.xp ?? localXp;
     localLevel = payload.you.level ?? localLevel;
     localPendingUpgrades = payload.you.pendingUpgrades ?? localPendingUpgrades;
+    localBasicSpecializationPending = Boolean(payload.you.basicSpecializationPending);
+    localBasicSpecializationChoice = payload.you.basicSpecializationChoice ?? null;
     localTankClassId = payload.you.tankClassId ?? localTankClassId;
     localStats = normalizeAllocatedStats(payload.you.stats, localStats);
     if (localPendingUpgrades.length > 0 && prevUpgrades.length === 0) {
       upgradeMenuOpen = true;
+    }
+    if (localBasicSpecializationPending && !prevBasicSpecializationPending && !localBasicSpecializationChoice) {
+      basicSpecializationMenuOpen = true;
+    }
+    if (!localBasicSpecializationPending || localBasicSpecializationChoice) {
+      basicSpecializationMenuOpen = false;
     }
   }
 
@@ -3171,9 +3205,12 @@ function connect(options = {}) {
     displayXp = 0;
     localLevel = 1;
     localPendingUpgrades = [];
+    localBasicSpecializationPending = false;
+    localBasicSpecializationChoice = null;
     localTankClassId = "basic";
     localStats = createEmptyAllocatedStats();
     upgradeMenuOpen = false;
+    basicSpecializationMenuOpen = false;
     camera.x = 0;
     camera.y = 0;
     cameraNeedsSnap = true;
@@ -3414,9 +3451,12 @@ function connect(options = {}) {
     displayXp = 0;
     localLevel = 1;
     localPendingUpgrades = [];
+    localBasicSpecializationPending = false;
+    localBasicSpecializationChoice = null;
     localTankClassId = "basic";
     localStats = createEmptyAllocatedStats();
     upgradeMenuOpen = false;
+    basicSpecializationMenuOpen = false;
     camera.x = 0;
     camera.y = 0;
     cameraNeedsSnap = true;
@@ -3945,6 +3985,25 @@ function drawTank(player) {
   context.strokeStyle = "#1a1a2e";
   context.stroke();
   context.restore();
+
+  const shieldRemainingMs = player.combat?.shieldRemainingMs ?? 0;
+  if (shieldRemainingMs > 0) {
+    const shieldPulse = 1 + Math.sin(performance.now() / 140) * 0.04;
+    const shieldRadius = (bodyRadius + 14) * shieldPulse;
+    context.save();
+    context.globalAlpha = Math.min(alpha, 0.9);
+    context.translate(x, y);
+    context.fillStyle = "rgba(103, 183, 255, 0.12)";
+    context.beginPath();
+    context.arc(0, 0, shieldRadius, 0, Math.PI * 2);
+    context.fill();
+    context.lineWidth = 3;
+    context.strokeStyle = "rgba(142, 217, 255, 0.95)";
+    context.beginPath();
+    context.arc(0, 0, shieldRadius, 0, Math.PI * 2);
+    context.stroke();
+    context.restore();
+  }
 
   // Player name above tank
   context.save();
@@ -4518,6 +4577,15 @@ function drawCanvasKillFeed() {
 }
 
 function drawUpgradeMenu() {
+  if (
+    basicSpecializationMenuOpen &&
+    localBasicSpecializationPending &&
+    !localBasicSpecializationChoice
+  ) {
+    upgradeButtonRects.length = 0;
+    return;
+  }
+
   if (!upgradeMenuOpen || localPendingUpgrades.length === 0) {
     upgradeButtonRects.length = 0;
     return;
@@ -4584,7 +4652,112 @@ function drawUpgradeMenu() {
   context.restore();
 }
 
+function drawBasicSpecializationMenu() {
+  if (
+    !basicSpecializationMenuOpen ||
+    !localBasicSpecializationPending ||
+    localBasicSpecializationChoice ||
+    localTankClassId !== "basic"
+  ) {
+    basicSpecializationButtonRects.length = 0;
+    return;
+  }
+
+  basicSpecializationButtonRects.length = 0;
+
+  const cw = canvas.width;
+  const ch = canvas.height;
+  const stackedLayout = cw < 920;
+  const cardW = stackedLayout ? Math.min(420, cw - 32) : Math.min(940, cw - 48);
+  const tabGap = stackedLayout ? 12 : 16;
+  const tabCount = BASIC_SPECIALIZATION_MENU_OPTIONS.length;
+  const tabW = stackedLayout ? cardW - 48 : (cardW - 48 - tabGap * (tabCount - 1)) / tabCount;
+  const tabH = stackedLayout ? 84 : 104;
+  const cardH = stackedLayout ? 100 + tabCount * tabH + (tabCount - 1) * tabGap + 28 : 236;
+  const cardX = (cw - cardW) / 2;
+  const cardY = (ch - cardH) / 2;
+  const innerX = cardX + 24;
+  const tabY = cardY + 90;
+
+  context.save();
+  context.fillStyle = "rgba(4, 8, 18, 0.18)";
+  context.fillRect(0, 0, cw, ch);
+
+  context.fillStyle = "rgba(10, 18, 38, 0.72)";
+  context.beginPath();
+  context.roundRect(cardX, cardY, cardW, cardH, 18);
+  context.fill();
+  context.strokeStyle = "rgba(170, 210, 255, 0.3)";
+  context.lineWidth = 1.25;
+  context.stroke();
+
+  context.textAlign = "center";
+  context.font = "bold 24px Segoe UI";
+  context.fillStyle = "#f8fbff";
+  context.fillText("Basic Lv 5 Choice", cw / 2, cardY + 40);
+  context.font = "14px Segoe UI";
+  context.fillStyle = "rgba(220, 236, 255, 0.92)";
+  context.fillText("Pick one reward", cw / 2, cardY + 64);
+
+  for (let index = 0; index < BASIC_SPECIALIZATION_MENU_OPTIONS.length; index += 1) {
+    const option = BASIC_SPECIALIZATION_MENU_OPTIONS[index];
+    const tabX = innerX + (stackedLayout ? 0 : index * (tabW + tabGap));
+    const currentTabY = tabY + (stackedLayout ? index * (tabH + tabGap) : 0);
+
+    context.fillStyle = `${option.accent}22`;
+    context.beginPath();
+    context.roundRect(tabX, currentTabY, tabW, tabH, 14);
+    context.fill();
+    context.strokeStyle = `${option.accent}aa`;
+    context.lineWidth = 1.5;
+    context.stroke();
+
+    context.textAlign = "left";
+    context.font = "bold 18px Segoe UI";
+    context.fillStyle = "#ffffff";
+    context.fillText(option.title, tabX + 18, currentTabY + 28);
+    context.font = "13px Segoe UI";
+    context.fillStyle = "rgba(232, 241, 255, 0.92)";
+    context.fillText(option.description, tabX + 18, currentTabY + 52, tabW - 36);
+    context.font = "bold 12px Segoe UI";
+    context.fillStyle = option.accent;
+    context.fillText("Click to choose", tabX + 18, currentTabY + tabH - 14);
+
+    basicSpecializationButtonRects[index] = {
+      x: tabX,
+      y: currentTabY,
+      w: tabW,
+      h: tabH,
+      specializationId: option.specializationId
+    };
+  }
+
+  context.restore();
+}
+
 const upgradeButtonRects = [];
+function handleBasicSpecializationClick(canvasX, canvasY) {
+  if (!basicSpecializationMenuOpen) {
+    return false;
+  }
+
+  for (const btn of basicSpecializationButtonRects) {
+    if (!btn) {
+      continue;
+    }
+
+    if (canvasX >= btn.x && canvasX <= btn.x + btn.w && canvasY >= btn.y && canvasY <= btn.y + btn.h) {
+      sendReliable({ type: MESSAGE_TYPES.SPECIALIZATION, specializationId: btn.specializationId });
+      localBasicSpecializationPending = false;
+      localBasicSpecializationChoice = btn.specializationId;
+      basicSpecializationMenuOpen = false;
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function handleUpgradeClick(canvasX, canvasY) {
   if (!upgradeMenuOpen) {
     return false;
@@ -4682,6 +4855,7 @@ function render(frameAt = performance.now()) {
     drawMinimap();
     displayXp = lerp(displayXp, localXp, clamp(1 - Math.exp(-8 * deltaSeconds), 0.1, 0.5));
     drawXpBar();
+    drawBasicSpecializationMenu();
     drawUpgradeMenu();
 
     if (debugUiEnabled) {
@@ -5184,6 +5358,9 @@ canvas.addEventListener("click", (event) => {
   const scaleY = canvas.height / bounds.height;
   const cx = (event.clientX - bounds.left) * scaleX;
   const cy = (event.clientY - bounds.top) * scaleY;
+  if (handleBasicSpecializationClick(cx, cy)) {
+    return;
+  }
   if (handleUpgradeClick(cx, cy)) {
     return;
   }
