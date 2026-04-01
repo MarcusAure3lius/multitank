@@ -7854,6 +7854,9 @@ function resetPlayerForRound(room, player) {
     trackPhase: 0
   });
   player.combat = createPlayerCombatState(player, now);
+  player.combat.shieldUntil = 0;
+  player.combat.shieldRemainingMs = 0;
+  player.combat.shielded = false;
   clearCombatContributors(player);
   rememberSafePlayerState(player);
   if (player.isBot) {
@@ -7924,6 +7927,9 @@ function clearRoomCombatState(room) {
       trackPhase: 0
     });
     player.combat = createPlayerCombatState(player, now);
+    player.combat.shieldUntil = 0;
+    player.combat.shieldRemainingMs = 0;
+    player.combat.shielded = false;
     clearCombatContributors(player);
     rememberSafePlayerState(player);
     if (player.isBot) {
@@ -8731,6 +8737,9 @@ function respawnPlayer(room, player, now = Date.now()) {
   applyRoomSpawnProtection(room, player, now);
   player.credits += GAME_CONFIG.economy.respawnCredits;
   player.combat = createPlayerCombatState(player, now);
+  player.combat.shieldUntil = 0;
+  player.combat.shieldRemainingMs = 0;
+  player.combat.shielded = false;
   clearCombatContributors(player);
   resetPlayerHistory(player);
   rememberSafePlayerState(player);
@@ -10107,6 +10116,10 @@ function applyBulletHit(room, bullet, player, impactTime) {
     room.bullets.delete(bullet.id);
     return;
   }
+  if (hasActiveShield(player, impactTime)) {
+    room.bullets.delete(bullet.id);
+    return;
+  }
   const resolution = resolveCombatHit(room, attacker, player, impactTime, bullet.damage ?? GAME_CONFIG.bullet.damage);
   player.hp = Math.max(0, player.hp - resolution.damage);
   room.bullets.delete(bullet.id);
@@ -10176,6 +10189,9 @@ function applyBulletHit(room, bullet, player, impactTime) {
     player.combat.statusEffect = STATUS_EFFECTS.NONE;
     player.combat.statusDurationMs = 0;
     player.combat.stunned = false;
+    player.combat.shieldUntil = 0;
+    player.combat.shieldRemainingMs = 0;
+    player.combat.shielded = false;
     queueAnimationStateEvent(room, player, ANIMATION_ACTIONS.DEATH, impactTime);
     queueScoreStateEvent(room, player, "death", impactTime);
     queueInventoryStateEvent(room, player, impactTime);
@@ -10736,7 +10752,7 @@ function applyBodyHit(room, attacker, target, damage, now) {
     return;
   }
 
-  if (!target.alive || hasSpawnProtection(target, now)) {
+  if (!target.alive || hasSpawnProtection(target, now) || hasActiveShield(target, now)) {
     return;
   }
 
@@ -10778,6 +10794,9 @@ function applyBodyHit(room, attacker, target, damage, now) {
     target.combat.statusEffect = STATUS_EFFECTS.NONE;
     target.combat.statusDurationMs = 0;
     target.combat.stunned = false;
+    target.combat.shieldUntil = 0;
+    target.combat.shieldRemainingMs = 0;
+    target.combat.shielded = false;
     queueAnimationStateEvent(room, target, ANIMATION_ACTIONS.DEATH, now);
     queueScoreStateEvent(room, target, "death", now);
     queueInventoryStateEvent(room, target, now);
