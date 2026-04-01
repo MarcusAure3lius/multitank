@@ -49,6 +49,12 @@ const joinMatchButton = document.getElementById("join-match-button");
 const readyButton = document.getElementById("ready-button");
 const createRoomButton = document.getElementById("create-room-button");
 const nameInput = document.getElementById("name-input");
+const startHomeTabButton = document.getElementById("start-home-tab");
+const startSettingsTabButton = document.getElementById("start-settings-tab");
+const startHomePanel = document.getElementById("start-home-panel");
+const startSettingsPanel = document.getElementById("start-settings-panel");
+const fullscreenButton = document.getElementById("fullscreen-button");
+const fullscreenStatusElement = document.getElementById("fullscreen-status");
 const roomInput = document.getElementById("room-input");
 const spectateInput = document.getElementById("spectate-input");
 const lobbyRoomCodeElement = document.getElementById("lobby-room-code");
@@ -56,6 +62,8 @@ const lobbySummaryElement = document.getElementById("lobby-summary");
 const mapSelect = document.getElementById("map-select");
 const teamSelect = document.getElementById("team-select");
 const classSelect = document.getElementById("class-select");
+const classTabsPanelElement = document.getElementById("class-tabs-panel");
+const classTabsElement = document.getElementById("class-tabs");
 const roomBrowserElement = document.getElementById("room-browser");
 const refreshRoomsButton = document.getElementById("refresh-rooms-button");
 const resultsCard = document.getElementById("results-card");
@@ -125,17 +133,6 @@ let minimapBackgroundCache = {
   key: "",
   canvas: null
 };
-const STAT_LABELS = Object.freeze({
-  healthRegen: "Health Regen",
-  maxHealth: "Max Health",
-  bodyDamage: "Body Damage",
-  bulletSpeed: "Bullet Speed",
-  bulletPenetration: "Penetration",
-  bulletDamage: "Bullet Damage",
-  reload: "Reload",
-  movementSpeed: "Move Speed"
-});
-
 function createEmptyAllocatedStats() {
   return Object.fromEntries(STAT_NAMES.map((statName) => [statName, 0]));
 }
@@ -153,7 +150,6 @@ function normalizeAllocatedStats(stats, fallback = createEmptyAllocatedStats()) 
 let localXp = 0;
 let displayXp = 0;
 let localLevel = 1;
-let localStatPoints = 0;
 let localPendingUpgrades = [];
 let localTankClassId = "basic";
 let localStats = createEmptyAllocatedStats();
@@ -242,6 +238,7 @@ spectateInput.checked = localStorage.getItem(STORAGE_KEYS.spectate) === "1";
 profileLabelElement.textContent = profileId.slice(0, 8);
 
 populateLobbySelects();
+populateClassTabs();
 refreshLobbyUi();
 updateSessionChrome();
 updateLocalDevBadge();
@@ -353,7 +350,7 @@ function renderScoreboard(leaderboard = latestLeaderboard) {
 
   for (const player of resolvedLeaderboard) {
     const item = document.createElement("li");
-    item.innerHTML = `<strong>${player.name}${player.isBot ? " [BOT]" : ""}${player.isSpectator ? " [SPEC]" : ""}</strong><span>${getTeamName(player.teamId)} / ${player.classId} | ${player.score} / ${player.assists ?? 0} / ${player.deaths} | ${player.credits}cr${player.ready ? " / ready" : ""}${player.afk ? " / afk" : ""}${player.slotReserved ? " / reserved" : ""}${player.queuedForSlot ? " / queued" : ""}${player.connected ? "" : " / dc"}</span>`;
+    item.innerHTML = `<strong>${player.name}${player.isBot ? " [BOT]" : ""}${player.isSpectator ? " [SPEC]" : ""}</strong><span>${getTeamName(player.teamId)} / ${getLobbyClassName(player.classId)} | ${player.score} / ${player.assists ?? 0} / ${player.deaths} | ${player.credits}cr${player.ready ? " / ready" : ""}${player.afk ? " / afk" : ""}${player.slotReserved ? " / reserved" : ""}${player.queuedForSlot ? " / queued" : ""}${player.connected ? "" : " / dc"}</span>`;
     scoreboardElement.append(item);
   }
 }
@@ -405,7 +402,7 @@ function renderResultsList() {
     }
 
     const item = document.createElement("li");
-    item.innerHTML = `<div class="results-title">${escapeHtml(player.name)}</div><div class="results-meta">${escapeHtml(getTeamName(player.teamId))} / ${escapeHtml(player.classId)} | ${player.score} score | ${player.assists ?? 0} assists | ${player.deaths} deaths | ${player.credits} credits${player.ready ? " | ready" : ""}</div>`;
+    item.innerHTML = `<div class="results-title">${escapeHtml(player.name)}</div><div class="results-meta">${escapeHtml(getTeamName(player.teamId))} / ${escapeHtml(getLobbyClassName(player.classId))} | ${player.score} score | ${player.assists ?? 0} assists | ${player.deaths} deaths | ${player.credits} credits${player.ready ? " | ready" : ""}</div>`;
     resultsListElement.append(item);
   }
 }
@@ -811,18 +808,15 @@ function updateFallbackVisuals() {
   fallbackCameraX = camera.x;
   fallbackCameraY = camera.y;
 
+  const theme = getActiveMapLayout().theme;
+  const gridColor = theme?.gridMinor ?? "rgba(122, 128, 136, 0.34)";
   const minorSize = Math.max(20, 40 * cameraZoom);
-  const majorSize = Math.max(100, 200 * cameraZoom);
   playAreaElement.style.backgroundImage = [
-    "linear-gradient(rgba(76, 118, 191, 0.36) 2px, transparent 2px)",
-    "linear-gradient(90deg, rgba(76, 118, 191, 0.36) 2px, transparent 2px)",
-    "linear-gradient(rgba(40, 78, 148, 0.62) 4px, transparent 4px)",
-    "linear-gradient(90deg, rgba(40, 78, 148, 0.62) 4px, transparent 4px)"
+    `linear-gradient(${gridColor} 2px, transparent 2px)`,
+    `linear-gradient(90deg, ${gridColor} 2px, transparent 2px)`
   ].join(",");
-  playAreaElement.style.backgroundSize = `${minorSize}px ${minorSize}px, ${minorSize}px ${minorSize}px, ${majorSize}px ${majorSize}px, ${majorSize}px ${majorSize}px`;
+  playAreaElement.style.backgroundSize = `${minorSize}px ${minorSize}px, ${minorSize}px ${minorSize}px`;
   playAreaElement.style.backgroundPosition =
-    `${-fallbackCameraX * cameraZoom}px ${-fallbackCameraY * cameraZoom}px, ` +
-    `${-fallbackCameraX * cameraZoom}px ${-fallbackCameraY * cameraZoom}px, ` +
     `${-fallbackCameraX * cameraZoom}px ${-fallbackCameraY * cameraZoom}px, ` +
     `${-fallbackCameraX * cameraZoom}px ${-fallbackCameraY * cameraZoom}px`;
 
@@ -875,6 +869,84 @@ function populateLobbySelects() {
   populateSelectOptions(classSelect, GAME_CONFIG.lobby.classes);
 }
 
+function getLobbyClassConfig(classId) {
+  return GAME_CONFIG.lobby.classes.find((entry) => entry.id === classId) ?? GAME_CONFIG.lobby.classes[0];
+}
+
+function getLobbyClassName(classId) {
+  return getLobbyClassConfig(classId)?.name ?? (typeof classId === "string" && classId ? classId : "Basic");
+}
+
+function refreshClassTabs() {
+  if (!classTabsElement) {
+    return;
+  }
+
+  const activeClassId = getLobbyClassConfig(classSelect.value)?.id ?? GAME_CONFIG.lobby.classes[0]?.id ?? "basic";
+  if (classSelect.value !== activeClassId) {
+    classSelect.value = activeClassId;
+  }
+
+  const disabled = Boolean(classSelect.disabled);
+  classTabsPanelElement?.classList.toggle("is-disabled", disabled);
+
+  for (const button of classTabsElement.querySelectorAll(".class-tab")) {
+    const isActive = button.dataset.classId === activeClassId;
+    button.classList.toggle("is-active", isActive);
+    button.disabled = disabled;
+    button.setAttribute("aria-selected", String(isActive));
+  }
+}
+
+function setSelectedLobbyClass(classId, options = {}) {
+  const { notifyServer = false } = options;
+  const nextClassId = getLobbyClassConfig(classId)?.id ?? GAME_CONFIG.lobby.classes[0]?.id ?? "basic";
+  const changed = classSelect.value !== nextClassId;
+  classSelect.value = nextClassId;
+  refreshClassTabs();
+
+  if (changed && notifyServer && currentRoomId && socket?.readyState === WebSocket.OPEN) {
+    sendLobbyUpdate("class", {
+      classId: nextClassId
+    });
+  }
+}
+
+function populateClassTabs() {
+  if (!classTabsElement) {
+    return;
+  }
+
+  classTabsElement.replaceChildren();
+
+  for (const classConfig of GAME_CONFIG.lobby.classes) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "class-tab";
+    button.dataset.classId = classConfig.id;
+    button.textContent = classConfig.name;
+    button.title = classConfig.summary ?? classConfig.name;
+    button.setAttribute("role", "tab");
+    button.addEventListener("click", () => {
+      if (button.disabled) {
+        return;
+      }
+
+      setSelectedLobbyClass(classConfig.id, {
+        notifyServer: Boolean(currentRoomId)
+      });
+    });
+    classTabsElement.append(button);
+  }
+
+  refreshClassTabs();
+}
+
+function getTopRightHudInset() {
+  const panelHeight = Math.max(0, Math.ceil(classTabsPanelElement?.getBoundingClientRect?.().height ?? 0));
+  return 14 + panelHeight + 10;
+}
+
 function createRoomCode() {
   return crypto.randomUUID().slice(0, 8).toLowerCase();
 }
@@ -900,7 +972,8 @@ function ensureQuickJoinDefaults() {
   spectateInput.checked = false;
   mapSelect.value = GAME_CONFIG.lobby.maps[0].id;
   teamSelect.value = GAME_CONFIG.lobby.teams[0].id;
-  classSelect.value = GAME_CONFIG.lobby.classes[0].id;
+  classSelect.value = getLobbyClassConfig(classSelect.value)?.id ?? GAME_CONFIG.lobby.classes[0].id;
+  refreshClassTabs();
 }
 
 function getLobbyMapConfig(mapId) {
@@ -1637,6 +1710,100 @@ function clampCameraPosition(x, y) {
   };
 }
 
+function getObjectiveZones(objective = latestObjective) {
+  if (Array.isArray(objective?.zones) && objective.zones.length > 0) {
+    return objective.zones;
+  }
+
+  if (objective && Number.isFinite(Number(objective.x)) && Number.isFinite(Number(objective.y))) {
+    return [
+      {
+        id: "objective-center",
+        slot: "center",
+        x: objective.x,
+        y: objective.y,
+        radius: objective.radius ?? GAME_CONFIG.objective.radius,
+        ownerTeamId: objective.ownerTeamId ?? null,
+        ownerTeamName: objective.ownerTeamName ?? objective.ownerName ?? null,
+        captureTargetTeamId: objective.captureTargetTeamId ?? null,
+        captureTargetTeamName: objective.captureTargetTeamName ?? objective.captureTargetName ?? null,
+        captureProgress: objective.captureProgress ?? 0,
+        contested: Boolean(objective.contested)
+      }
+    ];
+  }
+
+  return [];
+}
+
+function getObjectivePrimaryZone(objective = latestObjective) {
+  const zones = getObjectiveZones(objective);
+  return (
+    zones.find((zone) => zone.contested || zone.captureTargetTeamId || (zone.captureProgress ?? 0) > 0) ??
+    zones.find((zone) => zone.ownerTeamId) ??
+    zones[Math.floor(zones.length / 2)] ??
+    null
+  );
+}
+
+function getObjectiveReferencePoint(objective = latestObjective) {
+  const zones = getObjectiveZones(objective);
+  if (zones.length > 0) {
+    return {
+      x: zones.reduce((total, zone) => total + zone.x, 0) / zones.length,
+      y: zones.reduce((total, zone) => total + zone.y, 0) / zones.length
+    };
+  }
+
+  const mapLayout = getActiveMapLayout();
+  return {
+    x: mapLayout.objective.x,
+    y: mapLayout.objective.y
+  };
+}
+
+function colorWithAlpha(color, alpha) {
+  if (typeof color !== "string") {
+    return `rgba(255, 255, 255, ${alpha})`;
+  }
+
+  const hexMatch = color.trim().match(/^#([0-9a-f]{6})$/i);
+  if (!hexMatch) {
+    return color;
+  }
+
+  const hex = hexMatch[1];
+  const red = Number.parseInt(hex.slice(0, 2), 16);
+  const green = Number.parseInt(hex.slice(2, 4), 16);
+  const blue = Number.parseInt(hex.slice(4, 6), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+function getObjectiveTeamColor(teamId, fallback = "#ffd166") {
+  return getTeamConfig(teamId)?.color ?? fallback;
+}
+
+function getObjectiveStatusText(objective = latestObjective) {
+  const zones = getObjectiveZones(objective);
+  if (zones.length === 0) {
+    return "";
+  }
+
+  const blueCount = zones.filter((zone) => zone.ownerTeamId === "alpha").length;
+  const redCount = zones.filter((zone) => zone.ownerTeamId === "bravo").length;
+  const neutralCount = Math.max(0, zones.length - blueCount - redCount);
+  const activeZone = getObjectivePrimaryZone(objective);
+  const captureText =
+    activeZone?.contested
+      ? " | zone contested"
+      : activeZone?.captureTargetTeamName &&
+          (activeZone.ownerTeamId !== activeZone.captureTargetTeamId || (activeZone.captureProgress ?? 0) < 1)
+        ? ` | capturing: ${activeZone.captureTargetTeamName}`
+        : "";
+
+  return ` | zones: ${blueCount} blue / ${redCount} red / ${neutralCount} neutral${captureText}`;
+}
+
 function getCameraFocusTarget() {
   const renderState = ensureLocalRenderState();
 
@@ -1661,10 +1828,7 @@ function getCameraFocusTarget() {
   }
 
   if (latestObjective) {
-    return {
-      x: latestObjective.x,
-      y: latestObjective.y
-    };
+    return getObjectiveReferencePoint(latestObjective);
   }
 
   return {
@@ -1879,10 +2043,11 @@ function refreshLobbyUi(localPlayer = getLocalPlayer(), you = latestYou) {
     setElementText(lobbySummaryElement, "Connect deploys you straight into the arena using these room and loadout defaults.");
     mapSelect.value = GAME_CONFIG.lobby.maps[0].id;
     teamSelect.value = GAME_CONFIG.lobby.teams[0].id;
-    classSelect.value = GAME_CONFIG.lobby.classes[0].id;
+    classSelect.value = getLobbyClassConfig(classSelect.value)?.id ?? GAME_CONFIG.lobby.classes[0].id;
     mapSelect.disabled = true;
     teamSelect.disabled = true;
-    classSelect.disabled = true;
+    classSelect.disabled = false;
+    refreshClassTabs();
     renderResultsList();
     return;
   }
@@ -1930,6 +2095,7 @@ function refreshLobbyUi(localPlayer = getLocalPlayer(), you = latestYou) {
   mapSelect.disabled = !canEditMap;
   teamSelect.disabled = !canEditLoadout;
   classSelect.disabled = !canEditLoadout;
+  refreshClassTabs();
 
   renderResultsList();
 }
@@ -2759,7 +2925,6 @@ function applySnapshot(payload) {
     const prevUpgrades = localPendingUpgrades;
     localXp = payload.you.xp ?? localXp;
     localLevel = payload.you.level ?? localLevel;
-    localStatPoints = payload.you.statPoints ?? localStatPoints;
     localPendingUpgrades = payload.you.pendingUpgrades ?? localPendingUpgrades;
     localTankClassId = payload.you.tankClassId ?? localTankClassId;
     localStats = normalizeAllocatedStats(payload.you.stats, localStats);
@@ -2909,11 +3074,7 @@ function buildMatchStatusText() {
   }
 
   if (latestMatch.phase === MATCH_PHASES.LIVE_ROUND) {
-    const objectiveText = latestObjective?.ownerName
-      ? ` | point: ${latestObjective.ownerName}`
-      : latestObjective?.captureTargetName
-        ? ` | capturing: ${latestObjective.captureTargetName}`
-        : "";
+    const objectiveText = getObjectiveStatusText(latestObjective);
     const ruleText = latestMatch.respawnsEnabled
       ? " | respawns on"
       : ` | first to ${latestMatch.scoreToWin}`;
@@ -2924,11 +3085,7 @@ function buildMatchStatusText() {
   }
 
   if (latestMatch.phase === MATCH_PHASES.OVERTIME) {
-    const objectiveText = latestObjective?.ownerName
-      ? ` | point: ${latestObjective.ownerName}`
-      : latestObjective?.captureTargetName
-        ? ` | capturing: ${latestObjective.captureTargetName}`
-        : "";
+    const objectiveText = getObjectiveStatusText(latestObjective);
     return `${latestMatch.message} | sudden death${objectiveText}${spectatorSuffix}`;
   }
 
@@ -3013,7 +3170,6 @@ function connect(options = {}) {
     localXp = 0;
     displayXp = 0;
     localLevel = 1;
-    localStatPoints = 0;
     localPendingUpgrades = [];
     localTankClassId = "basic";
     localStats = createEmptyAllocatedStats();
@@ -3257,7 +3413,6 @@ function connect(options = {}) {
     localXp = 0;
     displayXp = 0;
     localLevel = 1;
-    localStatPoints = 0;
     localPendingUpgrades = [];
     localTankClassId = "basic";
     localStats = createEmptyAllocatedStats();
@@ -3531,10 +3686,6 @@ function drawMapSquare() {
       GAME_CONFIG.world.height
     );
   }
-
-  context.lineWidth = 18 / cameraZoom;
-  context.strokeStyle = "#1f3f7a";
-  context.strokeRect(0, 0, GAME_CONFIG.world.width, GAME_CONFIG.world.height);
 }
 
 function drawCenterProbe() {
@@ -3543,12 +3694,9 @@ function drawCenterProbe() {
 
 function drawGrid() {
   const theme = getActiveMapLayout().theme;
-  const minorColor = theme?.gridMinor ?? "rgba(76, 118, 191, 0.36)";
-  const majorColor = theme?.gridMajor ?? "rgba(40, 78, 148, 0.72)";
+  const gridColor = theme?.gridMinor ?? "rgba(122, 128, 136, 0.34)";
   const cellSize = 40;
-  const majorEvery = 5;
-  const minorLineWidth = Math.max(1.8 / cameraZoom, 1.4);
-  const majorLineWidth = Math.max(5 / cameraZoom, 3.4);
+  const lineWidth = Math.max(1.8 / cameraZoom, 1.4);
   const viewport = getVisibleViewportSize();
   const startX = Math.max(0, Math.floor(camera.x / cellSize) * cellSize - cellSize);
   const endX = Math.min(GAME_CONFIG.world.width, camera.x + viewport.width + cellSize);
@@ -3556,26 +3704,20 @@ function drawGrid() {
   const endY = Math.min(GAME_CONFIG.world.height, camera.y + viewport.height + cellSize);
 
   context.save();
+  context.lineWidth = lineWidth;
+  context.strokeStyle = gridColor;
 
   for (let x = startX; x <= endX; x += cellSize) {
-    const index = Math.round(x / cellSize);
-    const isMajor = index % majorEvery === 0;
     context.beginPath();
     context.moveTo(x, startY);
     context.lineTo(x, endY);
-    context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
-    context.strokeStyle = isMajor ? majorColor : minorColor;
     context.stroke();
   }
 
   for (let y = startY; y <= endY; y += cellSize) {
-    const index = Math.round(y / cellSize);
-    const isMajor = index % majorEvery === 0;
     context.beginPath();
     context.moveTo(startX, y);
     context.lineTo(endX, y);
-    context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
-    context.strokeStyle = isMajor ? majorColor : minorColor;
     context.stroke();
   }
 
@@ -3602,72 +3744,78 @@ function drawObstacles() {
 }
 
 function drawObjective() {
-  const mapLayout = getActiveMapLayout();
-  const objective = latestObjective ?? {
-    x: mapLayout.objective.x,
-    y: mapLayout.objective.y,
-    radius: mapLayout.objective.radius,
-    ownerId: null,
-    ownerName: null,
-    captureTargetId: null,
-    captureTargetName: null,
-    captureProgress: 0,
-    contested: false
-  };
-  const objectiveX = objective.x ?? mapLayout.objective.x;
-  const objectiveY = objective.y ?? mapLayout.objective.y;
-  const objectiveRadius = objective.radius ?? mapLayout.objective.radius;
-  const owner = objective.ownerId ? players.get(objective.ownerId) : null;
-  const captureTarget = objective.captureTargetId ? players.get(objective.captureTargetId) : null;
-  const ownerColor = owner?.color ?? getTeamConfig(owner?.teamId)?.color ?? "#ffd166";
-  const captureColor = captureTarget?.color ?? getTeamConfig(captureTarget?.teamId)?.color ?? "#a5f3fc";
-  const progress = clamp(objective.captureProgress ?? 0, 0, 1);
+  const zones = getObjectiveZones(latestObjective);
+  if (zones.length === 0) {
+    return;
+  }
+
   const ringWidth = Math.max(5 / cameraZoom, 2.5);
 
   context.save();
   context.globalAlpha = 0.92;
-  context.fillStyle = objective.ownerId ? `${ownerColor}22` : "rgba(255, 209, 102, 0.12)";
-  context.beginPath();
-  context.arc(objectiveX, objectiveY, objectiveRadius, 0, Math.PI * 2);
-  context.fill();
 
-  context.beginPath();
-  context.lineWidth = ringWidth;
-  context.strokeStyle = objective.contested ? "rgba(255, 209, 102, 0.95)" : "rgba(255,255,255,0.85)";
-  context.arc(objectiveX, objectiveY, objectiveRadius, 0, Math.PI * 2);
-  context.stroke();
+  for (const zone of zones) {
+    const ownerColor = getObjectiveTeamColor(zone.ownerTeamId, "#ffd166");
+    const captureColor = getObjectiveTeamColor(zone.captureTargetTeamId, "#a5f3fc");
+    const progress = clamp(zone.captureProgress ?? 0, 0, 1);
+    const isCapturing =
+      Boolean(zone.captureTargetTeamId) &&
+      (zone.ownerTeamId !== zone.captureTargetTeamId || progress < 1);
 
-  if (progress > 0 && objective.captureTargetId) {
+    context.fillStyle = zone.ownerTeamId ? colorWithAlpha(ownerColor, 0.18) : "rgba(255, 209, 102, 0.12)";
     context.beginPath();
-    context.lineWidth = Math.max(8 / cameraZoom, 4);
-    context.strokeStyle = captureColor;
-    context.arc(objectiveX, objectiveY, objectiveRadius + 11 / cameraZoom, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress);
+    context.arc(zone.x, zone.y, zone.radius, 0, Math.PI * 2);
+    context.fill();
+
+    context.beginPath();
+    context.lineWidth = ringWidth;
+    context.strokeStyle = zone.contested
+      ? "rgba(255, 209, 102, 0.95)"
+      : zone.ownerTeamId
+        ? colorWithAlpha(ownerColor, 0.92)
+        : "rgba(255,255,255,0.85)";
+    context.arc(zone.x, zone.y, zone.radius, 0, Math.PI * 2);
     context.stroke();
+
+    if (progress > 0 && isCapturing) {
+      context.beginPath();
+      context.lineWidth = Math.max(8 / cameraZoom, 4);
+      context.strokeStyle = captureColor;
+      context.arc(zone.x, zone.y, zone.radius + 11 / cameraZoom, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress);
+      context.stroke();
+    }
+
+    context.fillStyle = zone.ownerTeamId ? ownerColor : "rgba(255,255,255,0.14)";
+    context.beginPath();
+    context.arc(zone.x, zone.y, zone.radius * 0.3, 0, Math.PI * 2);
+    context.fill();
+
+    context.font = `${Math.max(13 / cameraZoom, 8)}px Segoe UI`;
+    context.textAlign = "center";
+    context.fillStyle = "#10243b";
+    context.fillText((zone.slot?.[0] ?? "O").toUpperCase(), zone.x, zone.y + 4 / cameraZoom);
+
+    context.font = `${Math.max(15 / cameraZoom, 9)}px Segoe UI`;
+    context.fillStyle = zone.contested ? "#ffd166" : "#ffffff";
+    context.fillText(
+      zone.contested
+        ? "Contested"
+        : zone.ownerTeamName
+          ? zone.ownerTeamName
+          : zone.captureTargetTeamName
+            ? `Capturing ${zone.captureTargetTeamName}`
+            : "Neutral",
+      zone.x,
+      zone.y - zone.radius - 16 / cameraZoom
+    );
+
+    if (isCapturing) {
+      const remainingSeconds = Math.max(0, Math.ceil((1 - progress) * GAME_CONFIG.objective.captureSeconds));
+      context.font = `${Math.max(11 / cameraZoom, 7)}px Segoe UI`;
+      context.fillStyle = captureColor;
+      context.fillText(`${remainingSeconds}s`, zone.x, zone.y + zone.radius + 18 / cameraZoom);
+    }
   }
-
-  context.fillStyle = objective.ownerId ? ownerColor : "rgba(255,255,255,0.14)";
-  context.beginPath();
-  context.arc(objectiveX, objectiveY, objectiveRadius * 0.3, 0, Math.PI * 2);
-  context.fill();
-
-  context.font = `${Math.max(13 / cameraZoom, 8)}px Segoe UI`;
-  context.textAlign = "center";
-  context.fillStyle = "#10243b";
-  context.fillText(objective.ownerName ?? "OBJ", objectiveX, objectiveY + 4 / cameraZoom);
-
-  context.font = `${Math.max(15 / cameraZoom, 9)}px Segoe UI`;
-  context.fillStyle = objective.contested ? "#ffd166" : "#ffffff";
-  context.fillText(
-    objective.contested
-      ? "Contested"
-      : objective.captureTargetName
-        ? objective.ownerId
-          ? objective.ownerName ?? "Objective"
-          : `Capturing: ${objective.captureTargetName}`
-        : "Objective",
-    objectiveX,
-    objectiveY - objectiveRadius - 16 / cameraZoom
-  );
   context.restore();
 }
 
@@ -4159,59 +4307,56 @@ function drawXpBar() {
   context.restore();
 }
 
-function getOrCreateMinimapBackground(mapLayout, panelWidth, panelHeight, mapName = "Arena") {
-  const cacheKey = `${mapLayout?.id ?? "default"}:${panelWidth}x${panelHeight}:${mapName}`;
+function getOrCreateMinimapBackground(mapLayout, panelSize) {
+  const cacheKey = `${mapLayout?.id ?? "default"}:${panelSize}`;
   if (minimapBackgroundCache.key === cacheKey && minimapBackgroundCache.canvas) {
     return minimapBackgroundCache.canvas;
   }
 
   const cacheCanvas = document.createElement("canvas");
-  cacheCanvas.width = panelWidth;
-  cacheCanvas.height = panelHeight;
+  cacheCanvas.width = panelSize;
+  cacheCanvas.height = panelSize;
   const cacheContext = cacheCanvas.getContext("2d");
   if (!cacheContext) {
     return null;
   }
 
-  const mapX = 10;
-  const mapY = 26;
-  const mapWidth = panelWidth - 20;
-  const mapHeight = panelHeight - 36;
-  const projectX = (worldX) => (clamp(worldX, 0, GAME_CONFIG.world.width) / GAME_CONFIG.world.width) * mapWidth + mapX;
-  const projectY = (worldY) => (clamp(worldY, 0, GAME_CONFIG.world.height) / GAME_CONFIG.world.height) * mapHeight + mapY;
+  const mapInset = 8;
+  const mapRadius = 20;
+  const mapX = mapInset;
+  const mapY = mapInset;
+  const mapSize = panelSize - mapInset * 2;
+  const projectX = (worldX) => (clamp(worldX, 0, GAME_CONFIG.world.width) / GAME_CONFIG.world.width) * mapSize + mapX;
+  const projectY = (worldY) => (clamp(worldY, 0, GAME_CONFIG.world.height) / GAME_CONFIG.world.height) * mapSize + mapY;
 
-  cacheContext.fillStyle = "rgba(0,0,0,0.56)";
+  cacheContext.save();
   cacheContext.beginPath();
-  cacheContext.roundRect(0, 0, panelWidth, panelHeight, 10);
-  cacheContext.fill();
-
-  cacheContext.font = "bold 12px Segoe UI";
-  cacheContext.textAlign = "left";
-  cacheContext.fillStyle = "#00c8dc";
-  cacheContext.fillText(mapName, 10, 16);
-
-  cacheContext.fillStyle = "rgba(14, 22, 39, 0.96)";
-  cacheContext.fillRect(mapX, mapY, mapWidth, mapHeight);
-
-  for (const obstacle of mapLayout?.obstacles ?? []) {
-    const obstacleX = projectX(obstacle.x);
-    const obstacleY = projectY(obstacle.y);
-    const obstacleWidth = (obstacle.width / GAME_CONFIG.world.width) * mapWidth;
-    const obstacleHeight = (obstacle.height / GAME_CONFIG.world.height) * mapHeight;
-    cacheContext.fillStyle = "rgba(49, 62, 95, 0.95)";
-    cacheContext.fillRect(obstacleX, obstacleY, obstacleWidth, obstacleHeight);
-  }
+  cacheContext.roundRect(mapX, mapY, mapSize, mapSize, mapRadius);
+  cacheContext.clip();
 
   for (const team of GAME_CONFIG.lobby.teams) {
     const zone = getTeamSpawnZone(team.id);
     const zoneLeft = projectX(zone.left);
     const zoneRight = projectX(zone.right);
-    cacheContext.fillStyle = zone.zoneColor;
-    cacheContext.fillRect(zoneLeft, mapY, Math.max(1, zoneRight - zoneLeft), mapHeight);
+    cacheContext.fillStyle = zone.zoneColor.replace(/0\.\d+\)/, "0.28)");
+    cacheContext.fillRect(zoneLeft, mapY, Math.max(1, zoneRight - zoneLeft), mapSize);
   }
 
-  cacheContext.strokeStyle = "rgba(255,255,255,0.12)";
-  cacheContext.strokeRect(mapX, mapY, mapWidth, mapHeight);
+  for (const obstacle of mapLayout?.obstacles ?? []) {
+    const obstacleX = projectX(obstacle.x);
+    const obstacleY = projectY(obstacle.y);
+    const obstacleWidth = (obstacle.width / GAME_CONFIG.world.width) * mapSize;
+    const obstacleHeight = (obstacle.height / GAME_CONFIG.world.height) * mapSize;
+    cacheContext.fillStyle = "rgba(49, 62, 95, 0.55)";
+    cacheContext.fillRect(obstacleX, obstacleY, obstacleWidth, obstacleHeight);
+  }
+  cacheContext.restore();
+
+  cacheContext.strokeStyle = "rgba(255,255,255,0.24)";
+  cacheContext.lineWidth = 1.5;
+  cacheContext.beginPath();
+  cacheContext.roundRect(mapX, mapY, mapSize, mapSize, mapRadius);
+  cacheContext.stroke();
 
   minimapBackgroundCache = {
     key: cacheKey,
@@ -4226,35 +4371,39 @@ function drawMinimap() {
   }
 
   const mapLayout = getActiveMapLayout();
-  const panelWidth = 198;
-  const panelHeight = 126;
-  const panelX = canvas.width - panelWidth - 14;
-  const panelY = canvas.height - panelHeight - 14;
-  const mapX = panelX + 10;
-  const mapY = panelY + 26;
-  const mapWidth = panelWidth - 20;
-  const mapHeight = panelHeight - 36;
+  const panelSize = Math.round(clamp(Math.min(canvas.width, canvas.height) * 0.2, 140, 190));
+  const panelX = canvas.width - panelSize - 14;
+  const panelY = canvas.height - panelSize - 14;
+  const mapInset = 8;
+  const mapRadius = 20;
+  const mapX = panelX + mapInset;
+  const mapY = panelY + mapInset;
+  const mapSize = panelSize - mapInset * 2;
   const viewport = getVisibleViewportSize();
-  const backgroundCanvas = getOrCreateMinimapBackground(mapLayout, panelWidth, panelHeight, latestLobby?.mapName ?? "Arena");
+  const backgroundCanvas = getOrCreateMinimapBackground(mapLayout, panelSize);
 
-  const projectX = (worldX) => mapX + (clamp(worldX, 0, GAME_CONFIG.world.width) / GAME_CONFIG.world.width) * mapWidth;
-  const projectY = (worldY) => mapY + (clamp(worldY, 0, GAME_CONFIG.world.height) / GAME_CONFIG.world.height) * mapHeight;
+  const projectX = (worldX) => mapX + (clamp(worldX, 0, GAME_CONFIG.world.width) / GAME_CONFIG.world.width) * mapSize;
+  const projectY = (worldY) => mapY + (clamp(worldY, 0, GAME_CONFIG.world.height) / GAME_CONFIG.world.height) * mapSize;
 
   context.save();
   if (backgroundCanvas) {
     context.drawImage(backgroundCanvas, panelX, panelY);
-  } else {
-    context.fillStyle = "rgba(0,0,0,0.56)";
-    context.beginPath();
-    context.roundRect(panelX, panelY, panelWidth, panelHeight, 10);
-    context.fill();
   }
 
-  context.strokeStyle = latestObjective?.ownerId ? "#ffffff" : "#ffd166";
-  context.lineWidth = 1.5;
   context.beginPath();
-  context.arc(projectX(latestObjective?.x ?? mapLayout.objective.x), projectY(latestObjective?.y ?? mapLayout.objective.y), 4, 0, Math.PI * 2);
-  context.stroke();
+  context.roundRect(mapX, mapY, mapSize, mapSize, mapRadius);
+  context.clip();
+
+  for (const zone of getObjectiveZones(latestObjective)) {
+    const teamColor = getObjectiveTeamColor(zone.ownerTeamId, "#ffd166");
+    context.fillStyle = zone.ownerTeamId ? colorWithAlpha(teamColor, 0.24) : "rgba(255, 209, 102, 0.2)";
+    context.strokeStyle = zone.ownerTeamId ? teamColor : "#ffd166";
+    context.lineWidth = 1.5;
+    context.beginPath();
+    context.arc(projectX(zone.x), projectY(zone.y), 4.5, 0, Math.PI * 2);
+    context.fill();
+    context.stroke();
+  }
 
   for (const player of players.values()) {
     if (!player?.alive || player.isSpectator) {
@@ -4279,133 +4428,19 @@ function drawMinimap() {
 
   const viewX = projectX(camera.x);
   const viewY = projectY(camera.y);
-  const viewWidth = (viewport.width / GAME_CONFIG.world.width) * mapWidth;
-  const viewHeight = (viewport.height / GAME_CONFIG.world.height) * mapHeight;
+  const viewWidth = (viewport.width / GAME_CONFIG.world.width) * mapSize;
+  const viewHeight = (viewport.height / GAME_CONFIG.world.height) * mapSize;
   context.strokeStyle = "rgba(255,255,255,0.75)";
   context.lineWidth = 1;
   context.strokeRect(viewX, viewY, viewWidth, viewHeight);
 
-  context.strokeStyle = "rgba(255,255,255,0.12)";
-  context.strokeRect(mapX, mapY, mapWidth, mapHeight);
   context.restore();
-}
-
-const statButtonRects = [];
-
-function allocateLocalStatPoint(statName) {
-  if (
-    !STAT_NAMES.includes(statName) ||
-    !currentRoomId ||
-    !socket ||
-    socket.readyState !== WebSocket.OPEN ||
-    localStatPoints <= 0
-  ) {
-    return false;
-  }
-
-  const currentLevel = localStats?.[statName] ?? 0;
-  if (currentLevel >= 7) {
-    return false;
-  }
-
-  sendReliable({
-    type: MESSAGE_TYPES.STAT_POINT,
-    statName
-  });
-
-  localStatPoints = Math.max(0, localStatPoints - 1);
-  localStats = {
-    ...localStats,
-    [statName]: currentLevel + 1
-  };
-
-  const localPlayer = getLocalPlayer();
-  if (localPlayer) {
-    localPlayer.stats = {
-      ...(localPlayer.stats ?? createEmptyAllocatedStats()),
-      [statName]: currentLevel + 1
-    };
-    if (statName === "maxHealth") {
-      const previousMaxHp = Number(localPlayer.maxHp) || GAME_CONFIG.tank.hitPoints;
-      const nextMaxHp = Math.round(GAME_CONFIG.tank.hitPoints * (1 + (currentLevel + 1) * 0.12));
-      localPlayer.maxHp = nextMaxHp;
-      localPlayer.hp = Math.min(nextMaxHp, (Number(localPlayer.hp) || previousMaxHp) + (nextMaxHp - previousMaxHp));
-    }
-  }
-
-  return true;
-}
-
-function drawStatPanel() {
-  if (!currentRoomId) {
-    statButtonRects.length = 0;
-    return;
-  }
-
-  statButtonRects.length = 0;
-
-  const panelWidth = 252;
-  const rowHeight = 32;
-  const panelHeight = 54 + STAT_NAMES.length * rowHeight;
-  const panelX = 14;
-  const panelY = Math.max(14, canvas.height - panelHeight - 56);
-
   context.save();
-  context.fillStyle = "rgba(0,0,0,0.56)";
+  context.strokeStyle = "rgba(255,255,255,0.28)";
+  context.lineWidth = 1.5;
   context.beginPath();
-  context.roundRect(panelX, panelY, panelWidth, panelHeight, 10);
-  context.fill();
-
-  context.font = "bold 12px Segoe UI";
-  context.textAlign = "left";
-  context.fillStyle = "#00c8dc";
-  context.fillText("STATS", panelX + 12, panelY + 18);
-
-  context.textAlign = "right";
-  context.fillStyle = localStatPoints > 0 ? "#ffd166" : "#dde6ff";
-  context.fillText(`PTS ${localStatPoints}`, panelX + panelWidth - 12, panelY + 18);
-
-  for (let index = 0; index < STAT_NAMES.length; index += 1) {
-    const statName = STAT_NAMES[index];
-    const currentValue = localStats?.[statName] ?? 0;
-    const rowY = panelY + 28 + index * rowHeight;
-    const labelY = rowY + 12;
-
-    context.textAlign = "left";
-    context.font = "11px Segoe UI";
-    context.fillStyle = "#f7fbff";
-    context.fillText(`${index + 1}. ${STAT_LABELS[statName] ?? statName}`, panelX + 12, labelY);
-
-    const barsX = panelX + 12;
-    const barsY = rowY + 16;
-    for (let barIndex = 0; barIndex < 7; barIndex += 1) {
-      context.fillStyle = barIndex < currentValue ? "#00c8dc" : "rgba(255,255,255,0.14)";
-      context.fillRect(barsX + barIndex * 18, barsY, 14, 7);
-    }
-
-    if (localStatPoints > 0 && currentValue < 7) {
-      const buttonX = panelX + panelWidth - 34;
-      const buttonY = rowY + 4;
-      const buttonW = 20;
-      const buttonH = 20;
-      context.fillStyle = "rgba(255,209,102,0.95)";
-      context.beginPath();
-      context.roundRect(buttonX, buttonY, buttonW, buttonH, 5);
-      context.fill();
-      context.fillStyle = "#111111";
-      context.font = "bold 15px Segoe UI";
-      context.textAlign = "center";
-      context.fillText("+", buttonX + buttonW / 2, buttonY + 15);
-      statButtonRects.push({
-        x: buttonX,
-        y: buttonY,
-        w: buttonW,
-        h: buttonH,
-        statName
-      });
-    }
-  }
-
+  context.roundRect(mapX, mapY, mapSize, mapSize, mapRadius);
+  context.stroke();
   context.restore();
 }
 
@@ -4421,7 +4456,7 @@ function drawCanvasLeaderboard() {
   const panelW = 200;
   const panelH = padY * 2 + (entries.length + 1) * lineH;
   const panelX = canvas.width - panelW - 14;
-  const panelY = 14;
+  const panelY = getTopRightHudInset();
 
   context.save();
   context.fillStyle = "rgba(0,0,0,0.55)";
@@ -4550,22 +4585,6 @@ function drawUpgradeMenu() {
 }
 
 const upgradeButtonRects = [];
-function handleStatPointClick(canvasX, canvasY) {
-  for (const btn of statButtonRects) {
-    if (
-      canvasX >= btn.x &&
-      canvasX <= btn.x + btn.w &&
-      canvasY >= btn.y &&
-      canvasY <= btn.y + btn.h &&
-      allocateLocalStatPoint(btn.statName)
-    ) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
 function handleUpgradeClick(canvasX, canvasY) {
   if (!upgradeMenuOpen) {
     return false;
@@ -4598,8 +4617,9 @@ function drawOverlay() {
   if (latestMatch) {
     context.fillText(`Phase: ${latestMatch.phase}`, 20, 100);
   }
-  if (latestObjective?.ownerName) {
-    context.fillText(`Objective: ${latestObjective.ownerName}`, 20, 124);
+  const objectiveStatusText = getObjectiveStatusText(latestObjective);
+  if (objectiveStatusText) {
+    context.fillText(`Objectives${objectiveStatusText.replace(" | ", ": ")}`, 20, 124);
   }
   context.fillText(`Ticks: server ${lastSimulationTick} | snapshot ${lastSnapshotTick} | client ${clientSimulationTick}`, 20, 148);
   context.fillText(
@@ -4662,7 +4682,6 @@ function render(frameAt = performance.now()) {
     drawMinimap();
     displayXp = lerp(displayXp, localXp, clamp(1 - Math.exp(-8 * deltaSeconds), 0.1, 0.5));
     drawXpBar();
-    drawStatPanel();
     drawUpgradeMenu();
 
     if (debugUiEnabled) {
@@ -4728,9 +4747,12 @@ teamSelect.addEventListener("change", () => {
 });
 
 classSelect.addEventListener("change", () => {
-  sendLobbyUpdate("class", {
-    classId: classSelect.value
-  });
+  refreshClassTabs();
+  if (currentRoomId && socket?.readyState === WebSocket.OPEN) {
+    sendLobbyUpdate("class", {
+      classId: classSelect.value
+    });
+  }
 });
 
 window.addEventListener("keydown", (event) => {
@@ -4750,16 +4772,6 @@ window.addEventListener("keydown", (event) => {
     }
     sendReady(!(localPlayer?.ready ?? latestYou?.ready ?? false));
     return;
-  }
-
-  if (!event.repeat) {
-    const statIndex = Number.parseInt(event.key, 10) - 1;
-    if (Number.isInteger(statIndex) && statIndex >= 0 && statIndex < STAT_NAMES.length) {
-      if (allocateLocalStatPoint(STAT_NAMES[statIndex])) {
-        event.preventDefault();
-        return;
-      }
-    }
   }
 
   keys.add(event.code);
@@ -4932,8 +4944,75 @@ const gameScreenEl = document.getElementById("game-screen");
 const playAreaEl = document.getElementById("play-area");
 const playButton = document.getElementById("play-button");
 const startBgCanvas = document.getElementById("bg-canvas") ?? document.getElementById("start-bg");
+const START_MENU_VIEWS = Object.freeze({
+  home: "home",
+  settings: "settings"
+});
+let activeStartMenuView = START_MENU_VIEWS.home;
+
+function isStartMenuHidden() {
+  return startMenuEl ? (startMenuEl.hidden || startMenuEl.classList.contains("hidden")) : true;
+}
+
+function setStartMenuView(view) {
+  activeStartMenuView = view === START_MENU_VIEWS.settings ? START_MENU_VIEWS.settings : START_MENU_VIEWS.home;
+  const showSettings = activeStartMenuView === START_MENU_VIEWS.settings;
+
+  startHomeTabButton?.classList.toggle("is-active", !showSettings);
+  startHomeTabButton?.setAttribute("aria-selected", String(!showSettings));
+  startSettingsTabButton?.classList.toggle("is-active", showSettings);
+  startSettingsTabButton?.setAttribute("aria-selected", String(showSettings));
+
+  if (startHomePanel) {
+    startHomePanel.hidden = showSettings;
+  }
+  if (startSettingsPanel) {
+    startSettingsPanel.hidden = !showSettings;
+  }
+
+  if (showSettings) {
+    updateFullscreenControls();
+  }
+}
+
+function updateFullscreenControls() {
+  const isFullscreen = Boolean(document.fullscreenElement);
+
+  fullscreenButton?.classList.toggle("is-active", isFullscreen);
+  fullscreenButton?.setAttribute("aria-pressed", String(isFullscreen));
+
+  if (fullscreenStatusElement) {
+    fullscreenStatusElement.textContent = isFullscreen
+      ? "Fullscreen is active. Press Esc whenever you want to leave it."
+      : "Click Full Screen to enter fullscreen, then press Esc whenever you want to leave it.";
+  }
+}
+
+async function enterFullscreenFromSettings() {
+  if (document.fullscreenElement) {
+    updateFullscreenControls();
+    return;
+  }
+
+  if (!document.documentElement?.requestFullscreen) {
+    if (fullscreenStatusElement) {
+      fullscreenStatusElement.textContent = "Fullscreen is not available in this browser.";
+    }
+    return;
+  }
+
+  try {
+    await document.documentElement.requestFullscreen();
+  } catch (error) {
+    console.warn("Failed to enter fullscreen", error);
+    if (fullscreenStatusElement) {
+      fullscreenStatusElement.textContent = "Fullscreen was blocked. Try clicking Full Screen again.";
+    }
+  }
+}
 
 function showStartMenu() {
+  const wasHidden = isStartMenuHidden();
   if (startMenuEl) {
     startMenuEl.hidden = false;
     startMenuEl.classList.remove("hidden");
@@ -4943,6 +5022,9 @@ function showStartMenu() {
   }
   if (playAreaEl) {
     playAreaEl.classList.remove("active");
+  }
+  if (wasHidden) {
+    setStartMenuView(START_MENU_VIEWS.home);
   }
 }
 
@@ -4974,6 +5056,20 @@ if (playButton) {
     startMenuPlay();
   });
 }
+
+startHomeTabButton?.addEventListener("click", () => {
+  setStartMenuView(START_MENU_VIEWS.home);
+});
+
+startSettingsTabButton?.addEventListener("click", () => {
+  setStartMenuView(START_MENU_VIEWS.settings);
+});
+
+fullscreenButton?.addEventListener("click", () => {
+  void enterFullscreenFromSettings();
+});
+
+document.addEventListener("fullscreenchange", updateFullscreenControls);
 
 // Enter key in name input starts the game
 if (nameInput && startMenuEl) {
@@ -5091,7 +5187,6 @@ canvas.addEventListener("click", (event) => {
   if (handleUpgradeClick(cx, cy)) {
     return;
   }
-  handleStatPointClick(cx, cy);
 });
 
 // Show start menu or play area based on session state
@@ -5109,6 +5204,7 @@ const _updateSessionChrome = updateSessionChrome;
 setInterval(syncStartMenuVisibility, 500);
 
 // Initial state: show start menu
+updateFullscreenControls();
 showStartMenu();
 
 resizeCanvas();

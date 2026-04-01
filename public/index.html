@@ -8,18 +8,60 @@
   </head>
   <body>
     <div id="dev-badge" class="dev-badge" hidden>LOCAL DEV</div>
+    <aside id="class-tabs-panel" class="class-tabs-panel" aria-label="Tank class selection">
+      <div class="class-tabs-title">Class</div>
+      <div id="class-tabs" class="class-tabs" role="tablist" aria-label="Tank classes"></div>
+    </aside>
 
     <!-- START SCREEN -->
     <div id="start-screen" class="start-screen">
       <canvas id="bg-canvas" class="bg-canvas"></canvas>
       <div class="start-card">
-        <h1 class="game-title">MULTITANK</h1>
-        <p class="game-subtitle">Multiplayer Arena</p>
-        <div class="name-row">
-          <input id="name-input" type="text" maxlength="16" placeholder="Enter your name..." autocomplete="off" spellcheck="false">
+        <div class="start-nav" role="tablist" aria-label="Start menu">
+          <button
+            id="start-home-tab"
+            class="start-nav-button is-active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="start-home-panel"
+          >
+            Play
+          </button>
+          <button
+            id="start-settings-tab"
+            class="start-nav-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="start-settings-panel"
+          >
+            Settings
+          </button>
         </div>
-        <button id="play-button" class="play-button">PLAY</button>
-        <p class="controls-hint">WASD / Arrow Keys to move, Mouse to aim, Click to fire</p>
+
+        <section id="start-home-panel" class="start-panel" role="tabpanel" aria-labelledby="start-home-tab">
+          <h1 class="game-title">MULTITANK</h1>
+          <p class="game-subtitle">Multiplayer Arena</p>
+          <div class="name-row">
+            <input id="name-input" type="text" maxlength="16" placeholder="Enter your name..." autocomplete="off" spellcheck="false">
+          </div>
+          <button id="play-button" class="play-button">PLAY</button>
+          <p class="controls-hint">WASD / Arrow Keys to move, Mouse to aim, Click to fire</p>
+        </section>
+
+        <section
+          id="start-settings-panel"
+          class="start-panel settings-panel"
+          role="tabpanel"
+          aria-labelledby="start-settings-tab"
+          hidden
+        >
+          <div class="settings-heading">Settings</div>
+          <p class="settings-copy">Choose how Multitank fills your display before you jump into the arena.</p>
+          <button id="fullscreen-button" class="settings-option-button" type="button">Full Screen</button>
+          <p id="fullscreen-status" class="settings-status">Click Full Screen to enter fullscreen, then press Esc whenever you want to leave it.</p>
+        </section>
       </div>
     </div>
 

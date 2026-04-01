@@ -25,7 +25,7 @@ export const MESSAGE_TYPES = Object.freeze({
 
 export const XP_PER_LEVEL = [0, 500, 1000, 1500, 2000, 2500, 3000, 4000, 5000, 6000, 7500, 9000, 11000, 13000, 15000, 18000, 21000, 25000, 29000, 34000, 40000, 46000, 54000, 63000, 73000, 85000, 98000, 114000, 132000, 152000, 175000];
 export const MAX_LEVEL = 30;
-export const SHAPE_XP = Object.freeze({ triangle: 25, square: 10, pentagon: 130, alpha_pentagon: 3000 });
+export const SHAPE_XP = Object.freeze({ triangle: 250, square: 100, pentagon: 130, alpha_pentagon: 3000 });
 export const SHAPE_SCORE = Object.freeze({ triangle: 1, square: 1, pentagon: 3, alpha_pentagon: 15 });
 
 export const SHAPE_TYPES = Object.freeze({ TRIANGLE: 'triangle', SQUARE: 'square', PENTAGON: 'pentagon', ALPHA_PENTAGON: 'alpha_pentagon' });
@@ -194,13 +194,19 @@ export const GAME_CONFIG = Object.freeze({
     obstacles: Object.freeze([])
   }),
   objective: Object.freeze({
-    x: 1600,
-    y: 900,
+    x: 4800,
+    y: 2700,
     radius: 130,
-    captureSeconds: 2.5,
-    scoreReward: 1,
-    creditsReward: 20,
-    rewardIntervalMs: 2000
+    captureSeconds: 15,
+    zoneCount: 3,
+    sideOffset: 1400,
+    centerJitterX: 320,
+    sideJitterX: 420,
+    jitterY: 820,
+    minZoneSpacing: 900,
+    scoreReward: 0,
+    creditsReward: 0,
+    rewardIntervalMs: 0
   }),
   spawn: Object.freeze({
     protectionMs: 12000,
@@ -227,7 +233,7 @@ export const GAME_CONFIG = Object.freeze({
     assistCredits: 10,
     critFloorDamage: 1,
     classProfiles: Object.freeze({
-      striker: Object.freeze({
+      basic: Object.freeze({
         damageMultiplier: 1,
         armorMultiplier: 1,
         critChance: 0.1,
@@ -236,23 +242,32 @@ export const GAME_CONFIG = Object.freeze({
         statusChance: 0,
         statusDurationMs: 0
       }),
-      scout: Object.freeze({
-        damageMultiplier: 0.95,
-        armorMultiplier: 1.12,
-        critChance: 0.17,
-        critMultiplier: 1.5,
-        statusEffect: STATUS_EFFECTS.STUN,
-        statusChance: 0.18,
-        statusDurationMs: 550
+      sniper: Object.freeze({
+        damageMultiplier: 1,
+        armorMultiplier: 1,
+        critChance: 0.1,
+        critMultiplier: 1.35,
+        statusEffect: STATUS_EFFECTS.NONE,
+        statusChance: 0,
+        statusDurationMs: 0
       }),
-      vanguard: Object.freeze({
-        damageMultiplier: 1.05,
-        armorMultiplier: 0.82,
-        critChance: 0.06,
-        critMultiplier: 1.28,
-        statusEffect: STATUS_EFFECTS.STUN,
-        statusChance: 0.08,
-        statusDurationMs: 400
+      tank: Object.freeze({
+        damageMultiplier: 1,
+        armorMultiplier: 1,
+        critChance: 0.1,
+        critMultiplier: 1.35,
+        statusEffect: STATUS_EFFECTS.NONE,
+        statusChance: 0,
+        statusDurationMs: 0
+      }),
+      heavy: Object.freeze({
+        damageMultiplier: 1,
+        armorMultiplier: 1,
+        critChance: 0.1,
+        critMultiplier: 1.35,
+        statusEffect: STATUS_EFFECTS.NONE,
+        statusChance: 0,
+        statusDurationMs: 0
       })
     })
   }),
@@ -294,9 +309,10 @@ export const GAME_CONFIG = Object.freeze({
       })
     ]),
     classes: Object.freeze([
-      Object.freeze({ id: "striker", name: "Striker", summary: "Balanced all-round tank" }),
-      Object.freeze({ id: "scout", name: "Scout", summary: "Fast mover with lighter armor" }),
-      Object.freeze({ id: "vanguard", name: "Vanguard", summary: "Heavy hull with slower pace" })
+      Object.freeze({ id: "basic", name: "Basic", summary: "Starter placeholder class" }),
+      Object.freeze({ id: "sniper", name: "Sniper", summary: "Long-range placeholder class" }),
+      Object.freeze({ id: "tank", name: "Tank", summary: "Frontline placeholder class" }),
+      Object.freeze({ id: "heavy", name: "Heavy", summary: "High-mass placeholder class" })
     ])
   }),
   antiCheat: Object.freeze({
@@ -382,8 +398,8 @@ export const MAP_LAYOUTS = Object.freeze({
     theme: Object.freeze({
       background: "#dbe7ff",
       floor: "#f3f7ff",
-      gridMinor: "rgba(76, 118, 191, 0.36)",
-      gridMajor: "rgba(40, 78, 148, 0.72)"
+      gridMinor: "rgba(122, 128, 136, 0.34)",
+      gridMajor: "rgba(122, 128, 136, 0.34)"
     }),
     objective: Object.freeze({
       x: 4800,
@@ -426,8 +442,8 @@ export const MAP_LAYOUTS = Object.freeze({
     theme: Object.freeze({
       background: "#e6ddd2",
       floor: "#f7f1ea",
-      gridMinor: "rgba(140, 95, 42, 0.28)",
-      gridMajor: "rgba(100, 60, 18, 0.58)"
+      gridMinor: "rgba(122, 128, 136, 0.34)",
+      gridMajor: "rgba(122, 128, 136, 0.34)"
     }),
     objective: Object.freeze({
       x: 5200,
@@ -475,8 +491,8 @@ export const MAP_LAYOUTS = Object.freeze({
     theme: Object.freeze({
       background: "#d4d0e8",
       floor: "#edebf8",
-      gridMinor: "rgba(90, 68, 160, 0.28)",
-      gridMajor: "rgba(55, 38, 122, 0.58)"
+      gridMinor: "rgba(122, 128, 136, 0.34)",
+      gridMajor: "rgba(122, 128, 136, 0.34)"
     }),
     objective: Object.freeze({
       x: 4800,
@@ -839,19 +855,121 @@ export function createRoundSnapshot(match, roundNumber = 0) {
   };
 }
 
-export function createObjectiveSnapshot(objective) {
+const OBJECTIVE_ZONE_SLOTS = Object.freeze(["left", "center", "right"]);
+
+function getObjectiveZoneSlot(index = 0) {
+  return OBJECTIVE_ZONE_SLOTS[index] ?? `zone-${Math.max(1, index + 1)}`;
+}
+
+function createObjectiveZoneSnapshot(zone, fallback = {}) {
+  const index = Math.max(0, readInteger(fallback.index, 0));
+  const slot = sanitizeText(zone?.slot ?? fallback.slot ?? "", "", 32) || getObjectiveZoneSlot(index);
+  const id = sanitizeText(zone?.id ?? fallback.id ?? `objective-${slot}`, "", 96) || `objective-${slot}`;
+  const ownerTeamId = sanitizeText(zone?.ownerTeamId ?? fallback.ownerTeamId ?? "", "", 24) || null;
+  const ownerTeamName =
+    sanitizeText(zone?.ownerTeamName ?? fallback.ownerTeamName ?? "", "", GAME_CONFIG.maxPlayerNameLength) || null;
+  const captureTargetTeamId =
+    sanitizeText(zone?.captureTargetTeamId ?? fallback.captureTargetTeamId ?? "", "", 24) || null;
+  const captureTargetTeamName =
+    sanitizeText(
+      zone?.captureTargetTeamName ?? fallback.captureTargetTeamName ?? "",
+      "",
+      GAME_CONFIG.maxPlayerNameLength
+    ) || null;
+
   return {
-    x: roundTo(readFiniteNumber(objective?.x, GAME_CONFIG.objective.x), 2),
-    y: roundTo(readFiniteNumber(objective?.y, GAME_CONFIG.objective.y), 2),
-    radius: roundTo(readFiniteNumber(objective?.radius, GAME_CONFIG.objective.radius), 2),
-    ownerId: sanitizeText(objective?.ownerId ?? "", "", 96) || null,
-    ownerName: sanitizeText(objective?.ownerName ?? "", "", GAME_CONFIG.maxPlayerNameLength) || null,
-    captureTargetId: sanitizeText(objective?.captureTargetId ?? "", "", 96) || null,
-    captureTargetName:
-      sanitizeText(objective?.captureTargetName ?? "", "", GAME_CONFIG.maxPlayerNameLength) || null,
-    captureProgress: clamp(roundTo(readFiniteNumber(objective?.captureProgress, 0), 3), 0, 1),
-    contested: readBoolean(objective?.contested, false),
-    nextRewardAt: Number.isFinite(Number(objective?.nextRewardAt)) ? Number(objective.nextRewardAt) : null
+    id,
+    slot,
+    x: roundTo(readFiniteNumber(zone?.x, readFiniteNumber(fallback.x, GAME_CONFIG.objective.x)), 2),
+    y: roundTo(readFiniteNumber(zone?.y, readFiniteNumber(fallback.y, GAME_CONFIG.objective.y)), 2),
+    radius: roundTo(readFiniteNumber(zone?.radius, readFiniteNumber(fallback.radius, GAME_CONFIG.objective.radius)), 2),
+    ownerId: null,
+    ownerName: ownerTeamName,
+    ownerTeamId,
+    ownerTeamName,
+    captureTargetId: null,
+    captureTargetName: captureTargetTeamName,
+    captureTargetTeamId,
+    captureTargetTeamName,
+    captureProgress: clamp(roundTo(readFiniteNumber(zone?.captureProgress, fallback.captureProgress ?? 0), 3), 0, 1),
+    contested: readBoolean(zone?.contested, readBoolean(fallback.contested, false)),
+    nextRewardAt:
+      Number.isFinite(Number(zone?.nextRewardAt ?? fallback.nextRewardAt))
+        ? Number(zone?.nextRewardAt ?? fallback.nextRewardAt)
+        : null
+  };
+}
+
+export function createObjectiveSnapshot(objective) {
+  const fallbackX = readFiniteNumber(objective?.x, GAME_CONFIG.objective.x);
+  const fallbackY = readFiniteNumber(objective?.y, GAME_CONFIG.objective.y);
+  const fallbackRadius = readFiniteNumber(objective?.radius, GAME_CONFIG.objective.radius);
+  const zones =
+    Array.isArray(objective?.zones) && objective.zones.length > 0
+      ? objective.zones.map((zone, index) =>
+          createObjectiveZoneSnapshot(zone, {
+            index,
+            slot: getObjectiveZoneSlot(index),
+            radius: fallbackRadius
+          })
+        )
+      : objective && typeof objective === "object"
+        ? [
+            createObjectiveZoneSnapshot(objective, {
+              index: 1,
+              slot: "center",
+              x: fallbackX,
+              y: fallbackY,
+              radius: fallbackRadius
+            })
+          ]
+        : [];
+  const centerX = zones.length > 0 ? zones.reduce((total, zone) => total + zone.x, 0) / zones.length : fallbackX;
+  const centerY = zones.length > 0 ? zones.reduce((total, zone) => total + zone.y, 0) / zones.length : fallbackY;
+  const activeZone =
+    zones.find((zone) => zone.contested || zone.captureTargetTeamId || zone.captureProgress > 0) ??
+    zones.find((zone) => zone.ownerTeamId) ??
+    zones[Math.floor(zones.length / 2)] ??
+    null;
+  const ownerTeamId = sanitizeText(objective?.ownerTeamId ?? activeZone?.ownerTeamId ?? "", "", 24) || null;
+  const ownerTeamName =
+    sanitizeText(
+      objective?.ownerTeamName ?? objective?.ownerName ?? activeZone?.ownerTeamName ?? activeZone?.ownerName ?? "",
+      "",
+      GAME_CONFIG.maxPlayerNameLength
+    ) || null;
+  const captureTargetTeamId =
+    sanitizeText(objective?.captureTargetTeamId ?? activeZone?.captureTargetTeamId ?? "", "", 24) || null;
+  const captureTargetTeamName =
+    sanitizeText(
+      objective?.captureTargetTeamName ??
+        objective?.captureTargetName ??
+        activeZone?.captureTargetTeamName ??
+        activeZone?.captureTargetName ??
+        "",
+      "",
+      GAME_CONFIG.maxPlayerNameLength
+    ) || null;
+
+  return {
+    x: roundTo(centerX, 2),
+    y: roundTo(centerY, 2),
+    radius: roundTo(readFiniteNumber(objective?.radius, activeZone?.radius ?? fallbackRadius), 2),
+    ownerId: null,
+    ownerName: ownerTeamName,
+    ownerTeamId,
+    ownerTeamName,
+    captureTargetId: null,
+    captureTargetName: captureTargetTeamName,
+    captureTargetTeamId,
+    captureTargetTeamName,
+    captureProgress: clamp(roundTo(readFiniteNumber(objective?.captureProgress, activeZone?.captureProgress ?? 0), 3), 0, 1),
+    contested: readBoolean(objective?.contested, zones.some((zone) => zone.contested)),
+    nextRewardAt:
+      Number.isFinite(Number(objective?.nextRewardAt ?? activeZone?.nextRewardAt))
+        ? Number(objective?.nextRewardAt ?? activeZone?.nextRewardAt)
+        : null,
+    zones
   };
 }
 

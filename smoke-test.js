@@ -675,7 +675,7 @@ function assertStateChunkAssemblyWaitsForAllFragments() {
       id: `chunk-player-${index}`,
       name: `Chunk Player ${index}`,
       teamId: index % 2 === 0 ? "alpha" : "bravo",
-      classId: "scout",
+      classId: "basic",
       score: index,
       assists: 0,
       deaths: 0,
@@ -692,7 +692,7 @@ function assertStateChunkAssemblyWaitsForAllFragments() {
       id: `chunk-player-${index}`,
       name: `Chunk Player ${index}`,
       teamId: index % 2 === 0 ? "alpha" : "bravo",
-      classId: "scout",
+      classId: "basic",
       x: 100 + index * 12,
       y: 200 + index * 6,
       angle: 0,
@@ -1362,7 +1362,7 @@ try {
   joinRoom(solo, "Solo", "solo-smoke", "join-solo", {
     roomId: "solo-bot",
     teamId: "alpha",
-    classId: "scout"
+    classId: "basic"
   });
   const [soloJoined] = await Promise.all([soloJoinedPromise, soloJoinAckPromise]);
 
@@ -1560,11 +1560,11 @@ try {
   joinRoom(alpha, "Alpha", alphaProfileId, "join-alpha", {
     mapId: "switchyard",
     teamId: "bravo",
-    classId: "vanguard"
+    classId: "tank"
   });
   joinRoom(bravo, "Bravo", bravoProfileId, "join-bravo", {
     teamId: "alpha",
-    classId: "scout"
+    classId: "sniper"
   });
   const [alphaJoined, bravoJoined] = await Promise.all([
     alphaJoinedPromise,
@@ -1600,9 +1600,9 @@ try {
     (payload) =>
       payload.lobby?.mapId === "switchyard" &&
       payload.you?.teamId === "bravo" &&
-      payload.you?.classId === "vanguard" &&
+      payload.you?.classId === "tank" &&
       payload.leaderboard?.some(
-        (player) => player.name === "Bravo" && player.teamId === "alpha" && player.classId === "scout"
+        (player) => player.name === "Bravo" && player.teamId === "alpha" && player.classId === "sniper"
       ),
     "lobby selections replicated"
   );
@@ -1611,7 +1611,7 @@ try {
     throw new Error("Expected authoritative lobby map selection to replicate");
   }
 
-  if (lobbyState.you?.teamId !== "bravo" || lobbyState.you?.classId !== "vanguard") {
+  if (lobbyState.you?.teamId !== "bravo" || lobbyState.you?.classId !== "tank") {
     throw new Error("Expected local team and class selection to round-trip through the server");
   }
 
@@ -1708,10 +1708,29 @@ try {
   const switchyardLayout = getMapLayout("switchyard");
   const mappedObjectiveState = await waitForState(
     alpha,
-    (payload) =>
-      payload.lobby?.mapId === "switchyard" &&
-      Math.round(payload.objective?.x ?? 0) === Math.round(switchyardLayout.objective.x) &&
-      Math.round(payload.objective?.y ?? 0) === Math.round(switchyardLayout.objective.y),
+    (payload) => {
+      if (payload.lobby?.mapId !== "switchyard") {
+        return false;
+      }
+
+      const zones = payload.objective?.zones;
+      if (!Array.isArray(zones) || zones.length !== 3) {
+        return false;
+      }
+
+      const leftZone = zones.find((zone) => zone.slot === "left");
+      const centerZone = zones.find((zone) => zone.slot === "center");
+      const rightZone = zones.find((zone) => zone.slot === "right");
+      return Boolean(
+        leftZone &&
+          centerZone &&
+          rightZone &&
+          leftZone.x < centerZone.x &&
+          rightZone.x > centerZone.x &&
+          Math.abs(centerZone.x - switchyardLayout.objective.x) <= GAME_CONFIG.objective.centerJitterX + 40 &&
+          Math.abs(centerZone.y - switchyardLayout.objective.y) <= GAME_CONFIG.objective.jitterY + 40
+      );
+    },
     "map-specific objective layout"
   );
 
@@ -1782,8 +1801,8 @@ try {
     throw new Error("Expected leaderboard replication for all active players and bots");
   }
 
-  if (!stateA.objective || typeof stateA.objective.captureProgress !== "number") {
-    throw new Error("Expected objective state to be present in snapshots");
+  if (!Array.isArray(stateA.objective?.zones) || stateA.objective.zones.length !== 3) {
+    throw new Error("Expected three objective zones to be present in snapshots");
   }
 
   const shapeEcologyState = await waitForState(

@@ -535,6 +535,96 @@ function getRoomObjectiveConfig(room = null) {
   return room?.objective ?? getRoomMapLayout(room).objective;
 }
 
+function getRoomObjectiveZones(room = null) {
+  if (Array.isArray(room?.objective?.zones) && room.objective.zones.length > 0) {
+    return room.objective.zones;
+  }
+
+  const fallback = getRoomObjectiveConfig(room);
+  if (!fallback) {
+    return [];
+  }
+
+  return [
+    {
+      id: "objective-center",
+      slot: "center",
+      x: fallback.x,
+      y: fallback.y,
+      radius: fallback.radius ?? GAME_CONFIG.objective.radius,
+      ownerTeamId: fallback.ownerTeamId ?? null,
+      ownerTeamName: fallback.ownerTeamName ?? null,
+      captureTargetTeamId: fallback.captureTargetTeamId ?? null,
+      captureTargetTeamName: fallback.captureTargetTeamName ?? null,
+      captureProgress: fallback.captureProgress ?? 0,
+      contested: Boolean(fallback.contested),
+      nextRewardAt: fallback.nextRewardAt ?? null
+    }
+  ];
+}
+
+function isObjectiveZoneHot(zone) {
+  return Boolean(zone?.contested || zone?.captureTargetTeamId || (zone?.captureProgress ?? 0) > 0);
+}
+
+function isPlayerInsideObjectiveZone(player, zone) {
+  if (!player || !zone) {
+    return false;
+  }
+
+  const dx = player.x - zone.x;
+  const dy = player.y - zone.y;
+  return dx * dx + dy * dy <= zone.radius * zone.radius;
+}
+
+function getObjectiveZoneForPlayer(room, player) {
+  return getRoomObjectiveZones(room).find((zone) => isPlayerInsideObjectiveZone(player, zone)) ?? null;
+}
+
+function scoreObjectiveZoneForTeam(zone, teamId, player = null) {
+  if (!zone || !teamId) {
+    return -Infinity;
+  }
+
+  let score = 0;
+
+  if (zone.ownerTeamId !== teamId) {
+    score += zone.ownerTeamId ? 900 : 720;
+  }
+
+  if (zone.contested) {
+    score += 520;
+  }
+
+  if (zone.captureTargetTeamId && zone.captureTargetTeamId !== teamId) {
+    score += 640;
+  } else if (zone.captureTargetTeamId === teamId && zone.ownerTeamId !== teamId) {
+    score += 260;
+  }
+
+  if (!zone.ownerTeamId) {
+    score += 140;
+  }
+
+  if (player) {
+    score -= Math.hypot(zone.x - player.x, zone.y - player.y) * 0.08;
+  }
+
+  return score;
+}
+
+function getObjectiveGoalZone(room, teamId, player = null) {
+  return (
+    getRoomObjectiveZones(room)
+      .map((zone) => ({
+        zone,
+        score: scoreObjectiveZoneForTeam(zone, teamId, player)
+      }))
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score)[0]?.zone ?? null
+  );
+}
+
 function collidesWithObstacle(x, y, radius = GAME_CONFIG.tank.radius, mapLayout = getRoomMapLayout()) {
   return (mapLayout?.obstacles ?? []).some((obstacle) => circleIntersectsRect(x, y, radius, obstacle));
 }
@@ -1143,16 +1233,17 @@ function isSpawnPointSafe(room, x, y, options = {}) {
     minDistanceToPlayers = null
   } = options;
   const mapLayout = getRoomMapLayout(room);
-  const objective = getRoomObjectiveConfig(room);
   if (collidesWithObstacle(x, y, GAME_CONFIG.tank.radius + 8, mapLayout)) {
     return false;
   }
 
-  const objectiveBuffer = objective.radius + GAME_CONFIG.tank.radius + 20;
-  const objectiveDx = x - objective.x;
-  const objectiveDy = y - objective.y;
-  if (objectiveDx * objectiveDx + objectiveDy * objectiveDy < objectiveBuffer * objectiveBuffer) {
-    return false;
+  for (const objectiveZone of getRoomObjectiveZones(room)) {
+    const objectiveBuffer = objectiveZone.radius + GAME_CONFIG.tank.radius + 20;
+    const objectiveDx = x - objectiveZone.x;
+    const objectiveDy = y - objectiveZone.y;
+    if (objectiveDx * objectiveDx + objectiveDy * objectiveDy < objectiveBuffer * objectiveBuffer) {
+      return false;
+    }
   }
 
   if (!room) {
@@ -1404,20 +1495,173 @@ function migrateProfilesDocument(parsedDocument) {
   };
 }
 
-function createObjectiveState(mapId = GAME_CONFIG.lobby.maps[0]?.id) {
-  const layout = getMapLayout(mapId);
+const OBJECTIVE_ZONE_SLOTS = Object.freeze(["left", "center", "right"]);
+
+function getObjectiveZoneSlot(index = 0) {
+  return OBJECTIVE_ZONE_SLOTS[index] ?? `zone-${Math.max(1, index + 1)}`;
+}
+
+function createObjectiveZoneState(slot, x, y, radius = GAME_CONFIG.objective.radius) {
+  const resolvedSlot = typeof slot === "string" && slot ? slot : getObjectiveZoneSlot(0);
   return {
-    x: layout.objective.x,
-    y: layout.objective.y,
-    radius: layout.objective.radius,
-    ownerId: null,
-    ownerName: null,
-    captureTargetId: null,
-    captureTargetName: null,
+    id: `objective-${resolvedSlot}`,
+    slot: resolvedSlot,
+    x,
+    y,
+    radius,
+    ownerTeamId: null,
+    ownerTeamName: null,
+    captureTargetTeamId: null,
+    captureTargetTeamName: null,
     captureProgress: 0,
     contested: false,
     nextRewardAt: null
   };
+}
+
+function getObjectiveZoneAnchors(mapId = GAME_CONFIG.lobby.maps[0]?.id) {
+  const layout = getMapLayout(mapId);
+  const anchor = layout?.objective ?? GAME_CONFIG.objective;
+  const sideOffset = Math.max(anchor.radius * 4, Number(GAME_CONFIG.objective.sideOffset) || 1400);
+  const centerJitterX = Math.max(120, Number(GAME_CONFIG.objective.centerJitterX) || 320);
+  const sideJitterX = Math.max(160, Number(GAME_CONFIG.objective.sideJitterX) || 420);
+  const jitterY = Math.max(180, Number(GAME_CONFIG.objective.jitterY) || 820);
+
+  return [
+    Object.freeze({
+      slot: "left",
+      x: anchor.x - sideOffset,
+      y: anchor.y,
+      radius: anchor.radius,
+      jitterX: sideJitterX,
+      jitterY
+    }),
+    Object.freeze({
+      slot: "center",
+      x: anchor.x,
+      y: anchor.y,
+      radius: anchor.radius,
+      jitterX: centerJitterX,
+      jitterY
+    }),
+    Object.freeze({
+      slot: "right",
+      x: anchor.x + sideOffset,
+      y: anchor.y,
+      radius: anchor.radius,
+      jitterX: sideJitterX,
+      jitterY
+    })
+  ];
+}
+
+function isObjectiveZonePositionValid(x, y, radius, mapLayout, existingZones = []) {
+  if (!isNavigableWorldPoint(x, y, radius + 14, mapLayout)) {
+    return false;
+  }
+
+  const minSpacing = Math.max(radius * 2 + 80, Number(GAME_CONFIG.objective.minZoneSpacing) || 0);
+  return existingZones.every((zone) => {
+    const dx = x - zone.x;
+    const dy = y - zone.y;
+    return dx * dx + dy * dy >= minSpacing * minSpacing;
+  });
+}
+
+function createObjectiveZonePosition(room, anchor, mapLayout, existingZones = []) {
+  const minX = GAME_CONFIG.world.padding + anchor.radius + 24;
+  const maxX = GAME_CONFIG.world.width - GAME_CONFIG.world.padding - anchor.radius - 24;
+  const minY = GAME_CONFIG.world.padding + anchor.radius + 24;
+  const maxY = GAME_CONFIG.world.height - GAME_CONFIG.world.padding - anchor.radius - 24;
+  const clampX = (value) => clamp(value, minX, maxX);
+  const clampY = (value) => clamp(value, minY, maxY);
+
+  for (let attempt = 0; attempt < 96; attempt += 1) {
+    const candidate = {
+      x: clampX(anchor.x + (getRandomFloat(room) - 0.5) * 2 * anchor.jitterX),
+      y: clampY(anchor.y + (getRandomFloat(room) - 0.5) * 2 * anchor.jitterY)
+    };
+
+    if (isObjectiveZonePositionValid(candidate.x, candidate.y, anchor.radius, mapLayout, existingZones)) {
+      return candidate;
+    }
+  }
+
+  const fallbackXOffsets = [0, -0.45, 0.45, -0.8, 0.8];
+  const fallbackYOffsets = [0, -0.35, 0.35, -0.7, 0.7];
+
+  for (const yOffset of fallbackYOffsets) {
+    for (const xOffset of fallbackXOffsets) {
+      const candidate = {
+        x: clampX(anchor.x + anchor.jitterX * xOffset),
+        y: clampY(anchor.y + anchor.jitterY * yOffset)
+      };
+
+      if (isObjectiveZonePositionValid(candidate.x, candidate.y, anchor.radius, mapLayout, existingZones)) {
+        return candidate;
+      }
+    }
+  }
+
+  return {
+    x: clampX(anchor.x),
+    y: clampY(anchor.y)
+  };
+}
+
+function buildObjectiveZones(room, mapId = GAME_CONFIG.lobby.maps[0]?.id, options = {}) {
+  const { randomize = true } = options;
+  const mapLayout = getMapLayout(mapId);
+  const anchors = getObjectiveZoneAnchors(mapId);
+  const zones = [];
+
+  for (const anchor of anchors) {
+    const position = randomize
+      ? createObjectiveZonePosition(room, anchor, mapLayout, zones)
+      : { x: anchor.x, y: anchor.y };
+    zones.push(createObjectiveZoneState(anchor.slot, position.x, position.y, anchor.radius));
+  }
+
+  return zones;
+}
+
+function syncObjectiveSummary(objective, mapId = GAME_CONFIG.lobby.maps[0]?.id) {
+  const layout = getMapLayout(mapId);
+  const zones = Array.isArray(objective?.zones) ? objective.zones : [];
+  const activeZone =
+    zones.find((zone) => zone.contested || zone.captureTargetTeamId || zone.captureProgress > 0) ??
+    zones.find((zone) => zone.ownerTeamId) ??
+    zones[Math.floor(zones.length / 2)] ??
+    null;
+
+  objective.x = zones.length > 0 ? zones.reduce((total, zone) => total + zone.x, 0) / zones.length : layout.objective.x;
+  objective.y = zones.length > 0 ? zones.reduce((total, zone) => total + zone.y, 0) / zones.length : layout.objective.y;
+  objective.radius = activeZone?.radius ?? layout.objective.radius;
+  objective.ownerTeamId = activeZone?.ownerTeamId ?? null;
+  objective.ownerTeamName = activeZone?.ownerTeamName ?? null;
+  objective.captureTargetTeamId = activeZone?.captureTargetTeamId ?? null;
+  objective.captureTargetTeamName = activeZone?.captureTargetTeamName ?? null;
+  objective.captureProgress = activeZone?.captureProgress ?? 0;
+  objective.contested = zones.some((zone) => zone.contested);
+  objective.nextRewardAt = activeZone?.nextRewardAt ?? null;
+}
+
+function createObjectiveState(mapId = GAME_CONFIG.lobby.maps[0]?.id) {
+  const objective = {
+    x: 0,
+    y: 0,
+    radius: GAME_CONFIG.objective.radius,
+    ownerTeamId: null,
+    ownerTeamName: null,
+    captureTargetTeamId: null,
+    captureTargetTeamName: null,
+    captureProgress: 0,
+    contested: false,
+    nextRewardAt: null,
+    zones: buildObjectiveZones(null, mapId, { randomize: false })
+  };
+  syncObjectiveSummary(objective, mapId);
+  return objective;
 }
 
 function consumeRateBucket(bucket, now, maxPerSecond) {
@@ -1813,7 +2057,7 @@ function getBotTeamLabel(teamId) {
 function getBotClassIdForSlot(slotIndex) {
   const classes = GAME_CONFIG.lobby.classes;
   if (classes.length === 0) {
-    return "striker";
+    return "basic";
   }
 
   const normalizedSlotIndex = Number.isFinite(Number(slotIndex)) ? Math.max(0, Math.floor(Number(slotIndex))) : 0;
@@ -1937,7 +2181,7 @@ function createRoom(roomId) {
   const rngSeed = hashSeed(`${roomId}:${createdAt}:${gameVersion}`);
   const defaultMapId = GAME_CONFIG.lobby.maps[0]?.id;
   operationsCounters.roomsCreated += 1;
-  return {
+  const room = {
     id: roomId,
     createdAt,
     lastActivityAt: createdAt,
@@ -1984,6 +2228,8 @@ function createRoom(roomId) {
     },
     bodyHitCooldowns: new Map()
   };
+  resetObjectiveState(room);
+  return room;
 }
 
 function createRoomEventId(room, type) {
@@ -2058,16 +2304,17 @@ function countShapesByType(room, type) {
 
 function isShapePointSafe(room, x, y, radius) {
   const mapLayout = getRoomMapLayout(room);
-  const objective = getRoomObjectiveConfig(room);
   if (!isNavigableWorldPoint(x, y, radius + 8, mapLayout)) {
     return false;
   }
 
-  const objectiveBuffer = objective.radius + radius + 60;
-  const objectiveDx = x - objective.x;
-  const objectiveDy = y - objective.y;
-  if (objectiveDx * objectiveDx + objectiveDy * objectiveDy < objectiveBuffer * objectiveBuffer) {
-    return false;
+  for (const objectiveZone of getRoomObjectiveZones(room)) {
+    const objectiveBuffer = objectiveZone.radius + radius + 60;
+    const objectiveDx = x - objectiveZone.x;
+    const objectiveDy = y - objectiveZone.y;
+    if (objectiveDx * objectiveDx + objectiveDy * objectiveDy < objectiveBuffer * objectiveBuffer) {
+      return false;
+    }
   }
 
   const spawnZonePadding = radius + 140;
@@ -2866,54 +3113,11 @@ function getVisibleShapesForViewer(room, viewer) {
 }
 
 function canViewerSeeObjective(room, viewer) {
-  if (!viewer || viewer.isSpectator) {
-    return true;
-  }
-
-  if (room.objective.ownerId === viewer.id || room.objective.captureTargetId === viewer.id) {
-    return true;
-  }
-
-  const owner = room.objective.ownerId ? room.players.get(room.objective.ownerId) : null;
-  const captureTarget = room.objective.captureTargetId ? room.players.get(room.objective.captureTargetId) : null;
-  if (owner?.teamId === viewer.teamId || captureTarget?.teamId === viewer.teamId) {
-    return true;
-  }
-
-  return canViewerSeePosition(
-    room,
-    viewer,
-    room.objective.x,
-    room.objective.y,
-    room.objective.radius,
-    GAME_CONFIG.visibility.objectiveVisionRadius
-  );
+  return true;
 }
 
 function createViewerObjectiveState(room, viewer) {
-  const baseState = {
-    x: room.objective.x,
-    y: room.objective.y,
-    radius: room.objective.radius
-  };
-
-  if (canViewerSeeObjective(room, viewer)) {
-    return {
-      ...baseState,
-      ...room.objective
-    };
-  }
-
-  return {
-    ...baseState,
-    ownerId: null,
-    ownerName: null,
-    captureTargetId: null,
-    captureTargetName: null,
-    captureProgress: 0,
-    contested: false,
-    nextRewardAt: null
-  };
+  return createObjectiveSnapshot(room.objective);
 }
 
 function canViewerSeeEvent(room, viewer, event) {
@@ -3123,7 +3327,8 @@ function computePlayerInterestPriority(room, viewer, candidate, knownEntities) {
     priority += 300_000;
   }
 
-  if (candidate.id === room.objective.ownerId || candidate.id === room.objective.captureTargetId) {
+  const candidateZone = getObjectiveZoneForPlayer(room, candidate);
+  if (candidateZone && (candidateZone.ownerTeamId !== candidate.teamId || isObjectiveZoneHot(candidateZone))) {
     priority += 180_000;
   }
 
@@ -5630,7 +5835,7 @@ function getLeadingActivePlayer(room) {
 }
 
 function hasHotObjective(room) {
-  return room.objective.contested || Boolean(room.objective.captureTargetId) || room.objective.captureProgress > 0;
+  return getRoomObjectiveZones(room).some((zone) => isObjectiveZoneHot(zone));
 }
 
 function shouldEnterOvertime(room) {
@@ -7465,18 +7670,27 @@ async function serveStatic(request, response) {
   }
 }
 
-function resetObjectiveState(room) {
-  const layout = getRoomMapLayout(room);
-  room.objective.x = layout.objective.x;
-  room.objective.y = layout.objective.y;
-  room.objective.radius = layout.objective.radius;
-  room.objective.ownerId = null;
-  room.objective.ownerName = null;
-  room.objective.captureTargetId = null;
-  room.objective.captureTargetName = null;
-  room.objective.captureProgress = 0;
-  room.objective.contested = false;
-  room.objective.nextRewardAt = null;
+function resetObjectiveState(room, options = {}) {
+  const { rerollPositions = true } = options;
+  const mapId = room?.lobby?.mapId ?? GAME_CONFIG.lobby.maps[0]?.id;
+  if (!room.objective || typeof room.objective !== "object") {
+    room.objective = createObjectiveState(mapId);
+  }
+
+  const sourceZones =
+    rerollPositions || !Array.isArray(room.objective.zones) || room.objective.zones.length === 0
+      ? buildObjectiveZones(room, mapId, { randomize: true })
+      : room.objective.zones;
+
+  room.objective.zones = sourceZones.map((zone, index) =>
+    createObjectiveZoneState(
+      zone?.slot ?? getObjectiveZoneSlot(index),
+      Number(zone?.x) || 0,
+      Number(zone?.y) || 0,
+      Number(zone?.radius) || GAME_CONFIG.objective.radius
+    )
+  );
+  syncObjectiveSummary(room.objective, mapId);
 }
 
 function clearOwnedEntityLifecycle(room, ownerId) {
@@ -7521,10 +7735,6 @@ function removePlayerFromRoom(room, playerId, options = {}) {
     player.input.shoot = false;
     player.input.clientSentAt = 0;
     player.input.receivedAt = 0;
-
-    if (room.objective.ownerId === player.id || room.objective.captureTargetId === player.id) {
-      resetObjectiveState(room);
-    }
 
     return player;
   }
@@ -8789,7 +8999,8 @@ function scoreBotTarget(room, player, candidate, now) {
   score += Math.max(0, GAME_CONFIG.tank.hitPoints - candidate.hp) * 6;
   score += getBotThreatScore(player, candidate.id, now);
 
-  if (candidate.id === room.objective.ownerId || candidate.id === room.objective.captureTargetId) {
+  const objectiveZone = getObjectiveZoneForPlayer(room, candidate);
+  if (objectiveZone && (objectiveZone.ownerTeamId !== candidate.teamId || isObjectiveZoneHot(objectiveZone))) {
     score += 220;
   }
 
@@ -8983,6 +9194,7 @@ function findBotStrafeGoal(room, player, target, preferredRange = getBotPreferre
 function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfSight, options = {}) {
   const soloBotDuel = isSoloBotDuelRoom(room);
   const objectivePlayEnabled = !soloBotDuel;
+  const objectiveGoalZone = objectivePlayEnabled ? getObjectiveGoalZone(room, player.teamId, player) : null;
   const advancedCombat = Boolean(options.advancedCombat);
   const preferredRange = options.preferredRange ?? getBotPreferredRange(player);
   const lowerRangeBound = preferredRange - GAME_CONFIG.ai.preferredRangeTolerance;
@@ -8994,9 +9206,8 @@ function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfS
       getBotHealthRatio(player) <= (advancedCombat ? GAME_CONFIG.ai.lowHealthRetreatRatio : GAME_CONFIG.ai.lowHealthRetreatRatio * 0.8)
     );
   const shouldCaptureObjective =
-    objectivePlayEnabled &&
-    (!target || targetDistance > upperRangeBound * 1.35) &&
-    (!room.objective.ownerId || room.objective.ownerId !== player.id || room.objective.contested);
+    Boolean(objectiveGoalZone) &&
+    (!target || targetDistance > upperRangeBound * 1.35);
 
   if (target && shouldRetreat) {
     return {
@@ -9051,7 +9262,7 @@ function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfS
   if (shouldCaptureObjective) {
     return {
       intent: BOT_AI_INTENTS.CAPTURE,
-      goal: { x: room.objective.x, y: room.objective.y }
+      goal: { x: objectiveGoalZone.x, y: objectiveGoalZone.y }
     };
   }
 
@@ -9069,7 +9280,11 @@ function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfS
 
   return {
     intent: BOT_AI_INTENTS.IDLE,
-    goal: objectivePlayEnabled ? { x: room.objective.x, y: room.objective.y } : { x: player.x, y: player.y }
+    goal: objectivePlayEnabled
+      ? objectiveGoalZone
+        ? { x: objectiveGoalZone.x, y: objectiveGoalZone.y }
+        : { x: room.objective.x, y: room.objective.y }
+      : { x: player.x, y: player.y }
   };
 }
 
@@ -9412,7 +9627,8 @@ function updateBotInputs(room, player, now) {
   player.input.forward = shouldMove && steering.y < -axisThreshold;
   player.input.back = shouldMove && steering.y > axisThreshold;
 
-  const turretTarget = activeTarget ?? { x: room.objective.x, y: room.objective.y };
+  const objectiveFocusZone = getObjectiveGoalZone(room, player.teamId, player) ?? getRoomObjectiveZones(room)[1] ?? null;
+  const turretTarget = activeTarget ?? objectiveFocusZone ?? { x: room.objective.x, y: room.objective.y };
   player.input.turretAngle = Math.atan2(turretTarget.y - player.y, turretTarget.x - player.x);
   const aimDelta = normalizeAngle(player.input.turretAngle - player.turretAngle);
   const shootAimTolerance = soloBotDuel ? Math.max(GAME_CONFIG.ai.aimToleranceRadians, 1.05) : GAME_CONFIG.ai.aimToleranceRadians;
@@ -9460,86 +9676,115 @@ function updateObjective(room, deltaSeconds, now) {
   }
 
   if (isSoloBotDuelRoom(room)) {
-    resetObjectiveState(room);
+    resetObjectiveState(room, { rerollPositions: false });
     return;
   }
 
-  const owner = room.objective.ownerId ? room.players.get(room.objective.ownerId) : null;
-  if (room.objective.ownerId && (!owner || !owner.connected || !owner.alive)) {
-    resetObjectiveState(room);
-  }
-
-  const occupants = Array.from(room.players.values()).filter((player) => {
-    if (!player.connected || !player.alive || player.isSpectator) {
-      return false;
-    }
-
-    const dx = player.x - room.objective.x;
-    const dy = player.y - room.objective.y;
-    const radius = room.objective.radius + GAME_CONFIG.tank.radius * 0.5;
-    return dx * dx + dy * dy <= radius * radius;
-  });
-
-  room.objective.contested = occupants.length > 1;
-
-  if (occupants.length === 1) {
-    const capturer = occupants[0];
-
-    if (room.objective.ownerId === capturer.id) {
-      room.objective.captureTargetId = capturer.id;
-      room.objective.captureTargetName = capturer.name;
-      room.objective.captureProgress = 1;
-    } else {
-      if (room.objective.captureTargetId !== capturer.id) {
-        room.objective.captureTargetId = capturer.id;
-        room.objective.captureTargetName = capturer.name;
-        room.objective.captureProgress = 0;
+  for (const zone of getRoomObjectiveZones(room)) {
+    const occupants = Array.from(room.players.values()).filter((player) => {
+      if (!player.connected || !player.alive || player.isSpectator) {
+        return false;
       }
 
-      room.objective.captureProgress = clamp(
-        room.objective.captureProgress + deltaSeconds / GAME_CONFIG.objective.captureSeconds,
-        0,
-        1
+      return isPlayerInsideObjectiveZone(player, zone);
+    });
+    const occupyingTeams = [...new Set(occupants.map((player) => player.teamId).filter(Boolean))];
+    zone.contested = occupyingTeams.length > 1;
+
+    if (zone.contested) {
+      zone.nextRewardAt = null;
+      continue;
+    }
+
+    if (occupyingTeams.length === 1) {
+      const captureTeamId = occupyingTeams[0];
+      const captureTeam = getTeamConfig(captureTeamId);
+      const captureTeamName = captureTeam?.name ?? captureTeamId;
+
+      if (zone.ownerTeamId === captureTeamId) {
+        zone.captureTargetTeamId = captureTeamId;
+        zone.captureTargetTeamName = captureTeamName;
+        zone.captureProgress = 1;
+        if (GAME_CONFIG.objective.rewardIntervalMs > 0 && zone.nextRewardAt === null) {
+          zone.nextRewardAt = now + GAME_CONFIG.objective.rewardIntervalMs;
+        }
+      } else {
+        if (zone.captureTargetTeamId !== captureTeamId) {
+          zone.captureTargetTeamId = captureTeamId;
+          zone.captureTargetTeamName = captureTeamName;
+          zone.captureProgress = 0;
+        }
+
+        zone.captureProgress = clamp(
+          zone.captureProgress + deltaSeconds / GAME_CONFIG.objective.captureSeconds,
+          0,
+          1
+        );
+
+        if (zone.captureProgress >= 1) {
+          zone.ownerTeamId = captureTeamId;
+          zone.ownerTeamName = captureTeamName;
+          zone.captureTargetTeamId = captureTeamId;
+          zone.captureTargetTeamName = captureTeamName;
+          zone.captureProgress = 1;
+          zone.nextRewardAt =
+            GAME_CONFIG.objective.rewardIntervalMs > 0
+              ? now + GAME_CONFIG.objective.rewardIntervalMs
+              : null;
+        }
+      }
+    } else if (zone.ownerTeamId) {
+      zone.captureTargetTeamId = zone.ownerTeamId;
+      zone.captureTargetTeamName = zone.ownerTeamName;
+      zone.captureProgress = 1;
+      if (GAME_CONFIG.objective.rewardIntervalMs > 0 && zone.nextRewardAt === null) {
+        zone.nextRewardAt = now + GAME_CONFIG.objective.rewardIntervalMs;
+      }
+    } else {
+      zone.captureProgress = clamp(zone.captureProgress - deltaSeconds, 0, 1);
+      if (zone.captureProgress <= 0) {
+        zone.captureTargetTeamId = null;
+        zone.captureTargetTeamName = null;
+      }
+    }
+
+    if (
+      zone.ownerTeamId &&
+      !zone.contested &&
+      zone.nextRewardAt !== null &&
+      GAME_CONFIG.objective.rewardIntervalMs > 0 &&
+      now >= zone.nextRewardAt
+    ) {
+      const rewardRecipients = Array.from(room.players.values()).filter(
+        (player) =>
+          player.connected &&
+          player.alive &&
+          !player.isSpectator &&
+          player.teamId === zone.ownerTeamId
       );
 
-      if (room.objective.captureProgress >= 1) {
-        room.objective.ownerId = capturer.id;
-        room.objective.ownerName = capturer.name;
-        room.objective.captureTargetId = capturer.id;
-        room.objective.captureTargetName = capturer.name;
-        room.objective.nextRewardAt = now + GAME_CONFIG.objective.rewardIntervalMs;
+      if (rewardRecipients.length === 0) {
+        zone.nextRewardAt = null;
+        continue;
       }
-    }
-  } else if (occupants.length === 0) {
-    if (room.objective.ownerId) {
-      room.objective.captureTargetId = room.objective.ownerId;
-      room.objective.captureTargetName = room.objective.ownerName;
-      room.objective.captureProgress = 1;
-    } else {
-      room.objective.captureTargetId = null;
-      room.objective.captureTargetName = null;
-      room.objective.captureProgress = clamp(room.objective.captureProgress - deltaSeconds, 0, 1);
+
+      for (const rewardRecipient of rewardRecipients) {
+        if (GAME_CONFIG.objective.scoreReward > 0) {
+          rewardRecipient.score += GAME_CONFIG.objective.scoreReward;
+          queueScoreStateEvent(room, rewardRecipient, "objective", now);
+        }
+
+        if (GAME_CONFIG.objective.creditsReward > 0) {
+          rewardRecipient.credits += GAME_CONFIG.objective.creditsReward;
+          queueInventoryStateEvent(room, rewardRecipient, now);
+        }
+      }
+
+      zone.nextRewardAt = now + GAME_CONFIG.objective.rewardIntervalMs;
     }
   }
 
-  if (
-    room.objective.ownerId &&
-    !room.objective.contested &&
-    room.objective.nextRewardAt !== null &&
-    now >= room.objective.nextRewardAt
-  ) {
-    const rewardOwner = room.players.get(room.objective.ownerId);
-
-    if (rewardOwner && rewardOwner.connected && rewardOwner.alive) {
-      rewardOwner.score += GAME_CONFIG.objective.scoreReward;
-      rewardOwner.credits += GAME_CONFIG.objective.creditsReward;
-      room.objective.nextRewardAt = now + GAME_CONFIG.objective.rewardIntervalMs;
-      queueScoreStateEvent(room, rewardOwner, "objective", now);
-      queueInventoryStateEvent(room, rewardOwner, now);
-    } else {
-      resetObjectiveState(room);
-    }
-  }
+  syncObjectiveSummary(room.objective, room.lobby.mapId);
 }
 
 function getLagCompensatedFireContext(player, now) {
