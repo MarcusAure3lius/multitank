@@ -649,6 +649,14 @@ function updateLocalRenderState(deltaSeconds) {
     return null;
   }
 
+  if (!hasMovementInputActive()) {
+    renderState.x = visualState.x;
+    renderState.y = visualState.y;
+    renderState.angle = visualState.angle;
+    renderState.turretAngle = visualState.turretAngle;
+    return renderState;
+  }
+
   const followAmount = canSimulateLocalPlayer() && localPlayer.alive
     ? clamp(1 - Math.exp(-(hasMovementInputActive() ? 28 : 18) * deltaSeconds), 0.24, 0.62)
     : clamp(1 - Math.exp(-16 * deltaSeconds), 0.18, 0.4);
@@ -2578,8 +2586,10 @@ function applySnapshot(payload) {
     }
   }
 
-  // Update shapes
-  if (Array.isArray(payload.shapes)) {
+  // Shapes are only authoritative on full snapshots right now. Delta snapshots
+  // intentionally omit them, so treating an empty list as a full replacement
+  // creates fake "deaths" and particle bursts every frame.
+  if (payload.replication?.mode === "full" && Array.isArray(payload.shapes)) {
     const shapeIds = new Set(payload.shapes.map((s) => s.id));
     for (const [id, shape] of shapes.entries()) {
       if (!shapeIds.has(id)) {
@@ -2809,9 +2819,12 @@ function connect(options = {}) {
   processedEventOrder.length = 0;
   predictedProjectiles.clear();
   combatEffects.length = 0;
+  shapeParticles.length = 0;
   killFeedEntries.length = 0;
   renderKillFeed();
   lastResyncRequestAt = 0;
+  cameraShakeX = 0;
+  cameraShakeY = 0;
 
   if (socket) {
     socket.skipReconnect = true;
@@ -2870,6 +2883,7 @@ function connect(options = {}) {
     renderKillFeed();
     localPlayerId = null;
     currentRoomId = null;
+    shapeParticles.length = 0;
     updateSessionChrome();
     setReadyButton(false);
     latestLatencyMs = 0;
@@ -3087,6 +3101,7 @@ function connect(options = {}) {
     lastResultsRenderKey = "";
     renderScoreboard([]);
     combatEffects.length = 0;
+    shapeParticles.length = 0;
     killFeedEntries.length = 0;
     renderKillFeed();
     pendingInputs.length = 0;
@@ -3102,6 +3117,8 @@ function connect(options = {}) {
     camera.x = 0;
     camera.y = 0;
     cameraNeedsSnap = true;
+    cameraShakeX = 0;
+    cameraShakeY = 0;
     resetCameraAnchor();
     hasSeenLocalPlayerSnapshot = false;
     updateSessionChrome();
