@@ -119,6 +119,10 @@ const predictedProjectiles = new Map();
 const combatEffects = [];
 const killFeedEntries = [];
 const shapeParticles = [];
+let minimapBackgroundCache = {
+  key: "",
+  canvas: null
+};
 const STAT_LABELS = Object.freeze({
   healthRegen: "Health Regen",
   maxHealth: "Max Health",
@@ -3484,24 +3488,31 @@ function drawGrid() {
   const majorEvery = 5;
   const minorLineWidth = Math.max(1.8 / cameraZoom, 1.4);
   const majorLineWidth = Math.max(5 / cameraZoom, 3.4);
+  const viewport = getVisibleViewportSize();
+  const startX = Math.max(0, Math.floor(camera.x / cellSize) * cellSize - cellSize);
+  const endX = Math.min(GAME_CONFIG.world.width, camera.x + viewport.width + cellSize);
+  const startY = Math.max(0, Math.floor(camera.y / cellSize) * cellSize - cellSize);
+  const endY = Math.min(GAME_CONFIG.world.height, camera.y + viewport.height + cellSize);
 
   context.save();
 
-  for (let x = 0, index = 0; x <= GAME_CONFIG.world.width; x += cellSize, index += 1) {
+  for (let x = startX; x <= endX; x += cellSize) {
+    const index = Math.round(x / cellSize);
     const isMajor = index % majorEvery === 0;
     context.beginPath();
-    context.moveTo(x, 0);
-    context.lineTo(x, GAME_CONFIG.world.height);
+    context.moveTo(x, startY);
+    context.lineTo(x, endY);
     context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
     context.strokeStyle = isMajor ? majorColor : minorColor;
     context.stroke();
   }
 
-  for (let y = 0, index = 0; y <= GAME_CONFIG.world.height; y += cellSize, index += 1) {
+  for (let y = startY; y <= endY; y += cellSize) {
+    const index = Math.round(y / cellSize);
     const isMajor = index % majorEvery === 0;
     context.beginPath();
-    context.moveTo(0, y);
-    context.lineTo(GAME_CONFIG.world.width, y);
+    context.moveTo(startX, y);
+    context.lineTo(endX, y);
     context.lineWidth = isMajor ? majorLineWidth : minorLineWidth;
     context.strokeStyle = isMajor ? majorColor : minorColor;
     context.stroke();
@@ -4010,6 +4021,67 @@ function drawXpBar() {
   context.restore();
 }
 
+function getOrCreateMinimapBackground(mapLayout, panelWidth, panelHeight, mapName = "Arena") {
+  const cacheKey = `${mapLayout?.id ?? "default"}:${panelWidth}x${panelHeight}:${mapName}`;
+  if (minimapBackgroundCache.key === cacheKey && minimapBackgroundCache.canvas) {
+    return minimapBackgroundCache.canvas;
+  }
+
+  const cacheCanvas = document.createElement("canvas");
+  cacheCanvas.width = panelWidth;
+  cacheCanvas.height = panelHeight;
+  const cacheContext = cacheCanvas.getContext("2d");
+  if (!cacheContext) {
+    return null;
+  }
+
+  const mapX = 10;
+  const mapY = 26;
+  const mapWidth = panelWidth - 20;
+  const mapHeight = panelHeight - 36;
+  const projectX = (worldX) => (clamp(worldX, 0, GAME_CONFIG.world.width) / GAME_CONFIG.world.width) * mapWidth + mapX;
+  const projectY = (worldY) => (clamp(worldY, 0, GAME_CONFIG.world.height) / GAME_CONFIG.world.height) * mapHeight + mapY;
+
+  cacheContext.fillStyle = "rgba(0,0,0,0.56)";
+  cacheContext.beginPath();
+  cacheContext.roundRect(0, 0, panelWidth, panelHeight, 10);
+  cacheContext.fill();
+
+  cacheContext.font = "bold 12px Segoe UI";
+  cacheContext.textAlign = "left";
+  cacheContext.fillStyle = "#00c8dc";
+  cacheContext.fillText(mapName, 10, 16);
+
+  cacheContext.fillStyle = "rgba(14, 22, 39, 0.96)";
+  cacheContext.fillRect(mapX, mapY, mapWidth, mapHeight);
+
+  for (const obstacle of mapLayout?.obstacles ?? []) {
+    const obstacleX = projectX(obstacle.x);
+    const obstacleY = projectY(obstacle.y);
+    const obstacleWidth = (obstacle.width / GAME_CONFIG.world.width) * mapWidth;
+    const obstacleHeight = (obstacle.height / GAME_CONFIG.world.height) * mapHeight;
+    cacheContext.fillStyle = "rgba(49, 62, 95, 0.95)";
+    cacheContext.fillRect(obstacleX, obstacleY, obstacleWidth, obstacleHeight);
+  }
+
+  for (const team of GAME_CONFIG.lobby.teams) {
+    const zone = getTeamSpawnZone(team.id);
+    const zoneLeft = projectX(zone.left);
+    const zoneRight = projectX(zone.right);
+    cacheContext.fillStyle = zone.zoneColor;
+    cacheContext.fillRect(zoneLeft, mapY, Math.max(1, zoneRight - zoneLeft), mapHeight);
+  }
+
+  cacheContext.strokeStyle = "rgba(255,255,255,0.12)";
+  cacheContext.strokeRect(mapX, mapY, mapWidth, mapHeight);
+
+  minimapBackgroundCache = {
+    key: cacheKey,
+    canvas: cacheCanvas
+  };
+  return cacheCanvas;
+}
+
 function drawMinimap() {
   if (!currentRoomId) {
     return;
@@ -4025,39 +4097,19 @@ function drawMinimap() {
   const mapWidth = panelWidth - 20;
   const mapHeight = panelHeight - 36;
   const viewport = getVisibleViewportSize();
+  const backgroundCanvas = getOrCreateMinimapBackground(mapLayout, panelWidth, panelHeight, latestLobby?.mapName ?? "Arena");
 
   const projectX = (worldX) => mapX + (clamp(worldX, 0, GAME_CONFIG.world.width) / GAME_CONFIG.world.width) * mapWidth;
   const projectY = (worldY) => mapY + (clamp(worldY, 0, GAME_CONFIG.world.height) / GAME_CONFIG.world.height) * mapHeight;
 
   context.save();
-  context.fillStyle = "rgba(0,0,0,0.56)";
-  context.beginPath();
-  context.roundRect(panelX, panelY, panelWidth, panelHeight, 10);
-  context.fill();
-
-  context.font = "bold 12px Segoe UI";
-  context.textAlign = "left";
-  context.fillStyle = "#00c8dc";
-  context.fillText(latestLobby?.mapName ?? "Arena", panelX + 10, panelY + 16);
-
-  context.fillStyle = "rgba(14, 22, 39, 0.96)";
-  context.fillRect(mapX, mapY, mapWidth, mapHeight);
-
-  for (const obstacle of mapLayout.obstacles ?? []) {
-    const obstacleX = projectX(obstacle.x);
-    const obstacleY = projectY(obstacle.y);
-    const obstacleWidth = (obstacle.width / GAME_CONFIG.world.width) * mapWidth;
-    const obstacleHeight = (obstacle.height / GAME_CONFIG.world.height) * mapHeight;
-    context.fillStyle = "rgba(49, 62, 95, 0.95)";
-    context.fillRect(obstacleX, obstacleY, obstacleWidth, obstacleHeight);
-  }
-
-  for (const team of GAME_CONFIG.lobby.teams) {
-    const zone = getTeamSpawnZone(team.id);
-    const zoneLeft = projectX(zone.left);
-    const zoneRight = projectX(zone.right);
-    context.fillStyle = zone.zoneColor;
-    context.fillRect(zoneLeft, mapY, Math.max(1, zoneRight - zoneLeft), mapHeight);
+  if (backgroundCanvas) {
+    context.drawImage(backgroundCanvas, panelX, panelY);
+  } else {
+    context.fillStyle = "rgba(0,0,0,0.56)";
+    context.beginPath();
+    context.roundRect(panelX, panelY, panelWidth, panelHeight, 10);
+    context.fill();
   }
 
   for (const shape of shapes.values()) {

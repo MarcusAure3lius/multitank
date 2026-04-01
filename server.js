@@ -46,6 +46,7 @@ import {
   createPlayerSnapshot,
   createRoundEvent,
   createScoreEvent,
+  createShapeSnapshot,
   createSpawnEvent,
   createStatePayload,
   deserializePacket,
@@ -1916,7 +1917,7 @@ function awardXpToPlayer(player, xpAmount, room) {
 }
 
 // ---- SHAPE SYSTEM ----
-const SHAPE_HP = { triangle: 25, square: 10, pentagon: 100, alpha_pentagon: 3000 };
+const SHAPE_HP = { triangle: 70, square: 45, pentagon: 100, alpha_pentagon: 3000 };
 const SHAPE_RADIUS = { triangle: 22, square: 20, pentagon: 35, alpha_pentagon: 70 };
 const SHAPE_TARGET_COUNTS = Object.freeze({
   square: 24,
@@ -1931,10 +1932,10 @@ const SHAPE_RESPAWN_MS = Object.freeze({
   alpha_pentagon: 30000
 });
 const SHAPE_DRIFT_SPEED = Object.freeze({
-  square: 16,
-  triangle: 24,
-  pentagon: 12,
-  alpha_pentagon: 8
+  square: 9,
+  triangle: 13,
+  pentagon: 8,
+  alpha_pentagon: 5
 });
 
 function countShapesByType(room, type) {
@@ -2044,10 +2045,10 @@ function createShape(room, type, x, y) {
     maxHp,
     radius,
     angle: getRandomFloat(room) * Math.PI * 2,
-    angleVel: (getRandomFloat(room) - 0.5) * 0.4,
+    angleVel: (getRandomFloat(room) - 0.5) * 0.28,
     driftAngle: getRandomFloat(room) * Math.PI * 2,
     driftSpeed: (SHAPE_DRIFT_SPEED[type] ?? 12) * (0.85 + getRandomFloat(room) * 0.3),
-    driftTurnVelocity: (getRandomFloat(room) - 0.5) * 0.5
+    driftTurnVelocity: (getRandomFloat(room) - 0.5) * 0.18
   };
 }
 
@@ -2078,7 +2079,7 @@ function updateShapes(room, deltaSeconds, now) {
     }
 
     shape.driftAngle = normalizeAngle(shape.driftAngle + Math.PI * (0.6 + getRandomFloat(room) * 0.8));
-    shape.driftTurnVelocity = (getRandomFloat(room) - 0.5) * 0.6;
+    shape.driftTurnVelocity = (getRandomFloat(room) - 0.5) * 0.24;
   }
 }
 
@@ -2375,6 +2376,14 @@ function resolveCombatHit(room, attacker, target, now, baseDamage = GAME_CONFIG.
     soundCue: rolledCritical ? SOUND_CUES.CRIT : armorBlocked > 0 ? SOUND_CUES.ARMOR : SOUND_CUES.HIT,
     vfxCue: rolledCritical ? VFX_CUES.CRIT_BURST : armorBlocked > 0 ? VFX_CUES.ARMOR_SPARK : VFX_CUES.IMPACT
   };
+}
+
+function isFriendlyCombatPair(attacker, target) {
+  if (!attacker || !target) {
+    return false;
+  }
+
+  return Boolean(attacker.teamId && target.teamId && attacker.teamId === target.teamId);
 }
 
 function createPlayerHistorySample(player, time) {
@@ -9060,6 +9069,10 @@ function getPlayerCollisionStateAtTime(player, sampleTime, currentTime) {
 
 function applyBulletHit(room, bullet, player, impactTime) {
   const attacker = room.players.get(bullet.ownerId) ?? null;
+  if (isFriendlyCombatPair(attacker, player)) {
+    return;
+  }
+
   if (hasSpawnProtection(player, impactTime)) {
     room.bullets.delete(bullet.id);
     return;
@@ -9210,6 +9223,7 @@ function applyBulletHit(room, bullet, player, impactTime) {
 
 function simulateBulletToTime(room, bullet, targetTime, currentTime = targetTime) {
   const stepMs = GAME_CONFIG.lagCompensation.projectileCatchupStepMs;
+  const attacker = room.players.get(bullet.ownerId) ?? null;
 
   while (bullet.lastSimulatedAt < targetTime) {
     const stepEndsAt = Math.min(targetTime, bullet.lastSimulatedAt + stepMs);
@@ -9237,6 +9251,10 @@ function simulateBulletToTime(room, bullet, targetTime, currentTime = targetTime
 
     for (const player of getPlayersInSimulationOrder(room)) {
       if (player.id === bullet.ownerId || player.isSpectator) {
+        continue;
+      }
+
+      if (isFriendlyCombatPair(attacker, player)) {
         continue;
       }
 
@@ -9681,6 +9699,10 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq) {
 }
 
 function applyBodyHit(room, attacker, target, damage, now) {
+  if (isFriendlyCombatPair(attacker, target)) {
+    return;
+  }
+
   if (!target.alive || hasSpawnProtection(target, now)) {
     return;
   }
