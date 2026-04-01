@@ -13,6 +13,7 @@
   --shadow: 0 8px 40px rgba(0,0,0,0.6);
   --hud-square-size: clamp(140px, 20vmin, 190px);
   --hud-square-radius: 20px;
+  --scoreboard-square-size: clamp(120px, 15vw, 160px);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -121,11 +122,19 @@ body {
   top: 14px;
   right: 14px;
   z-index: 120;
-  width: clamp(220px, 25vw, 320px);
-  max-height: min(58vh, 460px);
-  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  width: var(--scoreboard-square-size);
+  height: var(--scoreboard-square-size);
+  padding: 10px;
   pointer-events: none;
   user-select: none;
+  overflow: hidden;
+  border-radius: 24px;
+  background: transparent;
+  border-color: rgba(255,255,255,0.18);
+  box-shadow: none;
+  backdrop-filter: none;
 }
 
 .hud-panel-title {
@@ -137,31 +146,35 @@ body {
   text-transform: uppercase;
 }
 
+.scoreboard-panel .hud-panel-title {
+  display: none;
+}
+
 .scoreboard {
   margin: 0;
   padding: 0;
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-height: calc(min(58vh, 460px) - 44px);
-  overflow-y: auto;
+  gap: 5px;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
 }
 
 .scoreboard-entry {
   display: grid;
-  grid-template-columns: 6px minmax(0, 1fr) auto;
-  gap: 10px;
+  grid-template-columns: 4px minmax(0, 1fr) auto;
+  gap: 6px;
   align-items: center;
-  padding: 9px 10px;
+  padding: 6px 7px;
   border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 14px;
-  background: rgba(255,255,255,0.05);
+  border-radius: 12px;
+  background: transparent;
 }
 
 .scoreboard-entry.is-local {
   border-color: rgba(0,229,255,0.34);
-  background: rgba(0,229,255,0.12);
   box-shadow: 0 0 0 1px rgba(0,229,255,0.14);
 }
 
@@ -170,9 +183,9 @@ body {
 }
 
 .scoreboard-entry-team {
-  width: 6px;
+  width: 4px;
   height: 100%;
-  min-height: 40px;
+  min-height: 22px;
   border-radius: 999px;
   background: var(--team-color, rgba(255,255,255,0.4));
 }
@@ -191,20 +204,18 @@ body {
 
 .scoreboard-entry-name {
   color: var(--text);
-  font-size: 0.83rem;
+  font-size: 0.64rem;
   font-weight: 800;
 }
 
 .scoreboard-entry-meta,
 .scoreboard-entry-stats {
-  color: rgba(255,255,255,0.66);
-  font-size: 0.68rem;
-  line-height: 1.35;
+  display: none;
 }
 
 .scoreboard-entry-score {
   color: #eafcff;
-  font-size: 1.05rem;
+  font-size: 0.78rem;
   font-weight: 900;
   letter-spacing: 0.04em;
 }
@@ -496,19 +507,18 @@ body {
   }
 
   .scoreboard-panel {
-    width: min(52vw, 240px);
-    max-height: min(42vh, 320px);
-    padding: 10px;
+    width: clamp(104px, 26vmin, 132px);
+    height: clamp(104px, 26vmin, 132px);
+    padding: 8px;
   }
 
   .scoreboard {
-    max-height: calc(min(42vh, 320px) - 38px);
-    gap: 6px;
+    gap: 4px;
   }
 
   .scoreboard-entry {
-    padding: 8px 9px;
-    gap: 8px;
+    padding: 5px 6px;
+    gap: 5px;
   }
 
   .start-card {

@@ -128,6 +128,11 @@ const CLIENT_TICK = Object.freeze({
   fixedDeltaSeconds: 1 / GAME_CONFIG.serverTickRate
 });
 
+const LOCAL_INPUT_RESPONSE = Object.freeze({
+  maxSendRate: Math.max(CLIENT_TICK.rate, Math.min(40, GAME_CONFIG.antiCheat?.maxInputsPerSecond ?? 40)),
+  maxPredictionStepSeconds: 1 / 30
+});
+
 const WORLD_RENDER = Object.freeze({
   gridSize: 64,
   cameraFollow: 0.14
@@ -241,6 +246,9 @@ let cameraShakeY = 0;
 let hasSeenLocalPlayerSnapshot = false;
 let joinInProgress = false;
 let nextInputSeq = 1;
+let lastInputDispatchAt = 0;
+let lastLocalInputChangedAt = 0;
+let lastDispatchedInputState = null;
 let nextReliableMessageId = 1;
 let roomBrowserRefreshInFlight = false;
 let audioContext = null;
@@ -724,6 +732,67 @@ function hasMovementInputActive() {
   );
 }
 
+function markLocalInputChanged(now = Date.now()) {
+  lastLocalInputChangedAt = now;
+}
+
+function captureLiveInputState(now = Date.now()) {
+  const localPlayer = getLocalPlayer();
+  const visualState = ensureLocalVisualState(localPlayer);
+  const renderState = ensureLocalRenderState();
+  const target = refreshPointerWorldPosition();
+  const capturedInputState = getCapturedInputState();
+  const aimOrigin = visualState ?? renderState;
+  const turretAngle = aimOrigin
+    ? Math.atan2(target.y - aimOrigin.y, target.x - aimOrigin.x)
+    : 0;
+
+  return {
+    clientSentAt: now,
+    ...capturedInputState,
+    turretAngle
+  };
+}
+
+function areInputStatesEquivalent(left, right) {
+  if (!left || !right) {
+    return false;
+  }
+
+  return (
+    Boolean(left.forward) === Boolean(right.forward) &&
+    Boolean(left.back) === Boolean(right.back) &&
+    Boolean(left.left) === Boolean(right.left) &&
+    Boolean(left.right) === Boolean(right.right) &&
+    Boolean(left.shoot) === Boolean(right.shoot) &&
+    Math.abs(normalizeAngle((left.turretAngle ?? 0) - (right.turretAngle ?? 0))) <= 0.0005
+  );
+}
+
+function applyLocalPredictedState(localPlayer, predicted) {
+  if (!localPlayer || !predicted) {
+    return;
+  }
+
+  const visualState = ensureLocalVisualState(localPlayer);
+  if (visualState) {
+    visualState.x = predicted.x;
+    visualState.y = predicted.y;
+    visualState.angle = predicted.angle;
+    visualState.turretAngle = predicted.turretAngle;
+  }
+
+  localPlayer.renderX = predicted.x;
+  localPlayer.renderY = predicted.y;
+  localPlayer.renderAngle = predicted.angle;
+  localPlayer.renderTurretAngle = predicted.turretAngle;
+  localPlayer.displayX = predicted.x + (localPlayer.correctionOffsetX ?? 0);
+  localPlayer.displayY = predicted.y + (localPlayer.correctionOffsetY ?? 0);
+  localPlayer.displayAngle = predicted.angle + (localPlayer.correctionOffsetAngle ?? 0);
+  localPlayer.displayTurretAngle =
+    predicted.turretAngle + (localPlayer.correctionOffsetTurretAngle ?? 0);
+}
+
 function ensureLocalVisualState(localPlayer = getLocalPlayer()) {
   if (!localPlayer || localPlayer.isSpectator) {
     localVisualState = null;
@@ -790,15 +859,19 @@ function updateLocalRenderState(deltaSeconds) {
     return null;
   }
 
-  const gapDistance = Math.hypot(visualState.x - renderState.x, visualState.y - renderState.y);
-
-  if (!hasMovementInputActive()) {
+  if (canSimulateLocalPlayer() && localPlayer.alive) {
     renderState.x = visualState.x;
     renderState.y = visualState.y;
     renderState.angle = visualState.angle;
-    renderState.turretAngle = visualState.turretAngle;
+    renderState.turretAngle = lerpAngle(
+      renderState.turretAngle,
+      visualState.turretAngle,
+      getTurretVisualSmoothing(deltaSeconds)
+    );
     return renderState;
   }
+
+  const gapDistance = Math.hypot(visualState.x - renderState.x, visualState.y - renderState.y);
 
   const followAmount = canSimulateLocalPlayer() && localPlayer.alive
     ? clamp(1 - Math.exp(-(hasMovementInputActive() ? 28 : 18) * deltaSeconds), 0.24, 0.62)
@@ -2051,7 +2124,16 @@ function updateCamera(deltaSeconds) {
     return;
   }
 
-  const followAmount = clamp(1 - Math.exp(-14 * deltaSeconds), 0.12, 0.55);
+  const localPlayer = getLocalPlayer();
+  const responsiveLocalCamera = Boolean(
+    localPlayer &&
+    !localPlayer.isSpectator &&
+    canSimulateLocalPlayer() &&
+    localPlayer.alive
+  );
+  const followAmount = responsiveLocalCamera
+    ? clamp(1 - Math.exp(-(hasMovementInputActive() ? 26 : 20) * deltaSeconds), 0.22, 0.82)
+    : clamp(1 - Math.exp(-14 * deltaSeconds), 0.12, 0.55);
   camera.x = lerp(camera.x, target.x, followAmount);
   camera.y = lerp(camera.y, target.y, followAmount);
   const clamped = clampCameraPosition(camera.x, camera.y);
@@ -2794,23 +2876,12 @@ function bridgeAuthoritativeBulletToPrediction(current, authoritativeBullet, pre
   current.handoffOffsetY = predictedY - (authoritativeBullet.y ?? predictedY);
 }
 
-function createInputFrame() {
-  const localPlayer = getLocalPlayer();
-  const visualState = ensureLocalVisualState(localPlayer);
-  const renderState = ensureLocalRenderState();
-  const target = refreshPointerWorldPosition();
+function createInputFrame(liveInputState = captureLiveInputState()) {
   const seq = nextInputSeq++;
-  const capturedInputState = getCapturedInputState();
-  const aimOrigin = renderState ?? visualState;
-  const turretAngle = aimOrigin
-    ? Math.atan2(target.y - aimOrigin.y, target.x - aimOrigin.x)
-    : 0;
 
   return {
     seq,
-    clientSentAt: Date.now(),
-    ...capturedInputState,
-    turretAngle
+    ...liveInputState
   };
 }
 
@@ -2819,6 +2890,81 @@ function serializeInputFrame(inputFrame) {
     type: MESSAGE_TYPES.INPUT,
     ...inputFrame
   };
+}
+
+function getLocalInputDispatchMinIntervalMs() {
+  return Math.ceil(1000 / LOCAL_INPUT_RESPONSE.maxSendRate);
+}
+
+function dispatchLocalInput(options = {}) {
+  const { force = false } = options;
+  const now = Date.now();
+  const liveInputState = captureLiveInputState(now);
+
+  if (now - lastInputDispatchAt < getLocalInputDispatchMinIntervalMs()) {
+    return null;
+  }
+
+  if (socket?.readyState !== WebSocket.OPEN) {
+    return null;
+  }
+
+  const localPlayer = getLocalPlayer();
+  if (!localPlayer || localPlayer.isSpectator) {
+    return null;
+  }
+
+  if (!force && areInputStatesEquivalent(lastDispatchedInputState, liveInputState)) {
+    return null;
+  }
+
+  const inputFrame = createInputFrame(liveInputState);
+  send(serializeInputFrame(inputFrame));
+  lastInputDispatchAt = inputFrame.clientSentAt;
+  lastDispatchedInputState = inputFrame;
+
+  if (!canSimulateLocalPlayer() || !localPlayer.alive) {
+    return inputFrame;
+  }
+
+  bufferPendingInput(inputFrame);
+  if (
+    inputFrame.shoot &&
+    canPredictLocalShots() &&
+    Date.now() - (localPlayer.lastPredictedShotAt ?? 0) >= getEffectiveLocalReloadMs()
+  ) {
+    localPlayer.lastPredictedShotAt = Date.now();
+    spawnPredictedProjectile(localPlayer, inputFrame);
+  }
+
+  return inputFrame;
+}
+
+function updateResponsiveLocalPrediction(deltaSeconds) {
+  const localPlayer = getLocalPlayer();
+  if (!localPlayer || localPlayer.isSpectator || !canSimulateLocalPlayer() || !localPlayer.alive) {
+    return;
+  }
+
+  const visualState = ensureLocalVisualState(localPlayer);
+  if (!visualState) {
+    return;
+  }
+
+  const liveInput = captureLiveInputState();
+  const predictionScale = getPredictionScaleForGapMs(getStatePacketAgeMs(liveInput.clientSentAt));
+  const predicted = simulateTankMovement(
+    {
+      x: visualState.x,
+      y: visualState.y,
+      angle: visualState.angle,
+      turretAngle: visualState.turretAngle
+    },
+    liveInput,
+    Math.min(deltaSeconds, LOCAL_INPUT_RESPONSE.maxPredictionStepSeconds) * predictionScale
+  );
+
+  applyLocalPredictedState(localPlayer, predicted);
 }
 
 function bufferPendingInput(inputFrame) {
@@ -3130,6 +3276,22 @@ function computePredictedLocalState(
     );
     activeInput = input;
     segmentStartMs = input.clientSentAt;
+  }
+
+  const liveInput = captureLiveInputState(now);
+  const liveInputChangeAt = clamp(lastLocalInputChangedAt || 0, replayStartMs, now);
+  if (liveInput && !areInputStatesEquivalent(activeInput, liveInput) && liveInputChangeAt > segmentStartMs) {
+    predicted = simulatePredictedMovementForDuration(
+      predicted,
+      activeInput,
+      liveInputChangeAt - segmentStartMs,
+      predictionScale
+    );
+    activeInput = liveInput;
+    segmentStartMs = liveInputChangeAt;
+  } else if (!activeInput && liveInput && liveInputChangeAt > replayStartMs) {
+    activeInput = liveInput;
+    segmentStartMs = liveInputChangeAt;
   }
 
   // Replay by elapsed time instead of packet count so redundant or batched input
@@ -3575,6 +3737,9 @@ function connect(options = {}) {
     predictedProjectiles.clear();
     pendingInputs.length = 0;
     nextInputSeq = 1;
+    lastInputDispatchAt = 0;
+    lastLocalInputChangedAt = 0;
+    lastDispatchedInputState = null;
     nextReliableMessageId = 1;
     latestMatch = null;
     latestLobby = null;
@@ -3784,6 +3949,9 @@ function connect(options = {}) {
       rotateClientSessionId();
       setStatus(`This session was claimed elsewhere. Rejoining with a fresh local session... | ${formatSocketCloseInfo(closeInfo)}`);
       pendingInputs.length = 0;
+      lastInputDispatchAt = 0;
+      lastLocalInputChangedAt = 0;
+      lastDispatchedInputState = null;
       currentRoomId ||= roomInput.value || "default";
       scheduleReconnect();
       return;
@@ -3806,6 +3974,9 @@ function connect(options = {}) {
 
     if (currentRoomId) {
       pendingInputs.length = 0;
+      lastInputDispatchAt = 0;
+      lastLocalInputChangedAt = 0;
+      lastDispatchedInputState = null;
       scheduleReconnect();
       return;
     }
@@ -3841,6 +4012,9 @@ function connect(options = {}) {
     killFeedEntries.length = 0;
     renderKillFeed();
     pendingInputs.length = 0;
+    lastInputDispatchAt = 0;
+    lastLocalInputChangedAt = 0;
+    lastDispatchedInputState = null;
     lastStallWarningAt = 0;
     localXp = 0;
     displayXp = 0;
@@ -4416,20 +4590,22 @@ function drawTank(player, pose = getTankRenderPose(player), frameNow = performan
     context.restore();
   }
 
-  // Player name above tank
-  context.save();
-  context.globalAlpha = alpha;
-  context.font = "bold 12px Segoe UI";
-  context.textAlign = "center";
-  context.fillStyle = isLocalPlayer ? "#ffd166" : "#ffffff";
-  context.fillText(player.name ?? "", x, y - bodyRadius - 22);
-  context.restore();
+  if (!isLocalPlayer) {
+    // Remote player names stay above their tanks; the local player's name is drawn near the XP bar.
+    context.save();
+    context.globalAlpha = alpha;
+    context.font = "bold 12px Segoe UI";
+    context.textAlign = "center";
+    context.fillStyle = "#ffffff";
+    context.fillText(player.name ?? "", x, y - bodyRadius - 22);
+    context.restore();
+  }
 
   // Health bar
   const hpRatio = clamp((Number(player.displayHp ?? player.hp) || 0) / Math.max(1, Number(player.maxHp) || GAME_CONFIG.tank.hitPoints), 0, 1);
   const healthBarWidth = 52;
   const healthBarHeight = 7;
-  const healthBarY = y - bodyRadius - 16;
+  const healthBarY = isLocalPlayer ? y + bodyRadius + 10 : y - bodyRadius - 16;
   const healthBarX = x - healthBarWidth / 2;
 
   context.save();
@@ -4739,7 +4915,8 @@ function drawXpBar() {
   if (!currentRoomId) {
     return;
   }
-  const barWidth = Math.min(600, canvas.width * 0.6);
+  const baseBarWidth = Math.min(600, canvas.width * 0.6);
+  const barWidth = baseBarWidth / 3;
   const barHeight = 20;
   const barX = (canvas.width - barWidth) / 2;
   const barY = canvas.height - barHeight - 10;
@@ -4750,6 +4927,7 @@ function drawXpBar() {
   const xpNeeded = Math.max(1, nextLevelXp - currentLevelXp);
   const xpRatio = localLevel >= MAX_LEVEL ? 1 : clamp(xpIntoLevel / xpNeeded, 0, 1);
   const classDef = getLocalTankClassDef();
+  const localPlayerName = getLocalPlayer()?.name ?? nameInput?.value?.trim() ?? "Player";
   const upgradeHint =
     localPendingUpgrades.length > 0
       ? "Upgrade ready"
@@ -4768,20 +4946,32 @@ function drawXpBar() {
   context.beginPath();
   context.roundRect(barX, barY, barWidth * xpRatio, barHeight, 4);
   context.fill();
-  // Text
-  context.font = "bold 12px Segoe UI";
-  context.fillStyle = "#ffffff";
-  context.textAlign = "left";
-  context.fillText(`Lv ${localLevel} ${classDef.name}`, barX + 6, barY + 14);
-  context.textAlign = "right";
-  if (localLevel < MAX_LEVEL) {
-    context.fillText(`${xpIntoLevel} / ${xpNeeded} XP`, barX + barWidth - 6, barY + 14);
-  } else {
-    context.fillText("MAX LEVEL", barX + barWidth - 6, barY + 14);
-  }
+  // HUD labels
   context.textAlign = "center";
+  context.font = "bold 13px Segoe UI";
+  context.lineWidth = 3;
+  context.strokeStyle = "rgba(255,255,255,0.85)";
+  context.strokeText(localPlayerName, barX + barWidth / 2, barY - 24);
+  context.fillStyle = "#000000";
+  context.fillText(localPlayerName, barX + barWidth / 2, barY - 24);
+
+  context.font = "bold 11px Segoe UI";
   context.fillStyle = localPendingUpgrades.length > 0 ? "#ffd166" : "#dbeafe";
   context.fillText(upgradeHint, barX + barWidth / 2, barY - 8);
+
+  // Bar text
+  context.font = "bold 10px Segoe UI";
+  context.fillStyle = "#ffffff";
+  context.textAlign = "left";
+  context.fillText(`Lv ${localLevel}`, barX + 6, barY + 13);
+  context.textAlign = "center";
+  context.fillText(classDef.name, barX + barWidth / 2, barY + 13);
+  context.textAlign = "right";
+  if (localLevel < MAX_LEVEL) {
+    context.fillText(`${Math.round(xpRatio * 100)}%`, barX + barWidth - 6, barY + 13);
+  } else {
+    context.fillText("MAX", barX + barWidth - 6, barY + 13);
+  }
   context.restore();
 }
 
@@ -5193,6 +5383,7 @@ function render(frameAt = performance.now()) {
     if (shouldRenderGameScreen) {
       refreshTimedUi(frameAt);
 
+      updateResponsiveLocalPrediction(deltaSeconds);
       updateRenderState(deltaSeconds, frameAt);
       updateLocalRenderState(deltaSeconds);
       updateCamera(deltaSeconds);
@@ -5343,37 +5534,66 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
+  const hadKey = keys.has(event.code);
   keys.add(event.code);
+  if (!hadKey) {
+    markLocalInputChanged();
+    dispatchLocalInput();
+  }
 });
 
 window.addEventListener("keyup", (event) => {
-  keys.delete(event.code);
+  if (keys.delete(event.code)) {
+    markLocalInputChanged();
+    dispatchLocalInput();
+  }
 });
 
 window.addEventListener("resize", resizeCanvas);
 
 canvas.addEventListener("pointermove", (event) => {
   updateTrackedPointerPosition(event);
+  markLocalInputChanged();
 });
 
 canvas.addEventListener("pointerdown", (event) => {
   unlockAudio();
   updateTrackedPointerPosition(event);
   if (event.button === 0) {
+    const wasPrimaryDown = pointerPrimaryDown;
     pointerPrimaryDown = true;
+    if (!wasPrimaryDown) {
+      markLocalInputChanged();
+      dispatchLocalInput();
+    }
   }
 });
 window.addEventListener("pointerup", (event) => {
   if (event.button === 0) {
+    const wasPrimaryDown = pointerPrimaryDown;
     pointerPrimaryDown = false;
+    if (wasPrimaryDown) {
+      markLocalInputChanged();
+      dispatchLocalInput();
+    }
   }
 });
 window.addEventListener("pointercancel", () => {
+  const wasPrimaryDown = pointerPrimaryDown;
   pointerPrimaryDown = false;
+  if (wasPrimaryDown) {
+    markLocalInputChanged();
+    dispatchLocalInput();
+  }
 });
 window.addEventListener("blur", () => {
+  const hadMovementInput = keys.size > 0 || pointerPrimaryDown;
   keys.clear();
   pointerPrimaryDown = false;
+  if (hadMovementInput) {
+    markLocalInputChanged();
+    dispatchLocalInput();
+  }
 });
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
@@ -5383,62 +5603,7 @@ setInterval(() => {
   clientSimulationTick += 1;
   simulatePredictedProjectiles(CLIENT_TICK.fixedDeltaSeconds);
 
-  if (socket?.readyState !== WebSocket.OPEN) {
-    return;
-  }
-
-  const localPlayer = getLocalPlayer();
-  if (!localPlayer || localPlayer.isSpectator) {
-    return;
-  }
-
-  const visualState = ensureLocalVisualState(localPlayer);
-  const inputFrame = createInputFrame();
-  send(serializeInputFrame(inputFrame));
-
-  if (!canSimulateLocalPlayer() || !localPlayer.alive) {
-    return;
-  }
-
-  bufferPendingInput(inputFrame);
-  if (
-    inputFrame.shoot &&
-    canPredictLocalShots() &&
-    Date.now() - (localPlayer.lastPredictedShotAt ?? 0) >= getEffectiveLocalReloadMs()
-  ) {
-    localPlayer.lastPredictedShotAt = Date.now();
-    spawnPredictedProjectile(localPlayer, inputFrame);
-  }
-
-  const predictionScale = getPredictionScaleForGapMs(getStatePacketAgeMs(inputFrame.clientSentAt));
-
-  const predicted = simulateTankMovement(
-    {
-      x: visualState?.x ?? localPlayer.renderX ?? localPlayer.x,
-      y: visualState?.y ?? localPlayer.renderY ?? localPlayer.y,
-      angle: visualState?.angle ?? localPlayer.renderAngle ?? localPlayer.angle,
-      turretAngle: visualState?.turretAngle ?? localPlayer.renderTurretAngle ?? localPlayer.turretAngle
-    },
-    inputFrame,
-    CLIENT_TICK.fixedDeltaSeconds * predictionScale
-  );
-
-  if (visualState) {
-    visualState.x = predicted.x;
-    visualState.y = predicted.y;
-    visualState.angle = predicted.angle;
-    visualState.turretAngle = predicted.turretAngle;
-  }
-
-  localPlayer.renderX = predicted.x;
-  localPlayer.renderY = predicted.y;
-  localPlayer.renderAngle = predicted.angle;
-  localPlayer.renderTurretAngle = predicted.turretAngle;
-  localPlayer.displayX = predicted.x + (localPlayer.correctionOffsetX ?? 0);
-  localPlayer.displayY = predicted.y + (localPlayer.correctionOffsetY ?? 0);
-  localPlayer.displayAngle = predicted.angle + (localPlayer.correctionOffsetAngle ?? 0);
-  localPlayer.displayTurretAngle =
-    predicted.turretAngle + (localPlayer.correctionOffsetTurretAngle ?? 0);
+  dispatchLocalInput({ force: true });
 }, 1000 / CLIENT_TICK.rate);
 
 setInterval(() => {
