@@ -505,6 +505,16 @@ function createBotAiState(playerId, now = Date.now()) {
     lastProgressAt: now,
     lastProgressX: null,
     lastProgressY: null,
+    targetLockUntil: 0,
+    pursuitTargetId: null,
+    lastSeenTargetX: null,
+    lastSeenTargetY: null,
+    lastSeenTargetAt: 0,
+    pursuitUntil: 0,
+    anchorX: null,
+    anchorY: null,
+    anchorTargetId: null,
+    anchorUntil: 0,
     phaseOffsetMs: Math.abs(hashSeed(`bot:${playerId}`)) % thinkIntervalMs,
     strafeDirection,
     strafeSwapAt: now + GAME_CONFIG.ai.strafeIntervalMs + strafeJitter,
@@ -1074,6 +1084,15 @@ function updateBotProgressState(player, now) {
   }
 
   const ai = player.ai;
+  const isTryingToMove = Boolean(player.input.forward || player.input.back || player.input.left || player.input.right);
+  if (!isTryingToMove) {
+    ai.lastProgressX = player.x;
+    ai.lastProgressY = player.y;
+    ai.lastProgressAt = now;
+    ai.stuck = false;
+    return;
+  }
+
   const lastX = ai.lastProgressX ?? player.x;
   const lastY = ai.lastProgressY ?? player.y;
   const movedDistance = Math.hypot(player.x - lastX, player.y - lastY);
@@ -1106,12 +1125,41 @@ function normalizeVector(x, y) {
   };
 }
 
+function getBotProjectileSpeed(player) {
+  const classDef = CLASS_TREE[player?.tankClassId] ?? CLASS_TREE.basic;
+  const bulletSpeedStat = Number(player?.stats?.bulletSpeed ?? 0) || 0;
+  return (classDef.bulletSpeed ?? GAME_CONFIG.bullet.speed) * (1 + bulletSpeedStat * 0.08);
+}
+
+function getBotShootRange(player) {
+  const projectileSpeed = getBotProjectileSpeed(player);
+  const classMultiplier = BOT_AI_CLASS_SHOOT_RANGE_MULTIPLIERS[player?.tankClassId] ?? 1;
+  const projectileFactor = clamp(projectileSpeed / Math.max(1, GAME_CONFIG.bullet.speed), 0.82, 1.8);
+  return clamp(
+    GAME_CONFIG.ai.shootRange * classMultiplier * (0.9 + (projectileFactor - 1) * 0.42),
+    GAME_CONFIG.ai.preferredRange * 1.15,
+    GAME_CONFIG.visibility.playerVisionRadius * 0.92
+  );
+}
+
+function getBotAwarenessRange(player) {
+  return clamp(
+    getBotShootRange(player) * 1.85,
+    GAME_CONFIG.visibility.playerVisionRadius * 0.78,
+    GAME_CONFIG.visibility.playerVisionRadius * 1.2
+  );
+}
+
 function getBotPreferredRange(player) {
   const bias = Number(player?.ai?.rangeBias ?? 0) || 0;
+  const classMultiplier = BOT_AI_CLASS_RANGE_MULTIPLIERS[player?.tankClassId] ?? 1;
+  const projectileFactor = clamp(getBotProjectileSpeed(player) / Math.max(1, GAME_CONFIG.bullet.speed), 0.84, 1.8);
+  const projectileBias = (projectileFactor - 1) * 55;
+  const shootRange = getBotShootRange(player);
   return clamp(
-    GAME_CONFIG.ai.preferredRange + bias,
+    GAME_CONFIG.ai.preferredRange * classMultiplier + projectileBias + bias,
     GAME_CONFIG.tank.radius * 6,
-    GAME_CONFIG.ai.shootRange * 0.92
+    shootRange * 0.9
   );
 }
 
@@ -1128,6 +1176,65 @@ function scheduleNextBotStrafeSwap(player, now) {
       ? Math.abs(hashSeed(`strafe:${player.id}:${cycleIndex}`)) % (jitterWindow + 1)
       : 0;
   return now + baseInterval + jitter;
+}
+
+function clearBotTargetMemory(player) {
+  const ai = player?.ai;
+  if (!ai) {
+    return;
+  }
+
+  ai.pursuitTargetId = null;
+  ai.lastSeenTargetX = null;
+  ai.lastSeenTargetY = null;
+  ai.lastSeenTargetAt = 0;
+  ai.pursuitUntil = 0;
+}
+
+function updateBotTargetMemory(player, target, now) {
+  const ai = player?.ai;
+  if (!ai || !target || !isFiniteWorldPoint(target.x, target.y)) {
+    return;
+  }
+
+  ai.pursuitTargetId = target.id ?? ai.pursuitTargetId ?? null;
+  ai.lastSeenTargetX = Number(target.x);
+  ai.lastSeenTargetY = Number(target.y);
+  ai.lastSeenTargetAt = now;
+  ai.pursuitUntil = now + BOT_AI_PURSUIT_MEMORY_MS;
+}
+
+function getBotRememberedTarget(room, player, targetId = null, now = Date.now()) {
+  const ai = player?.ai;
+  const rememberedId = targetId ?? ai?.pursuitTargetId ?? null;
+  if (!ai || !rememberedId) {
+    return null;
+  }
+
+  if (ai.pursuitTargetId !== rememberedId || now > (Number(ai.pursuitUntil ?? 0) || 0)) {
+    if (targetId === null || ai.pursuitTargetId === rememberedId) {
+      clearBotTargetMemory(player);
+    }
+    return null;
+  }
+
+  const rememberedPlayer = room?.players?.get?.(rememberedId) ?? null;
+  if (rememberedPlayer && !isEnemyBotTarget(player, rememberedPlayer, now)) {
+    clearBotTargetMemory(player);
+    return null;
+  }
+
+  if (!isFiniteWorldPoint(ai.lastSeenTargetX, ai.lastSeenTargetY)) {
+    clearBotTargetMemory(player);
+    return null;
+  }
+
+  return {
+    id: rememberedId,
+    x: ai.lastSeenTargetX,
+    y: ai.lastSeenTargetY,
+    remembered: true
+  };
 }
 
 function updateBotTacticalState(player, now, options = {}) {
@@ -1467,6 +1574,43 @@ function createProfile(profileId, playerName) {
     }
   };
 }
+
+const BOT_AI_CLASS_RANGE_MULTIPLIERS = Object.freeze({
+  basic: 1,
+  twin: 0.95,
+  sniper: 1.42,
+  machine_gun: 0.8,
+  flank_guard: 0.92,
+  triple_shot: 0.96,
+  twin_flank: 0.93,
+  assassin: 1.58,
+  overseer: 1.18,
+  fighter: 0.88,
+  destroyer: 0.82,
+  auto_3: 1.08
+});
+
+const BOT_AI_CLASS_SHOOT_RANGE_MULTIPLIERS = Object.freeze({
+  basic: 1,
+  twin: 0.96,
+  sniper: 1.34,
+  machine_gun: 0.84,
+  flank_guard: 0.94,
+  triple_shot: 0.98,
+  twin_flank: 0.95,
+  assassin: 1.46,
+  overseer: 1.2,
+  fighter: 0.9,
+  destroyer: 0.88,
+  auto_3: 1.12
+});
+
+const BOT_AI_TARGET_LOCK_MS = 1350;
+const BOT_AI_TARGET_SWITCH_SCORE = 185;
+const BOT_AI_PURSUIT_MEMORY_MS = 1600;
+const BOT_AI_AIM_SAMPLE_MS = 180;
+const BOT_AI_MAX_LEAD_SECONDS = 0.65;
+const BOT_AI_ANCHOR_HOLD_MS = 850;
 
 function createProfilesDocument() {
   return {
@@ -2245,6 +2389,11 @@ function createRoom(roomId) {
     lastSimulatedAt: createdAt,
     rngSeed,
     rng: createSeededRng(rngSeed),
+    playerOrderVersion: 0,
+    playerOrderCache: {
+      version: -1,
+      players: []
+    },
     interestIndex: {
       tickNumber: -1,
       playerCells: new Map(),
@@ -3411,24 +3560,93 @@ function computeBulletInterestPriority(room, viewer, bullet, knownEntities) {
   return priority;
 }
 
-function diffReplicationState(previousState, nextState) {
-  const diff = {};
-  const keys = new Set([...Object.keys(previousState ?? {}), ...Object.keys(nextState ?? {})]);
+function isReplicationContainer(value) {
+  return value !== null && typeof value === "object";
+}
 
-  for (const key of keys) {
-    const previousValue = previousState?.[key];
-    const nextValue = nextState?.[key];
+function cloneReplicationValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneReplicationValue(entry));
+  }
 
-    if (JSON.stringify(previousValue) !== JSON.stringify(nextValue)) {
-      diff[key] = nextValue;
+  if (!isReplicationContainer(value)) {
+    return value;
+  }
+
+  const clone = {};
+  for (const [key, entryValue] of Object.entries(value)) {
+    clone[key] = cloneReplicationValue(entryValue);
+  }
+  return clone;
+}
+
+function replicationValuesEqual(left, right) {
+  if (left === right) {
+    return true;
+  }
+
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+      return false;
+    }
+
+    for (let index = 0; index < left.length; index += 1) {
+      if (!replicationValuesEqual(left[index], right[index])) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  if (!isReplicationContainer(left) || !isReplicationContainer(right)) {
+    return false;
+  }
+
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+
+  for (const key of leftKeys) {
+    if (!Object.prototype.hasOwnProperty.call(right, key)) {
+      return false;
+    }
+
+    if (!replicationValuesEqual(left[key], right[key])) {
+      return false;
     }
   }
 
-  return diff;
+  return true;
+}
+
+function diffReplicationState(previousState, nextState) {
+  const diff = {};
+  let hasChanges = false;
+  const previous = previousState ?? {};
+  const next = nextState ?? {};
+
+  for (const [key, nextValue] of Object.entries(next)) {
+    if (!replicationValuesEqual(previous[key], nextValue)) {
+      diff[key] = cloneReplicationValue(nextValue);
+      hasChanges = true;
+    }
+  }
+
+  for (const key of Object.keys(previous)) {
+    if (!Object.prototype.hasOwnProperty.call(next, key)) {
+      diff[key] = undefined;
+      hasChanges = true;
+    }
+  }
+
+  return hasChanges ? diff : null;
 }
 
 function cloneReplicationState(state) {
-  return JSON.parse(JSON.stringify(state ?? {}));
+  return cloneReplicationValue(state ?? {});
 }
 
 function isBulletRelevantToPlayer(player, bullet) {
@@ -3549,7 +3767,7 @@ function buildReplicationPayloadForSocket(socket, room, player, snapshotSeq, now
     }
 
     const stateDelta = diffReplicationState(previous.state, record.state);
-    if (Object.keys(stateDelta).length > 0) {
+    if (stateDelta) {
       updates.push({
         kind: record.kind,
         id: record.id,
@@ -5238,12 +5456,34 @@ function getConnectedPlayers(room) {
   return Array.from(room.players.values()).filter((player) => player.connected);
 }
 
+function markRoomPlayerOrderDirty(room) {
+  if (!room) {
+    return;
+  }
+
+  room.playerOrderVersion = Number(room.playerOrderVersion ?? 0) + 1;
+  room.playerOrderCache = {
+    version: -1,
+    players: []
+  };
+  room.interestIndex.tickNumber = -1;
+}
+
 function comparePlayersInSimulationOrder(left, right) {
   return left.joinedRoomAt - right.joinedRoomAt || left.id.localeCompare(right.id);
 }
 
 function getPlayersInSimulationOrder(room) {
-  return Array.from(room.players.values()).sort(comparePlayersInSimulationOrder);
+  if (room.playerOrderCache?.version === room.playerOrderVersion) {
+    return room.playerOrderCache.players;
+  }
+
+  const playersInOrder = Array.from(room.players.values()).sort(comparePlayersInSimulationOrder);
+  room.playerOrderCache = {
+    version: room.playerOrderVersion,
+    players: playersInOrder
+  };
+  return playersInOrder;
 }
 
 function isValidLobbyOptionId(value, options) {
@@ -7791,6 +8031,7 @@ function removePlayerFromRoom(room, playerId, options = {}) {
   clearOwnedEntityLifecycle(room, playerId);
   player.slotReserved = false;
   room.players.delete(playerId);
+  markRoomPlayerOrderDirty(room);
   syncRoomOwner(room);
   return player;
 }
@@ -8210,6 +8451,7 @@ function syncRoomBots(room, now) {
 
     const bot = createBotState(room, identity.teamId, identity.slotIndex, now);
     room.players.set(bot.id, bot);
+    markRoomPlayerOrderDirty(room);
     if (room.match.phase !== MATCH_PHASES.WAITING && !isWarmupPhase(room.match.phase)) {
       queueSpawnStateEvent(room, bot, now);
       queueAnimationStateEvent(room, bot, ANIMATION_ACTIONS.SPAWN, now);
@@ -8633,6 +8875,7 @@ function joinRoom(socket, payload) {
     });
     markPlayerActive(player, now);
     room.players.set(player.id, player);
+    markRoomPlayerOrderDirty(room);
   }
 
   socket.data.roomId = roomId;
@@ -9270,7 +9513,34 @@ function getBotThreatScore(player, candidateId, now) {
   return ageRatio * (180 + Math.min(260, threat.damage * 9));
 }
 
+function canBotSenseTarget(room, player, candidate, now) {
+  if (!isEnemyBotTarget(player, candidate, now)) {
+    return false;
+  }
+
+  if (getBotThreatScore(player, candidate.id, now) > 0) {
+    return true;
+  }
+
+  const awarenessRange = getBotAwarenessRange(player);
+  if (canViewerSeePosition(room, player, candidate.x, candidate.y, GAME_CONFIG.tank.radius, awarenessRange)) {
+    return true;
+  }
+
+  const objectiveZone = getObjectiveZoneForPlayer(room, candidate);
+  if (objectiveZone && (objectiveZone.ownerTeamId !== player.teamId || isObjectiveZoneHot(objectiveZone))) {
+    return Math.hypot(candidate.x - player.x, candidate.y - player.y) <= awarenessRange * 1.08;
+  }
+
+  return (
+    candidate.id === player.ai?.pursuitTargetId &&
+    now <= (Number(player.ai?.pursuitUntil ?? 0) || 0)
+  );
+}
+
 function scoreBotTarget(room, player, candidate, now) {
+  const shootRange = getBotShootRange(player);
+  const preferredRange = getBotPreferredRange(player);
   const distance = Math.hypot(candidate.x - player.x, candidate.y - player.y);
   const hasLineOfSight = !segmentHitsObstacle(
     player.x,
@@ -9280,14 +9550,28 @@ function scoreBotTarget(room, player, candidate, now) {
     GAME_CONFIG.bullet.radius,
     getRoomMapLayout(room)
   );
-  let score = Math.max(0, 900 - distance);
-  score += hasLineOfSight ? 260 : 0;
-  score += Math.max(0, GAME_CONFIG.tank.hitPoints - candidate.hp) * 6;
+  const missingHp = Math.max(0, getPlayerMaxHitPoints(candidate) - (Number(candidate.hp ?? 0) || 0));
+  let score = Math.max(0, shootRange * 1.85 - distance);
+  score += hasLineOfSight ? 320 : -40;
+  score += missingHp * 4.5;
+  if (distance >= preferredRange * 0.75 && distance <= shootRange * 0.95) {
+    score += 120;
+  }
+  if ((Number(candidate.hp ?? 0) || 0) <= Math.max(35, getPlayerMaxHitPoints(candidate) * 0.28)) {
+    score += 180;
+  }
   score += getBotThreatScore(player, candidate.id, now);
 
   const objectiveZone = getObjectiveZoneForPlayer(room, candidate);
   if (objectiveZone && (objectiveZone.ownerTeamId !== candidate.teamId || isObjectiveZoneHot(objectiveZone))) {
     score += 220;
+  }
+
+  if (
+    candidate.id === player.ai?.pursuitTargetId &&
+    now <= (Number(player.ai?.pursuitUntil ?? 0) || 0)
+  ) {
+    score += 110;
   }
 
   if (candidate.id === player.ai?.targetId) {
@@ -9298,12 +9582,36 @@ function scoreBotTarget(room, player, candidate, now) {
 }
 
 function selectBotTarget(room, player, now) {
-  return getPlayersInSimulationOrder(room)
-    .filter((candidate) => isEnemyBotTarget(player, candidate, now))
+  const scoredCandidates = getPlayersInSimulationOrder(room)
+    .filter((candidate) => canBotSenseTarget(room, player, candidate, now))
+    .map((candidate) => ({
+      candidate,
+      score: scoreBotTarget(room, player, candidate, now)
+    }))
     .sort((left, right) => {
-      const scoreDelta = scoreBotTarget(room, player, right, now) - scoreBotTarget(room, player, left, now);
-      return scoreDelta || comparePlayersInSimulationOrder(left, right);
-    })[0] ?? null;
+      const scoreDelta = right.score - left.score;
+      return scoreDelta || comparePlayersInSimulationOrder(left.candidate, right.candidate);
+    });
+
+  const best = scoredCandidates[0] ?? null;
+  const current = scoredCandidates.find((entry) => entry.candidate.id === player.ai?.targetId) ?? null;
+  let selected = best;
+
+  if (current) {
+    const lockActive = now <= (Number(player.ai?.targetLockUntil ?? 0) || 0);
+    const switchThreshold = BOT_AI_TARGET_SWITCH_SCORE + (lockActive ? 80 : 0);
+    if (!best || best.score - current.score < switchThreshold) {
+      selected = current;
+    }
+  }
+
+  if (!selected) {
+    player.ai.targetLockUntil = 0;
+    return null;
+  }
+
+  player.ai.targetLockUntil = now + BOT_AI_TARGET_LOCK_MS;
+  return selected.candidate;
 }
 
 function hasLivingEnemyHuman(room, player, now) {
@@ -9477,12 +9785,74 @@ function findBotStrafeGoal(room, player, target, preferredRange = getBotPreferre
   });
 }
 
+function clearBotCombatAnchor(player) {
+  const ai = player?.ai;
+  if (!ai) {
+    return;
+  }
+
+  ai.anchorX = null;
+  ai.anchorY = null;
+  ai.anchorTargetId = null;
+  ai.anchorUntil = 0;
+}
+
+function getBotCombatAnchor(room, player, target, now, options = {}) {
+  const ai = player?.ai;
+  if (!ai || !target) {
+    return null;
+  }
+
+  if (
+    ai.anchorTargetId === target.id &&
+    now <= (Number(ai.anchorUntil ?? 0) || 0) &&
+    isFiniteWorldPoint(ai.anchorX, ai.anchorY) &&
+    isNavigableWorldPoint(ai.anchorX, ai.anchorY, GAME_CONFIG.tank.radius, getRoomMapLayout(room))
+  ) {
+    return {
+      x: ai.anchorX,
+      y: ai.anchorY
+    };
+  }
+
+  const preferredRange = options.preferredRange ?? getBotPreferredRange(player);
+  const currentDistance = Math.hypot(target.x - player.x, target.y - player.y);
+  const lowerRangeBound = preferredRange - GAME_CONFIG.ai.preferredRangeTolerance * 0.65;
+  const upperRangeBound = preferredRange + GAME_CONFIG.ai.preferredRangeTolerance;
+  let nextAnchor = null;
+
+  if (
+    options.hasLineOfSight &&
+    !options.shouldRetreat &&
+    !options.bulletThreat &&
+    currentDistance >= lowerRangeBound &&
+    currentDistance <= upperRangeBound
+  ) {
+    nextAnchor = { x: player.x, y: player.y };
+  } else {
+    nextAnchor =
+      findBotStrafeGoal(room, player, target, preferredRange) ??
+      findBotFlankGoal(room, player, target, preferredRange) ??
+      { x: player.x, y: player.y };
+  }
+
+  ai.anchorX = nextAnchor.x;
+  ai.anchorY = nextAnchor.y;
+  ai.anchorTargetId = target.id ?? null;
+  ai.anchorUntil = now + BOT_AI_ANCHOR_HOLD_MS;
+  return nextAnchor;
+}
+
 function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfSight, options = {}) {
   const soloBotDuel = isSoloBotDuelRoom(room);
   const objectivePlayEnabled = !soloBotDuel;
   const objectiveGoalZone = objectivePlayEnabled ? getObjectiveGoalZone(room, player.teamId, player) : null;
   const advancedCombat = Boolean(options.advancedCombat);
   const preferredRange = options.preferredRange ?? getBotPreferredRange(player);
+  const shootRange = options.shootRange ?? getBotShootRange(player);
+  if (!target) {
+    clearBotCombatAnchor(player);
+  }
   const lowerRangeBound = preferredRange - GAME_CONFIG.ai.preferredRangeTolerance;
   const upperRangeBound = preferredRange + GAME_CONFIG.ai.preferredRangeTolerance;
   const shouldRetreat =
@@ -9519,7 +9889,7 @@ function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfS
     };
   }
 
-  if (target && options.bulletThreat && targetDistance <= GAME_CONFIG.ai.shootRange) {
+  if (target && options.bulletThreat && targetDistance <= shootRange) {
     return {
       intent: BOT_AI_INTENTS.REPOSITION,
       goal:
@@ -9533,12 +9903,20 @@ function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfS
     return {
       intent: BOT_AI_INTENTS.ENGAGE,
       goal: advancedCombat
-        ? (findBotStrafeGoal(room, player, target, preferredRange) ?? { x: player.x, y: player.y })
+        ? (
+            getBotCombatAnchor(room, player, target, options.now ?? Date.now(), {
+              preferredRange,
+              shootRange,
+              hasLineOfSight,
+              bulletThreat: options.bulletThreat,
+              shouldRetreat
+            }) ?? { x: player.x, y: player.y }
+          )
         : { x: target.x, y: target.y }
     };
   }
 
-  if (target && targetDistance > (soloBotDuel ? GAME_CONFIG.ai.shootRange * 0.9 : upperRangeBound)) {
+  if (target && targetDistance > (soloBotDuel ? shootRange * 0.9 : upperRangeBound)) {
     return {
       intent: BOT_AI_INTENTS.ENGAGE,
       goal: { x: target.x, y: target.y }
@@ -9557,7 +9935,13 @@ function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfS
       intent: BOT_AI_INTENTS.ENGAGE,
       goal: advancedCombat
         ? (
-            findBotStrafeGoal(room, player, target, preferredRange) ??
+            getBotCombatAnchor(room, player, target, options.now ?? Date.now(), {
+              preferredRange,
+              shootRange,
+              hasLineOfSight,
+              bulletThreat: options.bulletThreat,
+              shouldRetreat
+            }) ??
             (soloBotDuel && hasLineOfSight ? { x: player.x, y: player.y } : { x: target.x, y: target.y })
           )
         : { x: target.x, y: target.y }
@@ -9640,6 +10024,110 @@ function selectBotBulletThreat(room, player) {
   return bestThreat;
 }
 
+function estimateTargetVelocity(target, now) {
+  if (!target?.stateHistory) {
+    return { x: 0, y: 0, speed: 0 };
+  }
+
+  const currentSample = sampleHistoricalPlayerState(target, now, now) ?? createPlayerHistorySample(target, now);
+  const previousSample = sampleHistoricalPlayerState(target, now - BOT_AI_AIM_SAMPLE_MS, now);
+  if (!previousSample || currentSample.time <= previousSample.time) {
+    return { x: 0, y: 0, speed: 0 };
+  }
+
+  const deltaSeconds = Math.max(0.001, (currentSample.time - previousSample.time) / 1000);
+  const velocityX = (currentSample.x - previousSample.x) / deltaSeconds;
+  const velocityY = (currentSample.y - previousSample.y) / deltaSeconds;
+  return {
+    x: velocityX,
+    y: velocityY,
+    speed: Math.hypot(velocityX, velocityY)
+  };
+}
+
+function solveInterceptPoint(origin, projectileSpeed, targetPosition, targetVelocity, maxLeadSeconds = BOT_AI_MAX_LEAD_SECONDS) {
+  if (!origin || !targetPosition || !Number.isFinite(projectileSpeed) || projectileSpeed <= 0) {
+    return null;
+  }
+
+  const relativeX = targetPosition.x - origin.x;
+  const relativeY = targetPosition.y - origin.y;
+  const velocityX = targetVelocity?.x ?? 0;
+  const velocityY = targetVelocity?.y ?? 0;
+  const speedSquared = projectileSpeed * projectileSpeed;
+  const velocitySquared = velocityX * velocityX + velocityY * velocityY;
+  const a = velocitySquared - speedSquared;
+  const b = 2 * (relativeX * velocityX + relativeY * velocityY);
+  const c = relativeX * relativeX + relativeY * relativeY;
+  let interceptTime = null;
+
+  if (Math.abs(a) < 0.0001) {
+    if (Math.abs(b) < 0.0001) {
+      interceptTime = 0;
+    } else {
+      interceptTime = -c / b;
+    }
+  } else {
+    const discriminant = b * b - 4 * a * c;
+    if (discriminant >= 0) {
+      const root = Math.sqrt(discriminant);
+      const timeA = (-b - root) / (2 * a);
+      const timeB = (-b + root) / (2 * a);
+      const positiveTimes = [timeA, timeB].filter((value) => value >= 0);
+      if (positiveTimes.length > 0) {
+        interceptTime = Math.min(...positiveTimes);
+      }
+    }
+  }
+
+  if (!Number.isFinite(interceptTime) || interceptTime === null) {
+    return null;
+  }
+
+  interceptTime = clamp(interceptTime, 0, maxLeadSeconds);
+  return {
+    x: targetPosition.x + velocityX * interceptTime,
+    y: targetPosition.y + velocityY * interceptTime,
+    time: interceptTime
+  };
+}
+
+function getBotAimPoint(player, target, now, options = {}) {
+  if (!target) {
+    return null;
+  }
+
+  if (target.remembered || !Array.isArray(target.stateHistory) || target.stateHistory.length < 2) {
+    return { x: target.x, y: target.y };
+  }
+
+  const projectileSpeed = getBotProjectileSpeed(player);
+  const targetVelocity = estimateTargetVelocity(target, now);
+  if (targetVelocity.speed <= 18) {
+    return { x: target.x, y: target.y };
+  }
+
+  const shootRange = options.shootRange ?? getBotShootRange(player);
+  const distance = Math.hypot(target.x - player.x, target.y - player.y);
+  const leadStrength = clamp(distance / Math.max(1, shootRange), 0.35, 1);
+  const interceptPoint = solveInterceptPoint(
+    { x: player.x, y: player.y },
+    projectileSpeed,
+    { x: target.x, y: target.y },
+    targetVelocity,
+    BOT_AI_MAX_LEAD_SECONDS
+  );
+
+  if (!interceptPoint) {
+    return { x: target.x, y: target.y };
+  }
+
+  return clampTankPosition(
+    target.x + (interceptPoint.x - target.x) * leadStrength,
+    target.y + (interceptPoint.y - target.y) * leadStrength
+  );
+}
+
 function getBotSeparationVector(room, player) {
   let totalX = 0;
   let totalY = 0;
@@ -9674,6 +10162,7 @@ function getBotSeparationVector(room, player) {
 
 function buildBotSteeringVector(room, player, navigationTarget, enemyTarget, options = {}) {
   const preferredRange = options.preferredRange ?? getBotPreferredRange(player);
+  const shootRange = options.shootRange ?? getBotShootRange(player);
   const rangeTolerance = GAME_CONFIG.ai.preferredRangeTolerance;
   const strafeWeight = options.soloBotDuel
     ? GAME_CONFIG.ai.strafeWeight * 0.55
@@ -9694,7 +10183,7 @@ function buildBotSteeringVector(room, player, navigationTarget, enemyTarget, opt
       const shouldRetreat = Boolean(options.shouldRetreat);
       const shouldStrafe =
         Boolean(options.hasLineOfSight) &&
-        distance <= GAME_CONFIG.ai.shootRange * 1.05 &&
+        distance <= shootRange * 1.05 &&
         !shouldRetreat;
 
       if (shouldRetreat || distance < preferredRange - rangeTolerance) {
@@ -9703,7 +10192,7 @@ function buildBotSteeringVector(room, player, navigationTarget, enemyTarget, opt
           : clamp((preferredRange - distance) / Math.max(1, preferredRange), 0.18, 1);
         totalX -= toTarget.x * retreatWeight;
         totalY -= toTarget.y * retreatWeight;
-      } else if (distance > preferredRange + rangeTolerance && (!options.hasLineOfSight || distance > GAME_CONFIG.ai.shootRange * 0.92)) {
+      } else if (distance > preferredRange + rangeTolerance && (!options.hasLineOfSight || distance > shootRange * 0.92)) {
         const closeWeight = clamp((distance - preferredRange) / Math.max(1, preferredRange), 0.12, 1.1);
         totalX += toTarget.x * closeWeight;
         totalY += toTarget.y * closeWeight;
@@ -9804,6 +10293,9 @@ function updateBotInputs(room, player, now) {
     player.ai.goalY = null;
     player.ai.hasLineOfSight = false;
     player.ai.stuck = false;
+    player.ai.targetLockUntil = 0;
+    clearBotTargetMemory(player);
+    clearBotCombatAnchor(player);
     clearBotRoute(player.ai);
     player.input.forward = false;
     player.input.back = false;
@@ -9828,18 +10320,37 @@ function updateBotInputs(room, player, now) {
 
   const ai = player.ai;
   const mapLayout = getRoomMapLayout(room);
-  const enemyTarget = selectBotTarget(room, player, now);
-  const shapeTarget = enemyTarget || hasLivingEnemyHuman(room, player, now) ? null : selectBotShapeTarget(room, player);
+  const preferredRange = getBotPreferredRange(player);
+  const shootRange = getBotShootRange(player);
+  const liveEnemyTarget = selectBotTarget(room, player, now);
+  const liveEnemyHasLineOfSight = liveEnemyTarget
+    ? !segmentHitsObstacle(player.x, player.y, liveEnemyTarget.x, liveEnemyTarget.y, GAME_CONFIG.bullet.radius, mapLayout)
+    : false;
+  if (liveEnemyTarget && liveEnemyHasLineOfSight) {
+    updateBotTargetMemory(player, liveEnemyTarget, now);
+  }
+
+  const rememberedEnemyTarget = liveEnemyTarget
+    ? (liveEnemyHasLineOfSight ? null : getBotRememberedTarget(room, player, liveEnemyTarget.id, now))
+    : getBotRememberedTarget(room, player, null, now);
+  const enemyTarget = liveEnemyTarget
+    ? (liveEnemyHasLineOfSight ? liveEnemyTarget : rememberedEnemyTarget)
+    : rememberedEnemyTarget;
+  const shapeTarget = enemyTarget ? null : selectBotShapeTarget(room, player);
   const activeTarget = enemyTarget ?? shapeTarget;
   const targetDistance = activeTarget ? Math.hypot(activeTarget.x - player.x, activeTarget.y - player.y) : Infinity;
-  const hasLineOfSight = activeTarget
-    ? !segmentHitsObstacle(player.x, player.y, activeTarget.x, activeTarget.y, GAME_CONFIG.bullet.radius, mapLayout)
-    : false;
-  const preferredRange = getBotPreferredRange(player);
+  const hasLineOfSight = enemyTarget
+    ? liveEnemyHasLineOfSight
+    : shapeTarget
+      ? !segmentHitsObstacle(player.x, player.y, shapeTarget.x, shapeTarget.y, GAME_CONFIG.bullet.radius, mapLayout)
+      : false;
   const healthRatio = getBotHealthRatio(player);
-  const advancedCombat = Boolean(enemyTarget && !enemyTarget.isBot);
+  const advancedCombat = Boolean(enemyTarget);
   const bulletThreat =
-    advancedCombat && !soloBotDuel && enemyTarget && healthRatio <= 0.6
+    advancedCombat &&
+    !soloBotDuel &&
+    enemyTarget &&
+    (healthRatio <= 0.78 || hasLineOfSight || targetDistance <= shootRange)
       ? selectBotBulletThreat(room, player)
       : null;
   const shouldRetreat =
@@ -9852,7 +10363,7 @@ function updateBotInputs(room, player, now) {
             ? GAME_CONFIG.ai.lowHealthRetreatRatio
             : GAME_CONFIG.ai.lowHealthRetreatRatio * 0.8
       ) ||
-      (advancedCombat && !soloBotDuel && (Number(ai.retreatUntil ?? 0) || 0) > now && healthRatio <= 0.72)
+      (advancedCombat && !soloBotDuel && (Number(ai.retreatUntil ?? 0) || 0) > now && healthRatio <= 0.76)
     );
 
   ai.targetId = activeTarget?.id ?? null;
@@ -9869,8 +10380,10 @@ function updateBotInputs(room, player, now) {
 
   const decision = enemyTarget
     ? chooseBotIntentAndGoal(room, player, enemyTarget, targetDistance, hasLineOfSight, {
+        now,
         advancedCombat,
         preferredRange,
+        shootRange,
         bulletThreat,
         shouldRetreat
       })
@@ -9897,6 +10410,7 @@ function updateBotInputs(room, player, now) {
     soloBotDuel,
     advancedCombat,
     preferredRange,
+    shootRange,
     hasLineOfSight,
     targetDistance,
     bulletThreat,
@@ -9914,19 +10428,32 @@ function updateBotInputs(room, player, now) {
   player.input.back = shouldMove && steering.y > axisThreshold;
 
   const objectiveFocusZone = getObjectiveGoalZone(room, player.teamId, player) ?? getRoomObjectiveZones(room)[1] ?? null;
-  const turretTarget = activeTarget ?? objectiveFocusZone ?? { x: room.objective.x, y: room.objective.y };
+  const predictedAimTarget =
+    activeTarget && hasLineOfSight
+      ? getBotAimPoint(player, activeTarget, now, { shootRange })
+      : activeTarget;
+  const turretTarget = predictedAimTarget ?? objectiveFocusZone ?? { x: room.objective.x, y: room.objective.y };
   player.input.turretAngle = Math.atan2(turretTarget.y - player.y, turretTarget.x - player.x);
   const aimDelta = normalizeAngle(player.input.turretAngle - player.turretAngle);
-  const shootAimTolerance = soloBotDuel ? Math.max(GAME_CONFIG.ai.aimToleranceRadians, 1.05) : GAME_CONFIG.ai.aimToleranceRadians;
+  const classRangeMultiplier = BOT_AI_CLASS_RANGE_MULTIPLIERS[player.tankClassId] ?? 1;
+  const shootAimTolerance = soloBotDuel
+    ? Math.max(GAME_CONFIG.ai.aimToleranceRadians, 1.05)
+    : clamp(
+        GAME_CONFIG.ai.aimToleranceRadians *
+          (classRangeMultiplier >= 1.2 ? 0.82 : classRangeMultiplier <= 0.88 ? 1.14 : 1),
+        0.18,
+        0.38
+      );
   const closeRangeThreshold = preferredRange * 0.45;
   const effectiveAimTolerance =
     targetDistance <= closeRangeThreshold
       ? (soloBotDuel ? Math.PI : Math.max(shootAimTolerance, 1.35))
       : shootAimTolerance;
-  const canShootAtRange = soloBotDuel || targetDistance <= GAME_CONFIG.ai.shootRange;
+  const canShootAtRange = soloBotDuel || targetDistance <= shootRange;
 
   player.input.shoot =
     Boolean(activeTarget) &&
+    !activeTarget.remembered &&
     canShootAtRange &&
     hasLineOfSight &&
     Math.abs(aimDelta) <= effectiveAimTolerance &&
@@ -10509,7 +11036,7 @@ function updateBullets(room, deltaSeconds, now) {
     return;
   }
 
-  for (const bullet of Array.from(room.bullets.values())) {
+  for (const bullet of room.bullets.values()) {
     if (!canShootPhase(room.match.phase)) {
       clearTransientRoomCombatState(room);
       return;
@@ -10682,11 +11209,11 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq) {
   const interest = buildViewerInterestSet(room, player, socket);
   const replication = buildReplicationPayloadForSocket(socket, room, player, snapshotSeq, now, interest);
   const includeFullCollections = replication.mode === "full";
-  const visiblePlayers = interest.players.map((candidate) =>
-    createViewerPlayerState(candidate, player)
-  );
-  const visibleBullets = interest.bullets;
-  const visibleShapes = interest.shapes;
+  const visiblePlayers = includeFullCollections
+    ? interest.players.map((candidate) => createViewerPlayerState(candidate, player))
+    : [];
+  const visibleBullets = includeFullCollections ? interest.bullets : [];
+  const visibleShapes = includeFullCollections ? interest.shapes : [];
   const visibleEvents = getVisibleEventsForViewer(room, player);
   const objectiveState = interest.objectiveState;
 
@@ -10707,9 +11234,9 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq) {
     roundNumber: room.roundNumber,
     objective: objectiveState,
     leaderboard: getLeaderboard(room),
-    players: includeFullCollections ? visiblePlayers : [],
-    bullets: includeFullCollections ? visibleBullets : [],
-    shapes: includeFullCollections ? visibleShapes : [],
+    players: visiblePlayers,
+    bullets: visibleBullets,
+    shapes: visibleShapes,
     events: visibleEvents,
     inventory: player ? [createInventoryState(player)] : [],
     replication,
@@ -10981,9 +11508,7 @@ function broadcastRooms(now, options = {}) {
     for (const socket of room.clients) {
       const player = room.players.get(socket.data?.playerId);
       const payload = getRoomStatePayload(room, player, socket, now, snapshotSeq);
-      const sent = sendStatePayload(socket, {
-        ...payload
-      });
+      const sent = sendStatePayload(socket, payload);
 
       if (!sent) {
         markSocketForFullSync(socket);

@@ -226,6 +226,8 @@ let renderFailure = null;
 let renderLoopStopped = false;
 let lastScoreboardRenderKey = "";
 let lastResultsRenderKey = "";
+let lastDiagnosticBannerText = "";
+let lastRoomBrowserRenderKey = "";
 const assetState = {
   manifest: null,
   images: new Map(),
@@ -757,14 +759,22 @@ function updateDiagnosticBanner() {
     : (localPlayerId ? `awaiting state for ${localPlayerId}` : "none");
   const shouldShowCloseSummary = socket?.readyState !== WebSocket.OPEN && lastSocketCloseInfo;
 
-  diagnosticBannerElement.hidden = false;
-  diagnosticBannerElement.textContent =
+  const nextText =
     `Status: ${statusElement.textContent}\n` +
     `Room: ${currentRoomId ?? "-"} | Snapshot: ${snapshotState} | Players: ${players.size}\n` +
     `Local Player: ${playerSummary}\n` +
     `Playable: ${hasPlayableSession() ? "yes" : "no"} | Spectator: ${spectatorState ? "yes" : "no"} | Zoom: ${cameraZoom.toFixed(2)}` +
     (shouldShowCloseSummary ? `\nLast Close: ${formatSocketCloseInfo(lastSocketCloseInfo)}` : "") +
     (renderFailure ? `\nRender Error: ${renderFailure}` : "");
+
+  if (diagnosticBannerElement.hidden) {
+    diagnosticBannerElement.hidden = false;
+  }
+
+  if (lastDiagnosticBannerText !== nextText) {
+    lastDiagnosticBannerText = nextText;
+    setElementText(diagnosticBannerElement, nextText);
+  }
 }
 
 function positionFallbackMarker(element, worldX, worldY) {
@@ -2126,6 +2136,26 @@ function refreshLobbyUi(localPlayer = getLocalPlayer(), you = latestYou) {
 }
 
 function renderRoomBrowser(rooms) {
+  const renderKey = (rooms ?? [])
+    .map((room) =>
+      [
+        room.roomCode,
+        room.mapName,
+        room.phase,
+        room.activePlayers,
+        room.maxPlayers,
+        room.spectators,
+        room.canJoinAsPlayer,
+        room.canJoinAsSpectator
+      ].join("|")
+    )
+    .join("\n");
+
+  if (renderKey === lastRoomBrowserRenderKey) {
+    return;
+  }
+
+  lastRoomBrowserRenderKey = renderKey;
   roomBrowserElement.replaceChildren();
 
   if ((rooms?.length ?? 0) === 0) {
@@ -2176,6 +2206,10 @@ function renderRoomBrowser(rooms) {
 }
 
 async function refreshRoomBrowser() {
+  if (document.hidden || hasPlayableSession()) {
+    return;
+  }
+
   if (roomBrowserRefreshInFlight) {
     return;
   }
@@ -2197,6 +2231,7 @@ async function refreshRoomBrowser() {
     const payload = await response.json();
     renderRoomBrowser(payload.rooms ?? []);
   } catch (error) {
+    lastRoomBrowserRenderKey = "";
     const item = document.createElement("li");
     item.className = "room-browser-item";
     item.textContent = "Room browser unavailable right now.";
@@ -2773,7 +2808,7 @@ function computePredictedLocalState(localPlayer, lastProcessedInputSeq, lastProc
 function simulatePredictedProjectiles(deltaSeconds) {
   const now = performance.now();
 
-  for (const projectile of Array.from(predictedProjectiles.values())) {
+  for (const [projectileId, projectile] of predictedProjectiles.entries()) {
     projectile.previousRenderX = projectile.renderX ?? projectile.x;
     projectile.previousRenderY = projectile.renderY ?? projectile.y;
     projectile.x += Math.cos(projectile.angle) * GAME_CONFIG.bullet.speed * deltaSeconds;
@@ -2791,7 +2826,7 @@ function simulatePredictedProjectiles(deltaSeconds) {
       projectile.y > GAME_CONFIG.world.height ||
       collidesWithObstacle(projectile.x, projectile.y, GAME_CONFIG.bullet.radius)
     ) {
-      predictedProjectiles.delete(projectile.id);
+      predictedProjectiles.delete(projectileId);
     }
   }
 }
@@ -4813,53 +4848,57 @@ function render(frameAt = performance.now()) {
   try {
     const deltaSeconds = Math.min(0.05, Math.max(0.001, (frameAt - lastRenderFrameAt) / 1000));
     lastRenderFrameAt = frameAt;
-    refreshDeathOverlay();
+    const shouldRenderGameScreen = !document.hidden && (!gameScreenEl || !gameScreenEl.hidden);
 
-    updateRenderState(deltaSeconds, frameAt);
-    updateLocalRenderState(deltaSeconds);
-    updateCamera(deltaSeconds);
-    updateCameraShake(deltaSeconds);
-    updateFallbackVisuals();
-    drawBackground();
+    if (shouldRenderGameScreen) {
+      refreshDeathOverlay();
 
-    context.save();
-    context.scale(cameraZoom, cameraZoom);
-    context.translate(-camera.x + cameraShakeX, -camera.y + cameraShakeY);
-    drawMapSquare();
-    drawGrid();
-    drawCenterProbe();
-    drawObstacles();
-    drawObjective();
-    // Draw shapes before players
-    drawShapes();
+      updateRenderState(deltaSeconds, frameAt);
+      updateLocalRenderState(deltaSeconds);
+      updateCamera(deltaSeconds);
+      updateCameraShake(deltaSeconds);
+      updateFallbackVisuals();
+      drawBackground();
 
-    for (const bullet of bullets.values()) {
-      drawBullet(bullet);
-    }
+      context.save();
+      context.scale(cameraZoom, cameraZoom);
+      context.translate(-camera.x + cameraShakeX, -camera.y + cameraShakeY);
+      drawMapSquare();
+      drawGrid();
+      drawCenterProbe();
+      drawObstacles();
+      drawObjective();
+      // Draw shapes before players
+      drawShapes();
 
-    for (const projectile of predictedProjectiles.values()) {
-      drawPredictedProjectile(projectile);
-    }
+      for (const bullet of bullets.values()) {
+        drawBullet(bullet);
+      }
 
-    for (const player of players.values()) {
-      drawTank(player);
-    }
+      for (const projectile of predictedProjectiles.values()) {
+        drawPredictedProjectile(projectile);
+      }
 
-    drawShapeParticles(frameAt);
-    drawCombatEffects();
-    context.restore();
+      for (const player of players.values()) {
+        drawTank(player);
+      }
 
-    // Canvas HUD (drawn in screen space, not world space)
-    drawCanvasLeaderboard();
-    drawCanvasKillFeed();
-    drawMinimap();
-    displayXp = lerp(displayXp, localXp, clamp(1 - Math.exp(-8 * deltaSeconds), 0.1, 0.5));
-    drawXpBar();
-    drawBasicSpecializationMenu();
-    drawUpgradeMenu();
+      drawShapeParticles(frameAt);
+      drawCombatEffects();
+      context.restore();
 
-    if (debugUiEnabled) {
-      drawOverlay();
+      // Canvas HUD (drawn in screen space, not world space)
+      drawCanvasLeaderboard();
+      drawCanvasKillFeed();
+      drawMinimap();
+      displayXp = lerp(displayXp, localXp, clamp(1 - Math.exp(-8 * deltaSeconds), 0.1, 0.5));
+      drawXpBar();
+      drawBasicSpecializationMenu();
+      drawUpgradeMenu();
+
+      if (debugUiEnabled) {
+        drawOverlay();
+      }
     }
     renderFailure = null;
   } catch (error) {
@@ -5287,9 +5326,9 @@ const origUpdateSessionChrome = updateSessionChrome;
 
   function drawBg(t) {
     // Stop animation when start screen is hidden
-    const isHidden = startMenuEl
+    const isHidden = document.hidden || (startMenuEl
       ? (startMenuEl.hidden || startMenuEl.classList.contains("hidden"))
-      : true;
+      : true);
     if (isHidden) {
       animId = null;
       return;
@@ -5327,9 +5366,9 @@ const origUpdateSessionChrome = updateSessionChrome;
   }
 
   function restartBgAnimation() {
-    const isHidden = startMenuEl
+    const isHidden = document.hidden || (startMenuEl
       ? (startMenuEl.hidden || startMenuEl.classList.contains("hidden"))
-      : true;
+      : true);
     if (!isHidden && !animId) {
       animId = requestAnimationFrame(drawBg);
     }
@@ -5339,6 +5378,7 @@ const origUpdateSessionChrome = updateSessionChrome;
     resize();
     initDots();
   });
+  document.addEventListener("visibilitychange", restartBgAnimation);
 
   resize();
   initDots();
@@ -5375,10 +5415,11 @@ function syncStartMenuVisibility() {
   }
 }
 
-// Patch updateSessionChrome to also sync the start menu
-const _updateSessionChrome = updateSessionChrome;
-// Override by calling syncStartMenuVisibility after any session change
-setInterval(syncStartMenuVisibility, 500);
+// Sync the start menu whenever session chrome changes without polling.
+updateSessionChrome = function updateSessionChromeWithStartMenu() {
+  origUpdateSessionChrome();
+  syncStartMenuVisibility();
+};
 
 // Initial state: show start menu
 updateFullscreenControls();
