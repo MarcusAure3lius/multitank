@@ -12608,7 +12608,11 @@ const simulationInterval = setInterval(() => {
     serverTiming.loopLagMs = Math.max(serverTiming.loopLagMs, simulationAccumulatorMs);
   }
 
-  serverTiming.lastTickDurationMs = Math.max(0, Date.now() - intervalStartedAt);
+  const totalLoopDurationMs = Math.max(0, Date.now() - intervalStartedAt);
+  serverTiming.lastTickDurationMs =
+    processedTicks > 0
+      ? totalLoopDurationMs / processedTicks
+      : totalLoopDurationMs;
   if (serverTiming.loopLagMs >= fixedTickMs || serverTiming.lastTickDurationMs >= fixedTickMs) {
     const signalNow = Date.now();
     for (const room of rooms.values()) {

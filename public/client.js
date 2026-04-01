@@ -629,16 +629,29 @@ function syncServerDebugSnapshot(debugPayload, now = Date.now()) {
   pruneDebugEvents(now);
 }
 
-function noteServerTickSample(simulationTick, frameAt = performance.now()) {
+function noteServerTickSample(
+  simulationTick,
+  frameAt = performance.now(),
+  expectedTickRate = GAME_CONFIG.serverTickRate
+) {
   const tickNumber = Number(simulationTick);
   if (!Number.isFinite(tickNumber) || tickNumber <= 0) {
     return;
   }
 
+  const normalizedExpectedTickRate = Number(expectedTickRate);
+  if (Number.isFinite(normalizedExpectedTickRate) && normalizedExpectedTickRate > 0) {
+    debugMonitor.estimatedServerTickRate = normalizedExpectedTickRate;
+  }
+
   const previous = debugMonitor.lastServerTickSample;
   if (previous && tickNumber > previous.tick && frameAt > previous.at) {
     const estimatedRate = (tickNumber - previous.tick) / ((frameAt - previous.at) / 1000);
-    if (Number.isFinite(estimatedRate) && estimatedRate > 0) {
+    if (
+      Number.isFinite(estimatedRate) &&
+      estimatedRate > 0 &&
+      (!Number.isFinite(normalizedExpectedTickRate) || Math.abs(estimatedRate - normalizedExpectedTickRate) <= normalizedExpectedTickRate * 0.35)
+    ) {
       debugMonitor.serverTickRateSamples.push(estimatedRate);
       while (debugMonitor.serverTickRateSamples.length > 12) {
         debugMonitor.serverTickRateSamples.shift();
@@ -648,7 +661,9 @@ function noteServerTickSample(simulationTick, frameAt = performance.now()) {
       debugMonitor.estimatedServerTickRate =
         debugMonitor.serverTickRateSamples.length > 0
           ? total / debugMonitor.serverTickRateSamples.length
-          : GAME_CONFIG.serverTickRate;
+          : normalizedExpectedTickRate > 0
+            ? normalizedExpectedTickRate
+            : GAME_CONFIG.serverTickRate;
     }
   }
 
@@ -1583,7 +1598,7 @@ function captureLiveInputState(now = Date.now()) {
     : 0;
 
   return {
-    clientSentAt: now,
+    localSentAt: now,
     ...capturedInputState,
     turretAngle
   };
@@ -2466,6 +2481,29 @@ function estimateClientWallTimeForServerTime(serverTime, now = Date.now()) {
   }
 
   return clamp(estimatedClientTime, 0, now);
+}
+
+function getInputTimelineSentAt(input, fallback = Date.now()) {
+  const localSentAt = Number(input?.localSentAt);
+  if (Number.isFinite(localSentAt)) {
+    return localSentAt;
+  }
+
+  const clientSentAt = Number(input?.clientSentAt);
+  if (Number.isFinite(clientSentAt)) {
+    return clientSentAt;
+  }
+
+  return fallback;
+}
+
+function getEstimatedServerInputTimestamp(fallback = Date.now()) {
+  if (lastAppliedSnapshotSeq <= 0) {
+    return Math.round(fallback);
+  }
+
+  const estimatedServerNow = estimateServerTime();
+  return Number.isFinite(estimatedServerNow) ? Math.round(estimatedServerNow) : Math.round(fallback);
 }
 
 function interpolateAngle(start, end, amount) {
@@ -3982,17 +4020,27 @@ function bridgeAuthoritativeBulletToPrediction(current, authoritativeBullet, pre
 
 function createInputFrame(liveInputState = captureLiveInputState()) {
   const seq = nextInputSeq++;
+  const localSentAt = getInputTimelineSentAt(liveInputState);
 
   return {
     seq,
-    ...liveInputState
+    ...liveInputState,
+    localSentAt,
+    clientSentAt: getEstimatedServerInputTimestamp(localSentAt)
   };
 }
 
 function serializeInputFrame(inputFrame) {
   return {
     type: MESSAGE_TYPES.INPUT,
-    ...inputFrame
+    seq: inputFrame.seq,
+    clientSentAt: inputFrame.clientSentAt,
+    forward: Boolean(inputFrame.forward),
+    back: Boolean(inputFrame.back),
+    left: Boolean(inputFrame.left),
+    right: Boolean(inputFrame.right),
+    shoot: Boolean(inputFrame.shoot),
+    turretAngle: inputFrame.turretAngle
   };
 }
 
@@ -4030,7 +4078,7 @@ function dispatchLocalInput(options = {}) {
   const previousDispatchAt = lastInputDispatchAt;
   const inputFrame = createInputFrame(liveInputState);
   send(serializeInputFrame(inputFrame));
-  lastInputDispatchAt = inputFrame.clientSentAt;
+  lastInputDispatchAt = getInputTimelineSentAt(inputFrame);
   lastDispatchedInputState = inputFrame;
 
   if (!canSimulateLocalPlayer() || !localPlayer.alive) {
@@ -4048,10 +4096,10 @@ function dispatchLocalInput(options = {}) {
   }
 
   const visualState = ensureLocalVisualState(localPlayer);
-  const predictionScale = getPredictionScaleForGapMs(getStatePacketAgeMs(inputFrame.clientSentAt));
+  const predictionScale = getPredictionScaleForGapMs(getStatePacketAgeMs());
   const predictionStepSeconds =
     previousDispatchAt > 0
-      ? clamp((inputFrame.clientSentAt - previousDispatchAt) / 1000, 1 / 120, CLIENT_TICK.fixedDeltaSeconds)
+      ? clamp((getInputTimelineSentAt(inputFrame) - previousDispatchAt) / 1000, 1 / 120, CLIENT_TICK.fixedDeltaSeconds)
       : CLIENT_TICK.fixedDeltaSeconds;
   const predicted = simulateTankMovement(
     {
@@ -4080,7 +4128,7 @@ function updateResponsiveLocalPrediction(deltaSeconds) {
   }
 
   const liveInput = captureLiveInputState();
-  const predictionScale = getPredictionScaleForGapMs(getStatePacketAgeMs(liveInput.clientSentAt));
+  const predictionScale = getPredictionScaleForGapMs(getStatePacketAgeMs());
   const predicted = simulateTankMovement(
     {
       x: visualState.x,
@@ -4101,7 +4149,7 @@ function bufferPendingInput(inputFrame) {
   const oldestAllowedClientSentAt = Date.now() - GAME_CONFIG.input.maxClientInputAgeMs;
   while (
     pendingInputs.length > GAME_CONFIG.input.maxBufferedInputs ||
-    (pendingInputs[0] && pendingInputs[0].clientSentAt < oldestAllowedClientSentAt)
+    (pendingInputs[0] && getInputTimelineSentAt(pendingInputs[0]) < oldestAllowedClientSentAt)
   ) {
     pendingInputs.shift();
   }
@@ -4359,8 +4407,8 @@ function dropAcknowledgedPendingInputs(lastProcessedInputSeq, lastProcessedInput
   while (
     pendingInputs.length > 0 &&
     (pendingInputs[0].seq <= lastProcessedInputSeq ||
-      pendingInputs[0].clientSentAt <= lastProcessedInputClientSentAt ||
-      pendingInputs[0].clientSentAt < oldestAllowedClientSentAt)
+      getInputTimelineSentAt(pendingInputs[0]) <= lastProcessedInputClientSentAt ||
+      getInputTimelineSentAt(pendingInputs[0]) < oldestAllowedClientSentAt)
   ) {
     pendingInputs.shift();
   }
@@ -4396,11 +4444,12 @@ function computePredictedLocalState(
   let segmentStartMs = replayStartMs;
 
   for (const input of pendingInputs) {
-    if (input.clientSentAt < replayCutoffMs) {
+    const inputSentAt = getInputTimelineSentAt(input);
+    if (inputSentAt < replayCutoffMs) {
       continue;
     }
 
-    if (input.clientSentAt <= replayStartMs) {
+    if (inputSentAt <= replayStartMs) {
       activeInput = input;
       continue;
     }
@@ -4408,11 +4457,11 @@ function computePredictedLocalState(
     predicted = simulatePredictedMovementForDuration(
       predicted,
       activeInput,
-      input.clientSentAt - segmentStartMs,
+      inputSentAt - segmentStartMs,
       predictionScale
     );
     activeInput = input;
-    segmentStartMs = input.clientSentAt;
+    segmentStartMs = inputSentAt;
   }
 
   const liveInput = captureLiveInputState(now);
@@ -4602,7 +4651,7 @@ function applySnapshot(payload) {
 
   syncServerClock(payload.serverTime, performance.now());
   syncServerDebugSnapshot(payload.debug, Date.now());
-  noteServerTickSample(payload.simulationTick, performance.now());
+  noteServerTickSample(payload.simulationTick, performance.now(), payload.tickRate);
   noteSnapshotDebugState(payload, Date.now());
   lastAppliedSnapshotSeq = snapshotSeq;
   lastSimulationTick = Number(payload.simulationTick) || lastSimulationTick;
@@ -4709,7 +4758,7 @@ function applySnapshot(payload) {
       replayPendingInputs(
         localPlayer,
         payload.you.lastProcessedInputSeq ?? 0,
-        payload.you.lastProcessedInputClientSentAt ?? 0,
+        estimateClientWallTimeForServerTime(payload.you.lastProcessedInputClientSentAt ?? 0),
         estimateClientWallTimeForServerTime(payload.serverTime)
       );
       setElementText(
