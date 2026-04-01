@@ -19,6 +19,7 @@ export const MESSAGE_TYPES = Object.freeze({
   PONG: "pong",
   ERROR: "error",
   UPGRADE: "upgrade",
+  SPECIALIZATION: "specialization",
   UPGRADE_AVAILABLE: "upgrade_available",
   STAT_POINT: "stat_point"
 });
@@ -29,6 +30,12 @@ export const SHAPE_XP = Object.freeze({ triangle: 250, square: 100, pentagon: 13
 export const SHAPE_SCORE = Object.freeze({ triangle: 1, square: 1, pentagon: 3, alpha_pentagon: 15 });
 
 export const SHAPE_TYPES = Object.freeze({ TRIANGLE: 'triangle', SQUARE: 'square', PENTAGON: 'pentagon', ALPHA_PENTAGON: 'alpha_pentagon' });
+export const BASIC_CLASS_SPECIALIZATIONS = Object.freeze({
+  EXTRA_HP: "extra_hp",
+  SHIELD_BUBBLE: "shield_bubble",
+  GRENADE: "grenade"
+});
+export const BASIC_CLASS_SPECIALIZATION_IDS = Object.freeze(Object.values(BASIC_CLASS_SPECIALIZATIONS));
 
 export const STAT_NAMES = Object.freeze(['healthRegen', 'maxHealth', 'bodyDamage', 'bulletSpeed', 'bulletPenetration', 'bulletDamage', 'reload', 'movementSpeed']);
 
@@ -221,6 +228,15 @@ export const GAME_CONFIG = Object.freeze({
     hitPoints: 100,
     shootCooldownMs: 350,
     maxInputJitterRadians: Math.PI
+  }),
+  basicSpecialization: Object.freeze({
+    unlockLevel: 5,
+    extraHpBonus: 25,
+    shieldDurationMs: 10000,
+    grenadeRange: 240,
+    grenadeRadius: 170,
+    grenadeDamage: 35,
+    grenadeBasicDamageRatio: 0.5
   }),
   bullet: Object.freeze({
     radius: 10,
@@ -1019,6 +1035,7 @@ export function createPlayerCombatState(combat) {
     ? combat.statusEffect
     : STATUS_EFFECTS.NONE;
   const stunRemainingMs = Math.max(0, readInteger(combat?.stunRemainingMs, 0));
+  const shieldRemainingMs = Math.max(0, readInteger(combat?.shieldRemainingMs, 0));
   return {
     armorMultiplier: clamp(roundTo(readFiniteNumber(combat?.armorMultiplier, 1), 3), 0.1, 3),
     damageMultiplier: clamp(roundTo(readFiniteNumber(combat?.damageMultiplier, 1), 3), 0.1, 3),
@@ -1026,6 +1043,8 @@ export function createPlayerCombatState(combat) {
     critMultiplier: clamp(roundTo(readFiniteNumber(combat?.critMultiplier, 1), 3), 1, 4),
     statusEffect: stunRemainingMs > 0 ? STATUS_EFFECTS.STUN : statusEffect,
     statusDurationMs: Math.max(0, readInteger(combat?.statusDurationMs, 0)),
+    shielded: readBoolean(combat?.shielded ?? shieldRemainingMs > 0, shieldRemainingMs > 0),
+    shieldRemainingMs,
     stunned: readBoolean(combat?.stunned ?? stunRemainingMs > 0, stunRemainingMs > 0),
     stunRemainingMs,
     lastDamagedAt: Number.isFinite(Number(combat?.lastDamagedAt)) ? Number(combat.lastDamagedAt) : null
@@ -1365,6 +1384,11 @@ export function createStatePayload({
   replication,
   you
 }) {
+  const basicSpecializationChoice =
+    typeof you?.basicSpecializationChoice === "string" &&
+    BASIC_CLASS_SPECIALIZATION_IDS.includes(you.basicSpecializationChoice)
+      ? you.basicSpecializationChoice
+      : null;
   return {
     v: PROTOCOL_VERSION,
     type: MESSAGE_TYPES.STATE,
@@ -1417,6 +1441,8 @@ export function createStatePayload({
           pendingUpgrades: Array.isArray(you.pendingUpgrades)
             ? you.pendingUpgrades.filter((classId) => typeof classId === "string" && CLASS_TREE[classId])
             : [],
+          basicSpecializationPending: readBoolean(you.basicSpecializationPending, false),
+          basicSpecializationChoice,
           stats: createAllocatedStats(you.stats),
           maxHp: Math.max(1, readInteger(you.maxHp ?? GAME_CONFIG.tank.hitPoints, GAME_CONFIG.tank.hitPoints)),
           queuedForSlot: readBoolean(you.queuedForSlot, false),
@@ -1513,6 +1539,20 @@ function normalizeUpgradePacket(packet, version) {
     v: version,
     type: MESSAGE_TYPES.UPGRADE,
     classId,
+    messageId: sanitizeMessageId(packet.messageId ?? packet.m)
+  };
+}
+
+function normalizeSpecializationPacket(packet, version) {
+  const specializationId = sanitizeText(packet.specializationId ?? packet.sid, "", 32);
+  if (!BASIC_CLASS_SPECIALIZATION_IDS.includes(specializationId)) {
+    return null;
+  }
+
+  return {
+    v: version,
+    type: MESSAGE_TYPES.SPECIALIZATION,
+    specializationId,
     messageId: sanitizeMessageId(packet.messageId ?? packet.m)
   };
 }
@@ -1680,6 +1720,10 @@ function normalizePacketObject(packet) {
       const normalized = normalizeUpgradePacket(packet, version);
       return normalized ? { ok: true, packet: normalized } : buildParseError("Invalid upgrade packet");
     }
+    case MESSAGE_TYPES.SPECIALIZATION: {
+      const normalized = normalizeSpecializationPacket(packet, version);
+      return normalized ? { ok: true, packet: normalized } : buildParseError("Invalid specialization packet");
+    }
     case MESSAGE_TYPES.STAT_POINT: {
       const normalized = normalizeStatPointPacket(packet, version);
       return normalized ? { ok: true, packet: normalized } : buildParseError("Invalid stat point packet");
@@ -1766,6 +1810,13 @@ function encodePacketObject(packet) {
         v: version,
         type: MESSAGE_TYPES.UPGRADE,
         cid: sanitizeText(packet.classId ?? "", "", 24),
+        m: sanitizeMessageId(packet.messageId)
+      };
+    case MESSAGE_TYPES.SPECIALIZATION:
+      return {
+        v: version,
+        type: MESSAGE_TYPES.SPECIALIZATION,
+        sid: sanitizeText(packet.specializationId ?? "", "", 32),
         m: sanitizeMessageId(packet.messageId)
       };
     case MESSAGE_TYPES.STAT_POINT:

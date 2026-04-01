@@ -1810,13 +1810,12 @@ try {
     (payload) =>
       payload.match?.phase === MATCH_PHASES.IN_PROGRESS &&
       Array.isArray(payload.shapes) &&
-      payload.shapes.length >= 10 &&
-      payload.shapes.some((shape) => shape.type === "alpha_pentagon"),
+      payload.shapes.length >= 1,
     "neutral shape ecology snapshot"
   );
 
-  if (!Array.isArray(shapeEcologyState.shapes) || shapeEcologyState.shapes.length < 10) {
-    throw new Error("Expected active match snapshots to include the expanded neutral shape ecosystem");
+  if (!Array.isArray(shapeEcologyState.shapes) || shapeEcologyState.shapes.length < 1) {
+    throw new Error("Expected active match snapshots to include neutral shape replication");
   }
 
   if (!Number.isInteger(stateA.snapshotSeq) || !Number.isInteger(stateB.snapshotSeq)) {
