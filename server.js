@@ -11116,6 +11116,13 @@ wss.on("connection", (socket, request) => {
         handleUpgrade(socket, payload);
         acknowledgeReliableMessage(socket, payload);
         break;
+      case MESSAGE_TYPES.SPECIALIZATION:
+        if (resendAckForDuplicate(socket, payload)) {
+          return;
+        }
+        handleSpecialization(socket, payload);
+        acknowledgeReliableMessage(socket, payload);
+        break;
       case MESSAGE_TYPES.STAT_POINT:
         if (resendAckForDuplicate(socket, payload)) {
           return;
