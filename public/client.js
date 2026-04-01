@@ -93,6 +93,15 @@ const NETWORK_RECOVERY = Object.freeze({
   staleStateStatusCooldownMs: 8000
 });
 
+const LOCAL_PREDICTION = Object.freeze({
+  stallSoftLimitMs: 120,
+  stallHardLimitMs: 280,
+  maxReplayWindowMs: 160,
+  maxSmoothGap: 72,
+  snapGap: 140,
+  maxCorrectionOffset: 96
+});
+
 const CLIENT_TICK = Object.freeze({
   rate: GAME_CONFIG.serverTickRate,
   fixedDeltaSeconds: 1 / GAME_CONFIG.serverTickRate
@@ -649,6 +658,8 @@ function updateLocalRenderState(deltaSeconds) {
     return null;
   }
 
+  const gapDistance = Math.hypot(visualState.x - renderState.x, visualState.y - renderState.y);
+
   if (!hasMovementInputActive()) {
     renderState.x = visualState.x;
     renderState.y = visualState.y;
@@ -660,6 +671,18 @@ function updateLocalRenderState(deltaSeconds) {
   const followAmount = canSimulateLocalPlayer() && localPlayer.alive
     ? clamp(1 - Math.exp(-(hasMovementInputActive() ? 28 : 18) * deltaSeconds), 0.24, 0.62)
     : clamp(1 - Math.exp(-16 * deltaSeconds), 0.18, 0.4);
+  const boostedFollowAmount =
+    gapDistance >= LOCAL_PREDICTION.maxSmoothGap
+      ? Math.max(followAmount, 0.78)
+      : followAmount;
+
+  if (gapDistance >= LOCAL_PREDICTION.snapGap) {
+    renderState.x = visualState.x;
+    renderState.y = visualState.y;
+    renderState.angle = visualState.angle;
+    renderState.turretAngle = visualState.turretAngle;
+    return renderState;
+  }
 
   if (crossedOwnSpawnBoundary(localPlayer.teamId, renderState.x, visualState.x)) {
     renderState.x = visualState.x;
@@ -669,9 +692,9 @@ function updateLocalRenderState(deltaSeconds) {
     return renderState;
   }
 
-  renderState.x = lerp(renderState.x, visualState.x, followAmount);
-  renderState.y = lerp(renderState.y, visualState.y, followAmount);
-  renderState.angle = lerpAngle(renderState.angle, visualState.angle, followAmount);
+  renderState.x = lerp(renderState.x, visualState.x, boostedFollowAmount);
+  renderState.y = lerp(renderState.y, visualState.y, boostedFollowAmount);
+  renderState.angle = lerpAngle(renderState.angle, visualState.angle, boostedFollowAmount);
   renderState.turretAngle = lerpAngle(
     renderState.turretAngle,
     visualState.turretAngle,
@@ -1256,6 +1279,51 @@ function lerpWrappedUnit(current, target, amount) {
   }
 
   return (current + delta * amount + 1) % 1;
+}
+
+function getStatePacketAgeMs(now = Date.now()) {
+  if (lastStatePacketAt <= 0) {
+    return 0;
+  }
+
+  return Math.max(0, now - lastStatePacketAt);
+}
+
+function getPredictionScaleForGapMs(gapMs) {
+  if (gapMs <= LOCAL_PREDICTION.stallSoftLimitMs) {
+    return 1;
+  }
+
+  if (gapMs >= LOCAL_PREDICTION.stallHardLimitMs) {
+    return 0;
+  }
+
+  return clamp(
+    1 - (gapMs - LOCAL_PREDICTION.stallSoftLimitMs) /
+      (LOCAL_PREDICTION.stallHardLimitMs - LOCAL_PREDICTION.stallSoftLimitMs),
+    0,
+    1
+  );
+}
+
+function getRemoteExtrapolationBudgetMs(now = Date.now()) {
+  return Math.round(NETWORK_RENDER.maxExtrapolationMs * getPredictionScaleForGapMs(getStatePacketAgeMs(now)));
+}
+
+function clampCorrectionOffset(x, y, maxDistance = LOCAL_PREDICTION.maxCorrectionOffset) {
+  const distance = Math.hypot(x, y);
+  if (!Number.isFinite(distance) || distance <= maxDistance || distance <= 0) {
+    return {
+      x,
+      y
+    };
+  }
+
+  const scale = maxDistance / distance;
+  return {
+    x: x * scale,
+    y: y * scale
+  };
 }
 
 function getTurretVisualSmoothing(deltaSeconds) {
@@ -2037,8 +2105,9 @@ function sampleNetworkHistory(entity, kind, renderServerTime) {
   if (renderServerTime >= latestSample.serverTime) {
     const previousSample = history[history.length - 2] ?? latestSample;
     const sampleDeltaMs = Math.max(1, latestSample.serverTime - previousSample.serverTime);
+    const extrapolationBudgetMs = getRemoteExtrapolationBudgetMs();
     const extrapolationMs = Math.min(
-      NETWORK_RENDER.maxExtrapolationMs,
+      extrapolationBudgetMs,
       Math.max(0, renderServerTime - latestSample.serverTime)
     );
     const velocityX = (latestSample.x - previousSample.x) / sampleDeltaMs;
@@ -2448,8 +2517,19 @@ function computePredictedLocalState(localPlayer, lastProcessedInputSeq, lastProc
     turretAngle: localPlayer.turretAngle
   };
 
+  const replayGapMs = getStatePacketAgeMs();
+  const predictionScale = getPredictionScaleForGapMs(replayGapMs);
+  const replayCutoffMs =
+    replayGapMs >= LOCAL_PREDICTION.stallSoftLimitMs
+      ? Date.now() - LOCAL_PREDICTION.maxReplayWindowMs
+      : -Infinity;
+
   for (const input of pendingInputs) {
-    predicted = simulateTankMovement(predicted, input, CLIENT_TICK.fixedDeltaSeconds);
+    if (input.clientSentAt < replayCutoffMs) {
+      continue;
+    }
+
+    predicted = simulateTankMovement(predicted, input, CLIENT_TICK.fixedDeltaSeconds * predictionScale);
   }
 
   return predicted;
@@ -2494,10 +2574,39 @@ function applyPredictionCorrection(localPlayer, correctedState) {
   const correctionAngle = normalizeAngle(previousVisual.angle - correctedState.angle);
   const correctionTurretAngle = normalizeAngle(previousVisual.turretAngle - correctedState.turretAngle);
   const distanceError = Math.hypot(correctionX, correctionY);
+  const stalledStream = getStatePacketAgeMs() >= LOCAL_PREDICTION.stallHardLimitMs;
+
+  if (distanceError >= LOCAL_PREDICTION.snapGap || stalledStream) {
+    localPlayer.correctionOffsetX = 0;
+    localPlayer.correctionOffsetY = 0;
+    localPlayer.correctionOffsetAngle = 0;
+    localPlayer.correctionOffsetTurretAngle = 0;
+    localPlayer.displayX = correctedState.x;
+    localPlayer.displayY = correctedState.y;
+    localPlayer.displayAngle = correctedState.angle;
+    localPlayer.displayTurretAngle = correctedState.turretAngle;
+
+    const visualState = ensureLocalVisualState(localPlayer);
+    if (visualState) {
+      visualState.x = correctedState.x;
+      visualState.y = correctedState.y;
+      visualState.angle = correctedState.angle;
+      visualState.turretAngle = correctedState.turretAngle;
+    }
+
+    localRenderState = {
+      x: correctedState.x,
+      y: correctedState.y,
+      angle: correctedState.angle,
+      turretAngle: correctedState.turretAngle
+    };
+    return;
+  }
 
   if (distanceError > 0.5 || Math.abs(correctionAngle) > 0.01 || Math.abs(correctionTurretAngle) > 0.01) {
-    localPlayer.correctionOffsetX = correctionX;
-    localPlayer.correctionOffsetY = correctionY;
+    const clampedCorrection = clampCorrectionOffset(correctionX, correctionY);
+    localPlayer.correctionOffsetX = clampedCorrection.x;
+    localPlayer.correctionOffsetY = clampedCorrection.y;
     localPlayer.correctionOffsetAngle = correctionAngle;
     localPlayer.correctionOffsetTurretAngle = correctionTurretAngle;
   }
@@ -4566,6 +4675,8 @@ setInterval(() => {
     spawnPredictedProjectile(localPlayer, inputFrame);
   }
 
+  const predictionScale = getPredictionScaleForGapMs(getStatePacketAgeMs(inputFrame.clientSentAt));
+
   const predicted = simulateTankMovement(
     {
       x: visualState?.x ?? localPlayer.renderX ?? localPlayer.x,
@@ -4574,7 +4685,7 @@ setInterval(() => {
       turretAngle: visualState?.turretAngle ?? localPlayer.renderTurretAngle ?? localPlayer.turretAngle
     },
     inputFrame,
-    CLIENT_TICK.fixedDeltaSeconds
+    CLIENT_TICK.fixedDeltaSeconds * predictionScale
   );
 
   if (visualState) {
