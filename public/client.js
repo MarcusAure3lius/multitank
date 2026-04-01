@@ -6712,6 +6712,128 @@ function handleUpgradeClick(canvasX, canvasY) {
   return false;
 }
 
+function formatDebugAgeMs(value) {
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    return "-";
+  }
+
+  if (normalized < 1000) {
+    return `${Math.round(normalized)}ms`;
+  }
+
+  if (normalized < 10_000) {
+    return `${(normalized / 1000).toFixed(1)}s`;
+  }
+
+  return `${Math.round(normalized / 100) / 10}s`;
+}
+
+function getSocketReadyStateLabel(target = socket) {
+  switch (target?.readyState) {
+    case WebSocket.CONNECTING:
+      return "connecting";
+    case WebSocket.OPEN:
+      return "open";
+    case WebSocket.CLOSING:
+      return "closing";
+    case WebSocket.CLOSED:
+      return "closed";
+    default:
+      return "idle";
+  }
+}
+
+function getReliableMessageDebugLabel(type) {
+  switch (type) {
+    case MESSAGE_TYPES.SPECIALIZATION:
+      return "ability";
+    case MESSAGE_TYPES.UPGRADE:
+      return "upgrade";
+    case MESSAGE_TYPES.RESPAWN:
+      return "respawn";
+    case MESSAGE_TYPES.RESYNC:
+      return "resync";
+    case MESSAGE_TYPES.READY:
+      return "ready";
+    default:
+      return String(type ?? "unknown");
+  }
+}
+
+function buildPendingReliableDebugSummary(now = Date.now()) {
+  const pending = Array.from(pendingReliableMessages.values())
+    .map((entry) => {
+      const lastSentAt = Number(entry?.lastSentAt);
+      return {
+        type: getReliableMessageDebugLabel(entry?.payload?.type),
+        ageMs: lastSentAt > 0 ? Math.max(0, now - lastSentAt) : 0
+      };
+    })
+    .sort((left, right) => right.ageMs - left.ageMs);
+
+  if (pending.length === 0) {
+    return "none";
+  }
+
+  const summary = pending
+    .slice(0, 3)
+    .map((entry) => `${entry.type} ${formatDebugAgeMs(entry.ageMs)}`);
+
+  if (pending.length > 3) {
+    summary.push(`+${pending.length - 3} more`);
+  }
+
+  return summary.join(" | ");
+}
+
+function buildStateChunkDebugSummary(now = Date.now()) {
+  if (stateChunks.size === 0) {
+    return "idle";
+  }
+
+  const pendingSnapshots = Array.from(stateChunks.entries()).sort((left, right) => right[0] - left[0]);
+  const [snapshotSeq, entry] = pendingSnapshots[0];
+  const chunks = Array.isArray(entry?.chunks) ? entry.chunks : [];
+  const receivedCount = chunks.reduce((count, chunk) => count + Number(typeof chunk === "string"), 0);
+  const ageMs = Math.max(0, now - Number(entry?.receivedAt ?? now));
+  return `${snapshotSeq} ${receivedCount}/${entry?.chunkCount ?? chunks.length} ${formatDebugAgeMs(ageMs)}${pendingSnapshots.length > 1 ? ` +${pendingSnapshots.length - 1}` : ""}`;
+}
+
+function buildDebugIssueCodeSummary(issues) {
+  if (!Array.isArray(issues) || issues.length === 0) {
+    return "clear";
+  }
+
+  const summary = issues
+    .slice(0, 2)
+    .map((issue) => {
+      const sourcePrefix =
+        typeof issue?.source === "string" && issue.source
+          ? `${issue.source}:`
+          : "";
+      return trimDebugMessage(`${sourcePrefix}${issue?.code ?? "unknown"}`, 24);
+    });
+
+  if (issues.length > 2) {
+    summary.push(`+${issues.length - 2}`);
+  }
+
+  return summary.join(" | ");
+}
+
+function buildDebugIssueLabel(issue) {
+  const countSuffix = Number(issue?.count ?? 1) > 1 ? ` x${issue.count}` : "";
+  const severityLabel = issue?.severity === "error" ? "ERR" : issue?.severity === "warn" ? "WARN" : "INFO";
+  const sourcePrefix =
+    typeof issue?.source === "string" && issue.source
+      ? `${issue.source}:`
+      : "";
+  const codeLabel = trimDebugMessage(`${sourcePrefix}${issue?.code ?? "unknown"}`, 24);
+  const messageLabel = trimDebugMessage(issue?.message, 36);
+  return `[${severityLabel}${countSuffix}] ${codeLabel} | ${messageLabel}`;
+}
+
 function drawOverlay() {
   const now = Date.now();
   const localPlayer = getLocalPlayer();
@@ -6733,6 +6855,13 @@ function drawOverlay() {
     ? Math.hypot((visualState.x ?? localPlayer.x) - (localPlayer.x ?? 0), (visualState.y ?? localPlayer.y) - (localPlayer.y ?? 0))
     : 0;
   const issues = getActiveDebugIssues(now);
+  const socketState = getSocketReadyStateLabel(socket);
+  const statePacketAge = getStatePacketAgeMs(now);
+  const serverMessageAge = lastServerMessageAt > 0 ? Math.max(0, now - lastServerMessageAt) : 0;
+  const lastInputAge = lastInputDispatchAt > 0 ? Math.max(0, now - lastInputDispatchAt) : 0;
+  const lastInputChangeAge = lastLocalInputChangedAt > 0 ? Math.max(0, now - lastLocalInputChangedAt) : 0;
+  const lastAimChangeAge = lastAimInputChangedAt > 0 ? Math.max(0, now - lastAimInputChangedAt) : 0;
+  const lastResyncAge = lastResyncRequestAt > 0 ? Math.max(0, now - lastResyncRequestAt) : 0;
   const objectiveStatusText = getObjectiveStatusText(latestObjective);
   const hudTop = getTopLeftHudInset();
   const leftX = 20;
@@ -6746,9 +6875,16 @@ function drawOverlay() {
     `Pos: client ${clientPositionText} | server ${serverPositionText} | delta ${positionDelta.toFixed(1)}`,
     `Seq: ack ${lastProcessedInputSeq} | tick ${lastProcessedInputTick} | pending ${pendingInputs.length}/${pendingInputCount}`,
     `Ticks: server ${lastSimulationTick} | snapshot ${lastSnapshotTick} | client ${clientSimulationTick} | est ${estimatedTickRate.toFixed(1)}/s`,
-    `Server: loop ${Math.round(Number(latestDebugInfo?.serverLoopLagMs ?? 0) || 0)}ms | work ${Math.round(Number(latestDebugInfo?.tickDurationMs ?? 0) || 0)}ms`
+    `Server: loop ${Math.round(Number(latestDebugInfo?.serverLoopLagMs ?? 0) || 0)}ms | work ${Math.round(Number(latestDebugInfo?.tickDurationMs ?? 0) || 0)}ms`,
+    `Socket: ${socketState} | msg ${formatDebugAgeMs(serverMessageAge)} | state ${formatDebugAgeMs(statePacketAge)} | pingQ ${debugMonitor.pendingPings.size} | reconn ${reconnectTimer !== null ? `wait(${reconnectAttempts})` : reconnectAttempts}`,
+    `Session: play ${hasPlayableSession() ? "yes" : "no"} | join ${joinInProgress ? "yes" : "no"} | self ${hasSeenLocalPlayerSnapshot ? "yes" : "no"} | alive ${localPlayer?.alive ? "yes" : "no"} | spec ${isSpectatorSession(localPlayer) ? "yes" : "no"} | zoom ${cameraZoom.toFixed(2)}`,
+    `Snapshot: applied ${lastAppliedSnapshotSeq} | chunks ${buildStateChunkDebugSummary(now)} | resync ${formatDebugAgeMs(lastResyncAge)}`,
+    `Input: move ${hasMovementInputActive() ? "yes" : "no"} | aim ${hasRecentAimInputActive(now) ? "yes" : "no"} | send ${formatDebugAgeMs(lastInputAge)} | input ${formatDebugAgeMs(lastInputChangeAge)} | aimAge ${formatDebugAgeMs(lastAimChangeAge)}`,
+    `Reliable: ${buildPendingReliableDebugSummary(now)}`,
+    `Scene: bullets ${bullets.size} | shapes ${shapes.size} | predicted ${predictedProjectiles.size} | shotQ ${debugMonitor.pendingPredictedShots.size} | fx ${combatEffects.length} | kill ${killFeedEntries.length}`,
+    `Render: hidden ${document.hidden ? "yes" : "no"} | anchor ${cameraHasAnchor ? "yes" : "no"} | snap ${cameraNeedsSnap ? "yes" : "no"} | loop ${renderLoopStopped ? "stopped" : "ok"} | failure ${renderFailure ? "yes" : "no"}`,
+    `Codes: ${buildDebugIssueCodeSummary(issues)}`
   ];
-
   if (objectiveStatusText) {
     leftLines.push(`Objectives${objectiveStatusText.replace(" | ", ": ")}`);
   }
@@ -6794,10 +6930,8 @@ function drawOverlay() {
         : issue.severity === "warn"
           ? "rgba(255, 214, 120, 0.96)"
           : "rgba(176, 235, 255, 0.96)";
-    const countSuffix = Number(issue.count ?? 1) > 1 ? ` x${issue.count}` : "";
-    const severityLabel = issue.severity === "error" ? "ERR" : issue.severity === "warn" ? "WARN" : "INFO";
     context.fillText(
-      `[${severityLabel}${countSuffix}] ${trimDebugMessage(issue.message, 72)}`,
+      buildDebugIssueLabel(issue),
       issuePanelX,
       issuePanelY + (index + 1) * lineHeight
     );
