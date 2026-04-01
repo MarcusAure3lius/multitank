@@ -1427,6 +1427,36 @@ export function createReplicationPayload(replication) {
   };
 }
 
+function createDebugSignalPayload(signal) {
+  const code = sanitizeText(signal?.code ?? "", "", 48) || "unknown_debug_signal";
+  const severity = sanitizeText(signal?.severity ?? "warn", "warn", 16) || "warn";
+  const scope = sanitizeText(signal?.scope ?? "", "", 24) || null;
+  return {
+    code,
+    severity,
+    scope,
+    message: sanitizeText(signal?.message ?? code, code, 160),
+    count: Math.max(1, readInteger(signal?.count, 1)),
+    firstAt: Math.max(0, readInteger(signal?.firstAt, 0)),
+    lastAt: Math.max(0, readInteger(signal?.lastAt, 0)),
+    ttlMs: clampInteger(signal?.ttlMs, 1000, 60000, 8000)
+  };
+}
+
+function createDebugPayload(debug) {
+  if (!debug || typeof debug !== "object") {
+    return null;
+  }
+
+  return {
+    serverLoopLagMs: Math.max(0, readInteger(debug?.serverLoopLagMs, 0)),
+    tickDurationMs: Math.max(0, readInteger(debug?.tickDurationMs, 0)),
+    signals: Array.isArray(debug?.signals)
+      ? debug.signals.map(createDebugSignalPayload).filter(Boolean).slice(0, 16)
+      : []
+  };
+}
+
 export function createStatePayload({
   roomId,
   snapshotSeq,
@@ -1445,7 +1475,8 @@ export function createStatePayload({
   events,
   inventory,
   replication,
-  you
+  you,
+  debug
 }) {
   const basicSpecializationChoice =
     typeof you?.basicSpecializationChoice === "string" &&
@@ -1471,6 +1502,7 @@ export function createStatePayload({
     events: (events ?? []).map(createEventSnapshot).filter(Boolean),
     inventory: (inventory ?? []).map(createInventoryState),
     replication: createReplicationPayload(replication),
+    debug: createDebugPayload(debug),
     you: you
         ? {
           playerId: sanitizeText(you.playerId ?? "", "", 96),
@@ -1738,7 +1770,8 @@ function normalizeStatePacket(packet, version) {
     events: Array.isArray(packet.events) ? packet.events : [],
     inventory: Array.isArray(packet.inventory) ? packet.inventory : [],
     replication: packet.replication,
-    you: packet.you
+    you: packet.you,
+    debug: packet.debug
   });
 }
 

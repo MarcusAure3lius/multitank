@@ -180,6 +180,167 @@ let profilesLoaded = false;
 let backendLoaded = false;
 let isShuttingDown = false;
 let connectedSocketCount = 0;
+const DEBUG_SIGNAL_DEFAULT_TTL_MS = 10_000;
+const DEBUG_SIGNAL_MERGE_WINDOW_MS = 1_200;
+const DEBUG_SIGNAL_MAX_PER_TRACKER = 24;
+const DEBUG_SIGNAL_SNAPSHOT_LIMIT = 16;
+const DEBUG_SIGNAL_SEVERITY_WEIGHT = Object.freeze({
+  info: 1,
+  warn: 2,
+  error: 3
+});
+const serverTiming = {
+  loopLagMs: 0,
+  lastTickDurationMs: 0
+};
+
+function createDebugTracker(now = Date.now()) {
+  return {
+    signals: [],
+    updatedAt: now
+  };
+}
+
+function getDebugSeverityWeight(severity) {
+  return DEBUG_SIGNAL_SEVERITY_WEIGHT[severity] ?? DEBUG_SIGNAL_SEVERITY_WEIGHT.warn;
+}
+
+function pruneDebugSignals(tracker, now = Date.now()) {
+  if (!tracker) {
+    return;
+  }
+
+  tracker.signals = (tracker.signals ?? []).filter((signal) => now - Number(signal?.lastAt ?? 0) <= Number(signal?.ttlMs ?? 0));
+
+  if (tracker.signals.length > DEBUG_SIGNAL_MAX_PER_TRACKER) {
+    tracker.signals.splice(0, tracker.signals.length - DEBUG_SIGNAL_MAX_PER_TRACKER);
+  }
+
+  tracker.updatedAt = now;
+}
+
+function recordDebugSignal(tracker, code, message, now = Date.now(), options = {}) {
+  if (!tracker) {
+    return null;
+  }
+
+  const normalizedCode = String(code ?? "").trim().slice(0, 48) || "debug_signal";
+  const normalizedMessage = String(message ?? normalizedCode).trim().slice(0, 160) || normalizedCode;
+  const severity =
+    options.severity === "error" || options.severity === "info" || options.severity === "warn"
+      ? options.severity
+      : "warn";
+  const ttlMs = clamp(
+    Math.round(Number(options.ttlMs ?? DEBUG_SIGNAL_DEFAULT_TTL_MS) || DEBUG_SIGNAL_DEFAULT_TTL_MS),
+    1000,
+    60_000
+  );
+  const scope = String(options.scope ?? "").trim().slice(0, 24) || null;
+  const count = Math.max(1, Math.round(Number(options.count ?? 1) || 1));
+
+  pruneDebugSignals(tracker, now);
+
+  let existing = null;
+  for (let index = tracker.signals.length - 1; index >= 0; index -= 1) {
+    const candidate = tracker.signals[index];
+    if (
+      candidate?.code === normalizedCode &&
+      candidate?.scope === scope &&
+      now - Number(candidate?.lastAt ?? 0) <= DEBUG_SIGNAL_MERGE_WINDOW_MS
+    ) {
+      existing = candidate;
+      break;
+    }
+  }
+
+  if (existing) {
+    existing.message = normalizedMessage;
+    existing.severity = severity;
+    existing.lastAt = now;
+    existing.ttlMs = Math.max(Number(existing.ttlMs ?? ttlMs), ttlMs);
+    existing.count = Math.max(1, Number(existing.count ?? 1)) + count;
+    tracker.updatedAt = now;
+    return existing;
+  }
+
+  const signal = {
+    code: normalizedCode,
+    message: normalizedMessage,
+    severity,
+    scope,
+    count,
+    firstAt: now,
+    lastAt: now,
+    ttlMs
+  };
+  tracker.signals.push(signal);
+  pruneDebugSignals(tracker, now);
+  return signal;
+}
+
+function recordRoomDebugSignal(room, code, message, now = Date.now(), options = {}) {
+  if (!room) {
+    return null;
+  }
+
+  room.debug ??= createDebugTracker(now);
+  return recordDebugSignal(room.debug, code, message, now, {
+    ...options,
+    scope: options.scope ?? "room"
+  });
+}
+
+function recordPlayerDebugSignal(player, code, message, now = Date.now(), options = {}) {
+  if (!player) {
+    return null;
+  }
+
+  player.debug ??= createDebugTracker(now);
+  return recordDebugSignal(player.debug, code, message, now, {
+    ...options,
+    scope: options.scope ?? "player"
+  });
+}
+
+function getActiveDebugSignals(tracker, now = Date.now()) {
+  if (!tracker) {
+    return [];
+  }
+
+  pruneDebugSignals(tracker, now);
+  return tracker.signals
+    .filter((signal) => now - Number(signal.lastAt ?? 0) <= Number(signal.ttlMs ?? 0))
+    .map((signal) => ({
+      code: signal.code,
+      message: signal.message,
+      severity: signal.severity,
+      scope: signal.scope,
+      count: Math.max(1, Number(signal.count ?? 1)),
+      firstAt: Number(signal.firstAt ?? 0),
+      lastAt: Number(signal.lastAt ?? 0),
+      ttlMs: Number(signal.ttlMs ?? DEBUG_SIGNAL_DEFAULT_TTL_MS)
+    }));
+}
+
+function buildDebugSnapshot(room, player, now = Date.now()) {
+  const signals = [
+    ...getActiveDebugSignals(room?.debug, now),
+    ...getActiveDebugSignals(player?.debug, now)
+  ]
+    .sort(
+      (left, right) =>
+        getDebugSeverityWeight(right.severity) - getDebugSeverityWeight(left.severity) ||
+        Number(right.lastAt ?? 0) - Number(left.lastAt ?? 0) ||
+        String(left.code ?? "").localeCompare(String(right.code ?? ""))
+    )
+    .slice(0, DEBUG_SIGNAL_SNAPSHOT_LIMIT);
+
+  return {
+    serverLoopLagMs: Math.max(0, Math.round(Number(serverTiming.loopLagMs ?? 0) || 0)),
+    tickDurationMs: Math.max(0, Math.round(Number(serverTiming.lastTickDurationMs ?? 0) || 0)),
+    signals
+  };
+}
 
 function normalizePublicOrigin(value) {
   if (!value) {
@@ -2164,6 +2325,10 @@ function validatePlayerSimulationState(room, player, previousState, deltaSeconds
     if (player.isBot) {
       resetBotAiState(player, now);
     }
+    recordPlayerDebugSignal(player, "invalid_entity_state", "Server corrected an invalid player state", now, {
+      severity: "error",
+      ttlMs: 12_000
+    });
     recordAntiCheatViolation(room, player, "invalid_position", "Server rejected an impossible player state", now, 2);
     return;
   }
@@ -2176,6 +2341,16 @@ function validatePlayerSimulationState(room, player, previousState, deltaSeconds
     if (player.isBot) {
       resetBotAiState(player, now);
     }
+    recordPlayerDebugSignal(
+      player,
+      "movement_corrected",
+      `Server corrected excessive movement (${Math.round(movedDistance)} units in one tick)`,
+      now,
+      {
+        severity: "error",
+        ttlMs: 12_000
+      }
+    );
     recordAntiCheatViolation(room, player, "impossible_movement", "Server rejected impossible movement", now, 1);
     return;
   }
@@ -2371,6 +2546,7 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     lastReceivedInputClientSentAt: 0,
     stateHistory: [],
     profileStats,
+    debug: createDebugTracker(now),
     pendingInputs: [],
     combat: createPlayerCombatState({ classId }, now),
     animation: createPlayerAnimationState(now, {
@@ -2593,6 +2769,7 @@ function createRoom(roomId) {
       shutdownReason: null,
       message: "Waiting for players"
     },
+    debug: createDebugTracker(createdAt),
     bodyHitCooldowns: new Map()
   };
   resetObjectiveState(room);
@@ -3016,6 +3193,10 @@ function queueScoreStateEvent(room, player, reason, now) {
 function queueInventoryStateEvent(room, player, now) {
   const inventoryChanged = normalizePlayerInventory(player);
   if (inventoryChanged && !player.isBot) {
+    recordPlayerDebugSignal(player, "value_clamped", "Inventory values were normalized by the server", now, {
+      severity: "warn",
+      ttlMs: 12_000
+    });
     recordAntiCheatViolation(
       room,
       player,
@@ -8470,11 +8651,16 @@ function expireDisconnectedPlayers(room, now) {
       continue;
     }
 
+    recordRoomDebugSignal(room, "session_expired", `${player.name} did not reconnect before the grace window closed`, now, {
+      severity: "warn",
+      ttlMs: 15_000
+    });
     removePlayerFromRoom(room, player.id, { now });
   }
 }
 
 function setRoomPhase(room, phase, now, winner = null, options = {}) {
+  const previousPhase = room.match.phase;
   const {
     message = null,
     phaseEndsAt = undefined,
@@ -8563,6 +8749,18 @@ function setRoomPhase(room, phase, now, winner = null, options = {}) {
   room.match.phaseEndsAt = nextPhaseEndsAt ?? null;
   room.match.message = nextMessage ?? room.match.message;
   markRoomActive(room, now);
+  if (previousPhase !== phase) {
+    recordRoomDebugSignal(
+      room,
+      previousPhase === MATCH_PHASES.ROUND_END || phase === MATCH_PHASES.ROUND_END ? "round_transition" : "game_state_change",
+      `Game state changed from ${previousPhase ?? "unknown"} to ${phase}`,
+      now,
+      {
+        severity: "info",
+        ttlMs: 15_000
+      }
+    );
+  }
   queueRoundStateEvent(room, now);
 }
 
@@ -9081,6 +9279,7 @@ function joinRoom(socket, payload) {
   }
 
   let player;
+  const wasReconnecting = Boolean(existingPlayer && existingPlayer.connected === false);
 
   if (existingPlayer) {
     const previousSocket = Array.from(room.clients).find(
@@ -9167,6 +9366,24 @@ function joinRoom(socket, payload) {
   syncRoomBots(room, now);
   promoteQueuedSpectators(room, now);
   autoReadyPlayerForImmediateMatch(room, player, now);
+
+  if (wasReconnecting) {
+    recordRoomDebugSignal(room, "player_reconnected", `${player.name} reconnected and resumed the session`, now, {
+      severity: "info",
+      ttlMs: 15_000
+    });
+  } else if (!existingPlayer) {
+    recordRoomDebugSignal(
+      room,
+      "player_connected",
+      `${player.name} connected${player.isSpectator ? " as spectator" : ""}`,
+      now,
+      {
+        severity: "info",
+        ttlMs: 15_000
+      }
+    );
+  }
 
   sendJson(socket, {
     type: MESSAGE_TYPES.JOINED,
@@ -9513,9 +9730,17 @@ function handleUpgrade(socket, payload) {
   }
   const requestedClassId = String(payload.classId ?? "");
   if (!CLASS_TREE[requestedClassId]) {
+    recordPlayerDebugSignal(player, "upgrade_denied", "Upgrade request used an invalid class id", Date.now(), {
+      severity: "warn",
+      ttlMs: 10_000
+    });
     return;
   }
   if (!Array.isArray(player.pendingUpgrades) || !player.pendingUpgrades.includes(requestedClassId)) {
+    recordPlayerDebugSignal(player, "upgrade_denied", `Upgrade to ${requestedClassId} was denied`, Date.now(), {
+      severity: "warn",
+      ttlMs: 10_000
+    });
     return;
   }
   player.tankClassId = requestedClassId;
@@ -9542,6 +9767,10 @@ function handleSpecialization(socket, payload) {
     player.tankClassId !== "basic" ||
     (player.level ?? 1) < GAME_CONFIG.basicSpecialization.unlockLevel
   ) {
+    recordPlayerDebugSignal(player, "ability_denied", "Specialization request was denied by server state", now, {
+      severity: "warn",
+      ttlMs: 10_000
+    });
     return;
   }
 
@@ -9551,6 +9780,10 @@ function handleSpecialization(socket, payload) {
       specializationId === BASIC_CLASS_SPECIALIZATIONS.GRENADE) &&
     !player.alive
   ) {
+    recordPlayerDebugSignal(player, "ability_denied", "Ability was denied because the player was not alive", now, {
+      severity: "warn",
+      ttlMs: 10_000
+    });
     return;
   }
 
@@ -9602,16 +9835,28 @@ function handleStatPoint(socket, payload) {
     return;
   }
   if ((player.statPoints ?? 0) <= 0) {
+    recordPlayerDebugSignal(player, "ability_denied", "Stat upgrade was denied because no points were available", Date.now(), {
+      severity: "warn",
+      ttlMs: 10_000
+    });
     return;
   }
   const statName = String(payload.statName ?? "");
   if (!STAT_NAMES.includes(statName)) {
+    recordPlayerDebugSignal(player, "invalid_input_value", "Stat upgrade used an invalid stat id", Date.now(), {
+      severity: "warn",
+      ttlMs: 10_000
+    });
     return;
   }
   const previousMaxHp = getPlayerMaxHitPoints(player);
   player.stats = createAllocatedStats(player.stats);
   const currentVal = player.stats[statName] ?? 0;
   if (currentVal >= 7) {
+    recordPlayerDebugSignal(player, "value_clamped", `Stat ${statName} was already at its maximum value`, Date.now(), {
+      severity: "warn",
+      ttlMs: 10_000
+    });
     return;
   }
   player.stats[statName] = currentVal + 1;
@@ -9627,32 +9872,61 @@ function createInputFrame(payload, receivedAt) {
   const clientSentAt = Number(payload.clientSentAt);
   const seq = Number(payload.seq);
   const turretAngle = Number(payload.turretAngle);
+  const warnings = [];
 
   if (!Number.isInteger(seq)) {
-    return null;
+    return {
+      ok: false,
+      code: "invalid_input_seq",
+      message: "Input dropped because the sequence value was invalid"
+    };
   }
 
   if (!Number.isFinite(clientSentAt)) {
-    return null;
+    return {
+      ok: false,
+      code: "invalid_input_timestamp",
+      message: "Input dropped because the timestamp was invalid"
+    };
   }
 
-  if (
-    clientSentAt < receivedAt - GAME_CONFIG.input.maxClientInputAgeMs ||
-    clientSentAt > receivedAt + GAME_CONFIG.input.maxClientInputLeadMs
-  ) {
-    return null;
+  if (clientSentAt < receivedAt - GAME_CONFIG.input.maxClientInputAgeMs) {
+    return {
+      ok: false,
+      code: "input_too_old",
+      message: "Input dropped because it arrived too late"
+    };
+  }
+
+  if (clientSentAt > receivedAt + GAME_CONFIG.input.maxClientInputLeadMs) {
+    return {
+      ok: false,
+      code: "input_too_far_ahead",
+      message: "Input dropped because it was too far ahead of server time"
+    };
+  }
+
+  if (!Number.isFinite(turretAngle)) {
+    warnings.push({
+      code: "invalid_input_value",
+      message: "Input turret angle was invalid and got normalized"
+    });
   }
 
   return {
-    seq,
-    clientSentAt,
-    receivedAt,
-    forward: Boolean(payload.forward),
-    back: Boolean(payload.back),
-    left: Boolean(payload.left),
-    right: Boolean(payload.right),
-    shoot: Boolean(payload.shoot),
-    turretAngle: Number.isFinite(turretAngle) ? normalizeAngle(turretAngle) : 0
+    ok: true,
+    frame: {
+      seq,
+      clientSentAt,
+      receivedAt,
+      forward: Boolean(payload.forward),
+      back: Boolean(payload.back),
+      left: Boolean(payload.left),
+      right: Boolean(payload.right),
+      shoot: Boolean(payload.shoot),
+      turretAngle: Number.isFinite(turretAngle) ? normalizeAngle(turretAngle) : 0
+    },
+    warnings
   };
 }
 
@@ -9765,17 +10039,43 @@ function handleInput(socket, payload, now) {
       code: "input_rate_limit",
       message: "Input rate limit exceeded"
     }, { critical: true });
+    recordPlayerDebugSignal(player, "input_rate_limit", "Input rate limit exceeded", now, {
+      severity: "error",
+      ttlMs: 12_000
+    });
     recordAntiCheatViolation(room, player, "input_rate_limit", "Input rate limit exceeded", now, 1);
     return;
   }
 
-  const nextInput = createInputFrame(payload, now);
-  if (!nextInput) {
-    recordAntiCheatViolation(room, player, "invalid_input", "Server rejected a malformed input frame", now, 1);
+  const inputResult = createInputFrame(payload, now);
+  if (!inputResult.ok) {
+    recordPlayerDebugSignal(player, inputResult.code, inputResult.message, now, {
+      severity: "error",
+      ttlMs: 12_000
+    });
+    recordAntiCheatViolation(room, player, inputResult.code, inputResult.message, now, 1);
     return;
+  }
+  const nextInput = inputResult.frame;
+
+  for (const warning of inputResult.warnings ?? []) {
+    recordPlayerDebugSignal(player, warning.code, warning.message, now, {
+      severity: "warn",
+      ttlMs: 10_000
+    });
   }
 
   if (nextInput.seq - player.lastReceivedInputSeq > GAME_CONFIG.antiCheat.maxInputSequenceJump) {
+    recordPlayerDebugSignal(
+      player,
+      "input_sequence_jump",
+      `Input sequence jumped from ${player.lastReceivedInputSeq} to ${nextInput.seq}`,
+      now,
+      {
+        severity: "error",
+        ttlMs: 12_000
+      }
+    );
     recordAntiCheatViolation(room, player, "input_sequence_jump", "Server rejected an impossible input sequence jump", now, 1);
     return;
   }
@@ -9788,10 +10088,33 @@ function handleInput(socket, payload, now) {
     }
 
     antiCheatState.duplicateInputCount += 1;
+    recordPlayerDebugSignal(
+      player,
+      "duplicate_input_sequence",
+      `Duplicate input sequence ${nextInput.seq} was ignored`,
+      now,
+      {
+        severity: "warn",
+        ttlMs: 10_000
+      }
+    );
     if (antiCheatState.duplicateInputCount > GAME_CONFIG.antiCheat.maxDuplicateInputsPerSecond) {
       recordAntiCheatViolation(room, player, "duplicate_input", "Server rejected repeated duplicate inputs", now, 1);
     }
     return;
+  }
+
+  if (nextInput.seq > player.lastReceivedInputSeq + 1) {
+    recordPlayerDebugSignal(
+      player,
+      "missing_input_sequence",
+      `Skipped ${nextInput.seq - player.lastReceivedInputSeq - 1} input sequence value(s)`,
+      now,
+      {
+        severity: "warn",
+        ttlMs: 10_000
+      }
+    );
   }
 
   player.lastReceivedInputSeq = nextInput.seq;
@@ -9811,6 +10134,16 @@ function handleInput(socket, payload, now) {
   }
 
   if (player.pendingInputs.length > GAME_CONFIG.input.maxBufferedInputs) {
+    recordPlayerDebugSignal(
+      player,
+      "input_buffer_trimmed",
+      "Buffered inputs overflowed and older inputs were discarded",
+      now,
+      {
+        severity: "warn",
+        ttlMs: 10_000
+      }
+    );
     player.pendingInputs.splice(0, player.pendingInputs.length - GAME_CONFIG.input.maxBufferedInputs);
   }
 }
@@ -11754,6 +12087,7 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq) {
     events: visibleEvents,
     inventory: player ? [createInventoryState(player)] : [],
     replication,
+    debug: buildDebugSnapshot(room, player, now),
     you: player
       ? {
           playerId: player.id,
@@ -12204,13 +12538,24 @@ wss.on("connection", (socket, request) => {
 
   socket.on("close", (code, reasonBuffer) => {
     connectedSocketCount = Math.max(0, connectedSocketCount - 1);
+    const closeReason =
+      Buffer.isBuffer(reasonBuffer) ? reasonBuffer.toString("utf8") : String(reasonBuffer ?? "");
+    const room = rooms.get(socket.data?.roomId ?? "");
+    const player = room?.players.get(socket.data?.playerId ?? "");
+    if (room && player) {
+      const reasonSummary = closeReason.trim() ? `: ${closeReason.trim().slice(0, 80)}` : "";
+      recordRoomDebugSignal(room, "player_disconnected", `${player.name} disconnected (code ${code})${reasonSummary}`, Date.now(), {
+        severity: "warn",
+        ttlMs: 15_000
+      });
+    }
     console.log("WebSocket closed", {
       roomId: socket.data?.roomId ?? null,
       playerId: socket.data?.playerId ?? null,
       profileId: socket.data?.profileId ?? null,
       remoteAddress: socket.data?.remoteAddress ?? null,
       code,
-      reason: Buffer.isBuffer(reasonBuffer) ? reasonBuffer.toString("utf8") : String(reasonBuffer ?? ""),
+      reason: closeReason,
       connectedForMs: Date.now() - connectedAt,
       silenceMs: Date.now() - Number(socket.data?.lastHeardAt ?? connectedAt)
     });
@@ -12239,10 +12584,12 @@ let simulationAccumulatorMs = 0;
 let lastSimulatedAt = lastRealtimeTickAt;
 let simulatedNowMs = lastRealtimeTickAt;
 const simulationInterval = setInterval(() => {
-  const realtimeNow = Date.now();
+  const intervalStartedAt = Date.now();
+  const realtimeNow = intervalStartedAt;
   const elapsedMs = Math.max(0, realtimeNow - lastRealtimeTickAt);
   lastRealtimeTickAt = realtimeNow;
   simulationAccumulatorMs = Math.min(simulationAccumulatorMs + elapsedMs, maxSimulationFrameMs);
+  serverTiming.loopLagMs = Math.max(0, elapsedMs - fixedTickMs);
 
   let processedTicks = 0;
   while (simulationAccumulatorMs >= fixedTickMs && processedTicks < GAME_CONFIG.simulation.maxCatchUpTicks) {
@@ -12255,6 +12602,46 @@ const simulationInterval = setInterval(() => {
     }
     simulationAccumulatorMs -= fixedTickMs;
     processedTicks += 1;
+  }
+
+  if (processedTicks >= GAME_CONFIG.simulation.maxCatchUpTicks && simulationAccumulatorMs >= fixedTickMs) {
+    serverTiming.loopLagMs = Math.max(serverTiming.loopLagMs, simulationAccumulatorMs);
+  }
+
+  serverTiming.lastTickDurationMs = Math.max(0, Date.now() - intervalStartedAt);
+  if (serverTiming.loopLagMs >= fixedTickMs || serverTiming.lastTickDurationMs >= fixedTickMs) {
+    const signalNow = Date.now();
+    for (const room of rooms.values()) {
+      if (room.clients.size === 0) {
+        continue;
+      }
+
+      if (serverTiming.loopLagMs >= fixedTickMs) {
+        recordRoomDebugSignal(
+          room,
+          "server_loop_lag",
+          `Server loop lag reached ${Math.round(serverTiming.loopLagMs)}ms`,
+          signalNow,
+          {
+            severity: serverTiming.loopLagMs >= fixedTickMs * 2 ? "error" : "warn",
+            ttlMs: 6_000
+          }
+        );
+      }
+
+      if (serverTiming.lastTickDurationMs >= fixedTickMs) {
+        recordRoomDebugSignal(
+          room,
+          "tick_rate_low",
+          `Server tick work took ${Math.round(serverTiming.lastTickDurationMs)}ms`,
+          signalNow,
+          {
+            severity: serverTiming.lastTickDurationMs >= fixedTickMs * 2 ? "error" : "warn",
+            ttlMs: 6_000
+          }
+        );
+      }
+    }
   }
 }, fixedTickMs);
 

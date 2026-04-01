@@ -142,6 +142,31 @@ const LOCAL_AIM_RESPONSE = Object.freeze({
   inputGraceMs: Math.max(120, Math.ceil(1000 / CLIENT_TICK.rate) * 2)
 });
 
+const DEBUG_MONITOR = Object.freeze({
+  eventTtlMs: 10_000,
+  mergeWindowMs: 1_200,
+  latencySampleSize: 20,
+  packetWindowSize: 24,
+  pingTimeoutMs: 6_000,
+  correctionWindowMs: 4_000,
+  frequentCorrectionThreshold: 5,
+  highPingMs: 160,
+  highJitterMs: 24,
+  highPacketLossPercent: 10,
+  snapshotDelayWarningMs: 220,
+  replayInputWarningCount: 24,
+  inputSeqJumpWarning: 12,
+  frameSpikeMs: 34,
+  tickRateLowRatio: 0.85,
+  predictedShotTimeoutMs: 450,
+  bulletVolleyWindowMs: 80,
+  fireRateSlack: 0.45,
+  staleReliableActionMs: 2_500,
+  entitySpeedSlack: 2.2,
+  teleportDistance: 240,
+  bulletTrackTtlMs: GAME_CONFIG.bullet.lifeMs + 2_000
+});
+
 const WORLD_RENDER = Object.freeze({
   gridSize: 64,
   cameraFollow: 0.14
@@ -279,11 +304,26 @@ let lastResultsRenderKey = "";
 let lastDiagnosticBannerText = "";
 let lastRoomBrowserRenderKey = "";
 let lastTimedUiRefreshAt = 0;
+let latestDebugInfo = null;
 const assetState = {
   manifest: null,
   images: new Map(),
   failedImages: new Set(),
   loadingImages: new Map()
+};
+const debugMonitor = {
+  events: new Map(),
+  pendingPings: new Map(),
+  packetWindow: [],
+  latencySamples: [],
+  correctionEvents: [],
+  lastServerTickSample: null,
+  serverTickRateSamples: [],
+  estimatedServerTickRate: GAME_CONFIG.serverTickRate,
+  lastKnownPlayers: new Map(),
+  knownBullets: new Map(),
+  lastVolleyByOwner: new Map(),
+  pendingPredictedShots: new Map()
 };
 const basicSpecializationButtonRects = [];
 const BASIC_SPECIALIZATION_MENU_OPTIONS = Object.freeze([
@@ -392,6 +432,716 @@ function setElementText(element, text) {
   if (element.textContent !== nextText) {
     element.textContent = nextText;
   }
+}
+
+function getDebugSeverityWeight(severity) {
+  switch (severity) {
+    case "error":
+      return 3;
+    case "warn":
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+function trimDebugMessage(message, maxLength = 140) {
+  const normalized = String(message ?? "").trim().replace(/\s+/g, " ");
+  if (!normalized) {
+    return "Unknown debug issue";
+  }
+
+  return normalized.length > maxLength ? `${normalized.slice(0, Math.max(0, maxLength - 3))}...` : normalized;
+}
+
+function pushPacketWindowSample(value) {
+  debugMonitor.packetWindow.push(value ? 1 : 0);
+  while (debugMonitor.packetWindow.length > DEBUG_MONITOR.packetWindowSize) {
+    debugMonitor.packetWindow.shift();
+  }
+}
+
+function prunePendingPingSamples(now = Date.now()) {
+  for (const [sentAt] of debugMonitor.pendingPings.entries()) {
+    if (now - sentAt < DEBUG_MONITOR.pingTimeoutMs) {
+      continue;
+    }
+
+    debugMonitor.pendingPings.delete(sentAt);
+    pushPacketWindowSample(0);
+  }
+}
+
+function notePingSent(sentAt = Date.now()) {
+  prunePendingPingSamples(sentAt);
+  debugMonitor.pendingPings.set(sentAt, sentAt);
+}
+
+function notePong(sentAt, now = Date.now()) {
+  prunePendingPingSamples(now);
+  if (debugMonitor.pendingPings.delete(sentAt)) {
+    pushPacketWindowSample(1);
+  }
+
+  const rtt = Math.max(0, now - sentAt);
+  debugMonitor.latencySamples.push({
+    at: now,
+    rtt
+  });
+
+  while (debugMonitor.latencySamples.length > DEBUG_MONITOR.latencySampleSize) {
+    debugMonitor.latencySamples.shift();
+  }
+}
+
+function getLatencyJitterMs() {
+  if (debugMonitor.latencySamples.length < 2) {
+    return 0;
+  }
+
+  let totalVariance = 0;
+  let comparisons = 0;
+  for (let index = 1; index < debugMonitor.latencySamples.length; index += 1) {
+    totalVariance += Math.abs(debugMonitor.latencySamples[index].rtt - debugMonitor.latencySamples[index - 1].rtt);
+    comparisons += 1;
+  }
+
+  return comparisons > 0 ? totalVariance / comparisons : 0;
+}
+
+function getPacketLossPercent(now = Date.now()) {
+  prunePendingPingSamples(now);
+  if (debugMonitor.packetWindow.length === 0) {
+    return 0;
+  }
+
+  const lostCount = debugMonitor.packetWindow.filter((value) => value === 0).length;
+  return (lostCount / debugMonitor.packetWindow.length) * 100;
+}
+
+function pruneDebugEvents(now = Date.now()) {
+  for (const [key, event] of debugMonitor.events.entries()) {
+    if (now - Number(event.lastAt ?? 0) > Number(event.ttlMs ?? DEBUG_MONITOR.eventTtlMs)) {
+      debugMonitor.events.delete(key);
+    }
+  }
+}
+
+function recordDebugEvent(code, message, options = {}) {
+  const now = Number(options.now ?? Date.now()) || Date.now();
+  const key = String(options.key ?? code).trim() || String(code ?? "debug_event");
+  const severity =
+    options.severity === "error" || options.severity === "info" || options.severity === "warn"
+      ? options.severity
+      : "warn";
+  const ttlMs = clamp(
+    Math.round(Number(options.ttlMs ?? DEBUG_MONITOR.eventTtlMs) || DEBUG_MONITOR.eventTtlMs),
+    1000,
+    60_000
+  );
+  const existing = debugMonitor.events.get(key);
+  const nextCount =
+    existing && now - Number(existing.lastAt ?? 0) <= DEBUG_MONITOR.mergeWindowMs
+      ? Math.max(1, Number(existing.count ?? 1)) + 1
+      : Math.max(1, Number(existing?.count ?? 0) || 0, Number(options.count ?? 1) || 1);
+
+  debugMonitor.events.set(key, {
+    key,
+    code: String(code ?? "debug_event").trim() || "debug_event",
+    message: trimDebugMessage(message),
+    severity,
+    source: String(options.source ?? "client"),
+    count: nextCount,
+    firstAt: existing?.firstAt ?? now,
+    lastAt: now,
+    ttlMs
+  });
+  pruneDebugEvents(now);
+}
+
+function syncServerDebugSnapshot(debugPayload, now = Date.now()) {
+  latestDebugInfo = debugPayload ?? latestDebugInfo;
+  if (!debugPayload || !Array.isArray(debugPayload.signals)) {
+    return;
+  }
+
+  for (const signal of debugPayload.signals) {
+    const key = `server:${signal.scope ?? "room"}:${signal.code ?? "unknown"}`;
+    debugMonitor.events.set(key, {
+      key,
+      code: String(signal.code ?? "unknown"),
+      message: trimDebugMessage(signal.message),
+      severity:
+        signal.severity === "error" || signal.severity === "info" || signal.severity === "warn"
+          ? signal.severity
+          : "warn",
+      source: "server",
+      count: Math.max(1, Number(signal.count ?? 1) || 1),
+      firstAt: Number(signal.firstAt ?? now) || now,
+      lastAt: Number(signal.lastAt ?? now) || now,
+      ttlMs: clamp(Math.round(Number(signal.ttlMs ?? DEBUG_MONITOR.eventTtlMs) || DEBUG_MONITOR.eventTtlMs), 1000, 60_000)
+    });
+  }
+
+  pruneDebugEvents(now);
+}
+
+function noteServerTickSample(simulationTick, frameAt = performance.now()) {
+  const tickNumber = Number(simulationTick);
+  if (!Number.isFinite(tickNumber) || tickNumber <= 0) {
+    return;
+  }
+
+  const previous = debugMonitor.lastServerTickSample;
+  if (previous && tickNumber > previous.tick && frameAt > previous.at) {
+    const estimatedRate = (tickNumber - previous.tick) / ((frameAt - previous.at) / 1000);
+    if (Number.isFinite(estimatedRate) && estimatedRate > 0) {
+      debugMonitor.serverTickRateSamples.push(estimatedRate);
+      while (debugMonitor.serverTickRateSamples.length > 12) {
+        debugMonitor.serverTickRateSamples.shift();
+      }
+
+      const total = debugMonitor.serverTickRateSamples.reduce((sum, sample) => sum + sample, 0);
+      debugMonitor.estimatedServerTickRate =
+        debugMonitor.serverTickRateSamples.length > 0
+          ? total / debugMonitor.serverTickRateSamples.length
+          : GAME_CONFIG.serverTickRate;
+    }
+  }
+
+  debugMonitor.lastServerTickSample = {
+    tick: tickNumber,
+    at: frameAt
+  };
+}
+
+function getLocalPredictionDelta() {
+  const localPlayer = getLocalPlayer();
+  const visualState = ensureLocalVisualState(localPlayer);
+  if (!localPlayer || !visualState) {
+    return 0;
+  }
+
+  return Math.hypot((visualState.x ?? localPlayer.x) - localPlayer.x, (visualState.y ?? localPlayer.y) - localPlayer.y);
+}
+
+function noteReconciliation(distanceError, options = {}) {
+  const now = Date.now();
+  if (distanceError <= 0.5 && !options.stalledStream) {
+    return;
+  }
+
+  debugMonitor.correctionEvents.push({
+    at: now,
+    distanceError
+  });
+  debugMonitor.correctionEvents = debugMonitor.correctionEvents.filter(
+    (event) => now - event.at <= DEBUG_MONITOR.correctionWindowMs
+  );
+
+  if (distanceError >= 4 || options.stalledStream) {
+    recordDebugEvent("desync_detected", `Client/server state diverged by ${Math.round(distanceError)} units`, {
+      severity: distanceError >= LOCAL_PREDICTION.snapGap || options.stalledStream ? "error" : "warn",
+      ttlMs: 8_000,
+      key: "desync_detected"
+    });
+    recordDebugEvent("movement_corrected_by_server", `Server reconciliation corrected ${Math.round(distanceError)} units`, {
+      severity: distanceError >= LOCAL_PREDICTION.snapGap ? "error" : "warn",
+      ttlMs: 8_000,
+      key: "movement_corrected_by_server"
+    });
+  }
+
+  if (distanceError >= LOCAL_PREDICTION.maxSmoothGap) {
+    recordDebugEvent(
+      "large_reconciliation_correction",
+      `Large reconciliation correction detected (${Math.round(distanceError)} units)`,
+      {
+        severity: distanceError >= LOCAL_PREDICTION.snapGap ? "error" : "warn",
+        ttlMs: 8_000,
+        key: "large_reconciliation_correction"
+      }
+    );
+  }
+
+  if (
+    Math.max(0, Number(options.pendingReplayCount ?? pendingInputs.length) || 0) >= DEBUG_MONITOR.replayInputWarningCount &&
+    distanceError >= 4
+  ) {
+    recordDebugEvent(
+      "large_correction_after_replay",
+      `Large correction happened while replaying ${Math.max(0, Number(options.pendingReplayCount ?? pendingInputs.length) || 0)} inputs`,
+      {
+        severity: "warn",
+        ttlMs: 8_000,
+        key: "large_correction_after_replay"
+      }
+    );
+  }
+
+  if (debugMonitor.correctionEvents.length >= DEBUG_MONITOR.frequentCorrectionThreshold) {
+    recordDebugEvent(
+      "frequent_reconciliation",
+      `Frequent reconciliation detected (${debugMonitor.correctionEvents.length} corrections in ${Math.round(DEBUG_MONITOR.correctionWindowMs / 1000)}s)`,
+      {
+        severity: "warn",
+        ttlMs: 8_000,
+        key: "frequent_reconciliation"
+      }
+    );
+  }
+}
+
+function getClassReloadMs(classId) {
+  return CLASS_TREE[classId]?.reloadMs ?? GAME_CONFIG.tank.shootCooldownMs;
+}
+
+function noteBulletVolley(ownerState, now = Date.now()) {
+  const ownerId = ownerState?.id;
+  if (!ownerId) {
+    return;
+  }
+
+  const previousVolley = debugMonitor.lastVolleyByOwner.get(ownerId);
+  const reloadMs = getClassReloadMs(ownerState.tankClassId ?? ownerState.classId);
+  if (!previousVolley || now - previousVolley.at > DEBUG_MONITOR.bulletVolleyWindowMs) {
+    if (previousVolley && now - previousVolley.at < reloadMs * DEBUG_MONITOR.fireRateSlack) {
+      recordDebugEvent(
+        "fire_rate_too_high",
+        `${ownerState.name ?? ownerId} fired again after ${Math.round(now - previousVolley.at)}ms`,
+        {
+          severity: "warn",
+          ttlMs: 8_000,
+          key: `fire_rate_too_high:${ownerId}`
+        }
+      );
+    }
+
+    debugMonitor.lastVolleyByOwner.set(ownerId, { at: now });
+  }
+}
+
+function pruneSnapshotDebugState(now = Date.now()) {
+  for (const [playerId, state] of debugMonitor.lastKnownPlayers.entries()) {
+    if (now - Number(state.at ?? 0) > 30_000) {
+      debugMonitor.lastKnownPlayers.delete(playerId);
+    }
+  }
+
+  for (const [bulletId, state] of debugMonitor.knownBullets.entries()) {
+    if (now - Number(state.seenAt ?? 0) > DEBUG_MONITOR.bulletTrackTtlMs) {
+      debugMonitor.knownBullets.delete(bulletId);
+    }
+  }
+
+  for (const [ownerId, state] of debugMonitor.lastVolleyByOwner.entries()) {
+    if (now - Number(state.at ?? 0) > 10_000) {
+      debugMonitor.lastVolleyByOwner.delete(ownerId);
+    }
+  }
+}
+
+function noteSnapshotDebugState(payload, now = Date.now()) {
+  const playersInSnapshot = Array.isArray(payload?.players) ? payload.players : [];
+  const bulletsInSnapshot = Array.isArray(payload?.bullets) ? payload.bullets : [];
+  const playersById = new Map();
+
+  for (const player of playersInSnapshot) {
+    if (player?.id) {
+      playersById.set(player.id, player);
+    }
+  }
+
+  if (
+    payload?.replication?.mode === "full" &&
+    payload?.you?.playerId &&
+    !payload.you.isSpectator &&
+    !playersById.has(payload.you.playerId)
+  ) {
+    recordDebugEvent("snapshot_missing_entities", "Full snapshot is missing the local player entity", {
+      severity: "error",
+      ttlMs: 10_000,
+      key: "snapshot_missing_local_player"
+    });
+  }
+
+  for (const player of playersInSnapshot) {
+    if (!player?.id) {
+      continue;
+    }
+
+    if (
+      !Number.isFinite(player.x) ||
+      !Number.isFinite(player.y) ||
+      !Number.isFinite(player.angle) ||
+      !Number.isFinite(player.turretAngle)
+    ) {
+      recordDebugEvent("snapshot_data_invalid", `Snapshot contains invalid numeric state for ${player.name ?? player.id}`, {
+        severity: "error",
+        ttlMs: 10_000,
+        key: `snapshot_data_invalid:${player.id}`
+      });
+    }
+
+    if (Number(player.hp) < 0 || Number(player.hp) > Math.max(1, Number(player.maxHp ?? GAME_CONFIG.tank.hitPoints))) {
+      recordDebugEvent("health_out_of_range", `${player.name ?? player.id} has health outside valid bounds`, {
+        severity: "error",
+        ttlMs: 10_000,
+        key: `health_out_of_range:${player.id}`
+      });
+    }
+
+    const previousState = debugMonitor.lastKnownPlayers.get(player.id);
+    if (previousState) {
+      const elapsedMs = now - Number(previousState.at ?? now);
+      const movedDistance = Math.hypot(player.x - previousState.x, player.y - previousState.y);
+      if (elapsedMs > 0 && previousState.alive && player.alive) {
+        const speed = movedDistance / (elapsedMs / 1000);
+        if (speed > GAME_CONFIG.tank.speed * DEBUG_MONITOR.entitySpeedSlack) {
+          recordDebugEvent(
+            "movement_speed_too_high",
+            `${player.name ?? player.id} moved at ${Math.round(speed)} units/s`,
+            {
+              severity: "warn",
+              ttlMs: 8_000,
+              key: `movement_speed_too_high:${player.id}`
+            }
+          );
+        }
+      }
+
+      if (movedDistance > DEBUG_MONITOR.teleportDistance) {
+        recordDebugEvent("teleport_detected", `${player.name ?? player.id} jumped ${Math.round(movedDistance)} units`, {
+          severity: "warn",
+          ttlMs: 8_000,
+          key: `teleport_detected:${player.id}`
+        });
+      }
+
+      if (!player.alive && movedDistance > 8) {
+        recordDebugEvent("dead_player_still_acting", `${player.name ?? player.id} moved after death`, {
+          severity: "error",
+          ttlMs: 10_000,
+          key: `dead_player_still_moving:${player.id}`
+        });
+      }
+    }
+
+    debugMonitor.lastKnownPlayers.set(player.id, {
+      id: player.id,
+      name: player.name,
+      x: Number(player.x) || 0,
+      y: Number(player.y) || 0,
+      alive: Boolean(player.alive),
+      classId: player.classId,
+      tankClassId: player.tankClassId ?? player.classId,
+      at: now
+    });
+  }
+
+  for (const bullet of bulletsInSnapshot) {
+    if (!bullet?.id) {
+      continue;
+    }
+
+    if (!bullet.ownerId) {
+      recordDebugEvent("bullet_missing_owner", `Projectile ${bullet.id} has no owner`, {
+        severity: "error",
+        ttlMs: 10_000,
+        key: `bullet_missing_owner:${bullet.id}`
+      });
+    }
+
+    if (
+      !Number.isFinite(bullet.x) ||
+      !Number.isFinite(bullet.y) ||
+      !Number.isFinite(bullet.angle) ||
+      !Number.isFinite(bullet.speed)
+    ) {
+      recordDebugEvent("snapshot_data_invalid", `Projectile ${bullet.id} has invalid snapshot data`, {
+        severity: "error",
+        ttlMs: 10_000,
+        key: `invalid_projectile:${bullet.id}`
+      });
+    }
+
+    const ownerState = playersById.get(bullet.ownerId) ?? debugMonitor.lastKnownPlayers.get(bullet.ownerId) ?? null;
+    if (ownerState && ownerState.alive === false) {
+      recordDebugEvent("dead_player_still_acting", `${ownerState.name ?? bullet.ownerId} still owns an active projectile while dead`, {
+        severity: "error",
+        ttlMs: 10_000,
+        key: `dead_player_projectile:${bullet.ownerId}`
+      });
+    }
+
+    const knownBullet = debugMonitor.knownBullets.get(bullet.id);
+    if (!knownBullet) {
+      noteBulletVolley(ownerState, now);
+      debugMonitor.knownBullets.set(bullet.id, {
+        ownerId: bullet.ownerId,
+        seenAt: now
+      });
+    } else {
+      knownBullet.seenAt = now;
+    }
+  }
+
+  pruneSnapshotDebugState(now);
+}
+
+function notePredictedShotPending(projectileId, inputFrame, now = Date.now()) {
+  if (!projectileId) {
+    return;
+  }
+
+  debugMonitor.pendingPredictedShots.set(projectileId, {
+    seq: Number(inputFrame?.seq ?? 0) || 0,
+    createdAt: now
+  });
+}
+
+function notePredictedShotMatched(projectileId) {
+  if (!projectileId) {
+    return;
+  }
+
+  debugMonitor.pendingPredictedShots.delete(projectileId);
+}
+
+function prunePredictedShotExpectations(now = Date.now()) {
+  for (const [projectileId, pendingShot] of debugMonitor.pendingPredictedShots.entries()) {
+    if (now - Number(pendingShot.createdAt ?? 0) < DEBUG_MONITOR.predictedShotTimeoutMs) {
+      continue;
+    }
+
+    recordDebugEvent(
+      "fire_rejected",
+      `Predicted shot ${pendingShot.seq > 0 ? `seq ${pendingShot.seq}` : projectileId} never received an authoritative projectile`,
+      {
+        severity: "warn",
+        ttlMs: 8_000,
+        key: `fire_rejected:${pendingShot.seq || projectileId}`
+      }
+    );
+    recordDebugEvent(
+      "cooldown_desync",
+      `Local fire prediction drifted from the server for shot ${pendingShot.seq > 0 ? pendingShot.seq : projectileId}`,
+      {
+        severity: "warn",
+        ttlMs: 8_000,
+        key: `cooldown_desync:${pendingShot.seq || projectileId}`
+      }
+    );
+    debugMonitor.pendingPredictedShots.delete(projectileId);
+  }
+}
+
+function buildDynamicDebugIssue(code, message, severity, now = Date.now(), options = {}) {
+  return {
+    key: String(options.key ?? code),
+    code,
+    message: trimDebugMessage(message),
+    severity,
+    source: options.source ?? "dynamic",
+    count: Math.max(1, Number(options.count ?? 1) || 1),
+    firstAt: now,
+    lastAt: now,
+    ttlMs: Math.max(1000, Number(options.ttlMs ?? DEBUG_MONITOR.eventTtlMs) || DEBUG_MONITOR.eventTtlMs)
+  };
+}
+
+function getDynamicDebugIssues(now = Date.now()) {
+  prunePendingPingSamples(now);
+  prunePredictedShotExpectations(now);
+
+  const issues = [];
+  const jitterMs = getLatencyJitterMs();
+  const packetLossPercent = getPacketLossPercent(now);
+  const snapshotDelayMs = lastSnapshotAt ? Math.round(performance.now() - lastSnapshotAt) : 0;
+  const estimatedTickRate = Number(debugMonitor.estimatedServerTickRate) || GAME_CONFIG.serverTickRate;
+  const serverLoopLagMs = Math.max(0, Number(latestDebugInfo?.serverLoopLagMs ?? 0) || 0);
+  const serverTickWorkMs = Math.max(0, Number(latestDebugInfo?.tickDurationMs ?? 0) || 0);
+  const localPredictionDelta = getLocalPredictionDelta();
+  const tickBudgetMs = 1000 / GAME_CONFIG.serverTickRate;
+
+  if (latestLatencyMs >= DEBUG_MONITOR.highPingMs) {
+    issues.push(buildDynamicDebugIssue("high_ping", `Ping is high at ${Math.round(latestLatencyMs)}ms`, "warn", now));
+  }
+
+  if (jitterMs >= DEBUG_MONITOR.highJitterMs) {
+    issues.push(buildDynamicDebugIssue("high_jitter", `Jitter is high at ${Math.round(jitterMs)}ms`, "warn", now));
+  }
+
+  if (packetLossPercent >= DEBUG_MONITOR.highPacketLossPercent) {
+    issues.push(
+      buildDynamicDebugIssue(
+        "packet_loss_high",
+        `Packet loss is ${packetLossPercent.toFixed(0)}% over the recent ping window`,
+        packetLossPercent >= 25 ? "error" : "warn",
+        now
+      )
+    );
+  }
+
+  if (snapshotDelayMs >= DEBUG_MONITOR.snapshotDelayWarningMs) {
+    issues.push(
+      buildDynamicDebugIssue(
+        "snapshot_delay_high",
+        `Snapshot delay is ${snapshotDelayMs}ms`,
+        snapshotDelayMs >= LOCAL_PREDICTION.stallHardLimitMs ? "error" : "warn",
+        now
+      )
+    );
+  }
+
+  if (pendingInputs.length >= DEBUG_MONITOR.replayInputWarningCount) {
+    issues.push(
+      buildDynamicDebugIssue(
+        "too_many_inputs_replayed",
+        `Prediction is replaying ${pendingInputs.length} pending inputs`,
+        pendingInputs.length >= DEBUG_MONITOR.replayInputWarningCount * 2 ? "error" : "warn",
+        now
+      )
+    );
+  }
+
+  if (estimatedTickRate < GAME_CONFIG.serverTickRate * DEBUG_MONITOR.tickRateLowRatio) {
+    issues.push(
+      buildDynamicDebugIssue(
+        "tick_rate_lower_than_expected",
+        `Estimated server tick rate dropped to ${estimatedTickRate.toFixed(1)}/s`,
+        "warn",
+        now
+      )
+    );
+  }
+
+  if (serverLoopLagMs >= tickBudgetMs) {
+    issues.push(
+      buildDynamicDebugIssue(
+        "server_loop_lag",
+        `Server loop lag is ${Math.round(serverLoopLagMs)}ms`,
+        serverLoopLagMs >= tickBudgetMs * 2 ? "error" : "warn",
+        now,
+        {
+          source: "server"
+        }
+      )
+    );
+  }
+
+  if (serverTickWorkMs >= tickBudgetMs) {
+    issues.push(
+      buildDynamicDebugIssue(
+        "server_tick_slow",
+        `Server tick work took ${Math.round(serverTickWorkMs)}ms`,
+        serverTickWorkMs >= tickBudgetMs * 2 ? "error" : "warn",
+        now,
+        {
+          source: "server"
+        }
+      )
+    );
+  }
+
+  if (localPredictionDelta >= LOCAL_PREDICTION.maxSmoothGap) {
+    issues.push(
+      buildDynamicDebugIssue(
+        "desync_detected_live",
+        `Live client/server position delta is ${Math.round(localPredictionDelta)} units`,
+        localPredictionDelta >= LOCAL_PREDICTION.snapGap ? "error" : "warn",
+        now
+      )
+    );
+  }
+
+  for (const entry of pendingReliableMessages.values()) {
+    const ageMs = now - Number(entry?.lastSentAt ?? now);
+    if (ageMs < DEBUG_MONITOR.staleReliableActionMs) {
+      continue;
+    }
+
+    if (entry?.payload?.type === MESSAGE_TYPES.SPECIALIZATION) {
+      issues.push(
+        buildDynamicDebugIssue(
+          "ability_triggered_no_effect",
+          `Ability request has been pending for ${Math.round(ageMs)}ms`,
+          "warn",
+          now
+        )
+      );
+      continue;
+    }
+
+    if (entry?.payload?.type === MESSAGE_TYPES.UPGRADE) {
+      issues.push(
+        buildDynamicDebugIssue(
+          "ability_state_mismatch",
+          `Upgrade request has not been reflected for ${Math.round(ageMs)}ms`,
+          "warn",
+          now
+        )
+      );
+    }
+  }
+
+  return issues;
+}
+
+function getActiveDebugIssues(now = Date.now()) {
+  pruneDebugEvents(now);
+  const merged = new Map();
+  const allIssues = [...debugMonitor.events.values(), ...getDynamicDebugIssues(now)];
+
+  for (const issue of allIssues) {
+    const key = String(issue.key ?? issue.code ?? issue.message);
+    const existing = merged.get(key);
+    if (
+      !existing ||
+      getDebugSeverityWeight(issue.severity) > getDebugSeverityWeight(existing.severity) ||
+      Number(issue.lastAt ?? 0) > Number(existing.lastAt ?? 0)
+    ) {
+      merged.set(key, issue);
+    }
+  }
+
+  return Array.from(merged.values()).sort(
+    (left, right) =>
+      getDebugSeverityWeight(right.severity) - getDebugSeverityWeight(left.severity) ||
+      Number(right.lastAt ?? 0) - Number(left.lastAt ?? 0) ||
+      String(left.message ?? "").localeCompare(String(right.message ?? ""))
+  );
+}
+
+function buildDebugIssuesSummary(now = Date.now()) {
+  const issues = getActiveDebugIssues(now);
+  if (issues.length === 0) {
+    return "none";
+  }
+
+  return issues
+    .slice(0, 3)
+    .map((issue) => trimDebugMessage(issue.message, 64))
+    .join(" | ");
+}
+
+function resetDebugMonitorState(options = {}) {
+  const { keepEvents = false } = options;
+  if (!keepEvents) {
+    debugMonitor.events.clear();
+  }
+  debugMonitor.pendingPings.clear();
+  debugMonitor.packetWindow.length = 0;
+  debugMonitor.latencySamples.length = 0;
+  debugMonitor.correctionEvents.length = 0;
+  debugMonitor.lastServerTickSample = null;
+  debugMonitor.serverTickRateSamples.length = 0;
+  debugMonitor.estimatedServerTickRate = GAME_CONFIG.serverTickRate;
+  debugMonitor.lastKnownPlayers.clear();
+  debugMonitor.knownBullets.clear();
+  debugMonitor.lastVolleyByOwner.clear();
+  debugMonitor.pendingPredictedShots.clear();
+  latestDebugInfo = null;
 }
 
 function buildLeaderboardRenderKey(leaderboard = latestLeaderboard) {
@@ -584,6 +1334,15 @@ function rememberSocketClose(event) {
     wasClean: Boolean(event?.wasClean),
     at: Date.now()
   };
+  recordDebugEvent(
+    "player_disconnected",
+    `Socket closed (${formatSocketCloseInfo(lastSocketCloseInfo)})`,
+    {
+      severity: lastSocketCloseInfo.wasClean ? "warn" : "error",
+      ttlMs: 15_000,
+      key: "local_socket_close"
+    }
+  );
   console.warn("WebSocket closed in client", lastSocketCloseInfo);
   updateDiagnosticBanner();
   return lastSocketCloseInfo;
@@ -969,6 +1728,7 @@ function updateDiagnosticBanner() {
     return;
   }
 
+  const now = Date.now();
   const localPlayer = getLocalPlayer();
   const snapshotState = hasSeenLocalPlayerSnapshot ? "yes" : "no";
   const spectatorState = latestYou?.isSpectator ?? localPlayer?.isSpectator ?? false;
@@ -976,12 +1736,14 @@ function updateDiagnosticBanner() {
     ? localPlayer.name
     : (localPlayerId ? `awaiting state for ${localPlayerId}` : "none");
   const shouldShowCloseSummary = socket?.readyState !== WebSocket.OPEN && lastSocketCloseInfo;
+  const issuesSummary = buildDebugIssuesSummary(now);
 
   const nextText =
     `Status: ${statusElement.textContent}\n` +
     `Room: ${currentRoomId ?? "-"} | Snapshot: ${snapshotState} | Players: ${players.size}\n` +
     `Local Player: ${playerSummary}\n` +
     `Playable: ${hasPlayableSession() ? "yes" : "no"} | Spectator: ${spectatorState ? "yes" : "no"} | Zoom: ${cameraZoom.toFixed(2)}` +
+    (debugUiEnabled || issuesSummary !== "none" ? `\nIssues: ${issuesSummary}` : "") +
     (spectatorState ? "\nFree Cam: WASD/Arrows move | Mouse Wheel or +/- zoom | 0 recenters" : "") +
     (shouldShowCloseSummary ? `\nLast Close: ${formatSocketCloseInfo(lastSocketCloseInfo)}` : "") +
     (renderFailure ? `\nRender Error: ${renderFailure}` : "");
@@ -1592,6 +2354,11 @@ function requestLifecycleResync(reason) {
   }
 
   lastResyncRequestAt = now;
+  recordDebugEvent("snapshot_resync_requested", `Lifecycle resync requested (${reason})`, {
+    severity: "warn",
+    ttlMs: 8_000,
+    key: `snapshot_resync_requested:${reason}`
+  });
   sendReliable({
     type: MESSAGE_TYPES.RESYNC,
     snapshotSeq: lastAppliedSnapshotSeq,
@@ -3085,9 +3852,10 @@ function spawnPredictedProjectile(localPlayer, inputFrame) {
       origin.x + Math.cos(barrelAngle) * muzzleDistance + bRightX * lateralOffset;
     const muzzleY =
       origin.y + Math.sin(barrelAngle) * muzzleDistance + bRightY * lateralOffset;
+    const predictedId = `predicted:${inputFrame.seq}:${index}`;
 
-    predictedProjectiles.set(`predicted:${inputFrame.seq}:${index}`, {
-      id: `predicted:${inputFrame.seq}:${index}`,
+    predictedProjectiles.set(predictedId, {
+      id: predictedId,
       ownerId: localPlayerId,
       x: muzzleX,
       y: muzzleY,
@@ -3103,6 +3871,7 @@ function spawnPredictedProjectile(localPlayer, inputFrame) {
       bornAt: now,
       expiresAt: now + Math.min(450, GAME_CONFIG.bullet.lifeMs)
     });
+    notePredictedShotPending(predictedId, inputFrame, Date.now());
   });
 
   triggerShotRecoil(localPlayer, now, { predicted: true });
@@ -3135,6 +3904,7 @@ function takePredictedProjectileMatch(authoritativeBullet) {
     LOCAL_PROJECTILE_HANDOFF.maxMatchDistance * LOCAL_PROJECTILE_HANDOFF.maxMatchDistance;
   if (bestMatchId && bestDistanceSquared <= maxMatchDistance) {
     predictedProjectiles.delete(bestMatchId);
+    notePredictedShotMatched(bestMatchId);
     return bestMatch;
   }
 
@@ -3214,7 +3984,6 @@ function dispatchLocalInput(options = {}) {
     return null;
   }
 
-  const previousDispatchAt = lastInputDispatchAt;
   const inputFrame = createInputFrame(liveInputState);
   send(serializeInputFrame(inputFrame));
   lastInputDispatchAt = inputFrame.clientSentAt;
@@ -3233,24 +4002,6 @@ function dispatchLocalInput(options = {}) {
     localPlayer.lastPredictedShotAt = Date.now();
     spawnPredictedProjectile(localPlayer, inputFrame);
   }
-
-  const visualState = ensureLocalVisualState(localPlayer);
-  const predictionScale = getPredictionScaleForGapMs(getStatePacketAgeMs(inputFrame.clientSentAt));
-  const predictionStepSeconds =
-    previousDispatchAt > 0
-      ? clamp((inputFrame.clientSentAt - previousDispatchAt) / 1000, 1 / 120, CLIENT_TICK.fixedDeltaSeconds)
-      : CLIENT_TICK.fixedDeltaSeconds;
-  const predicted = simulateTankMovement(
-    {
-      x: visualState?.x ?? localPlayer.renderX ?? localPlayer.x,
-      y: visualState?.y ?? localPlayer.renderY ?? localPlayer.y,
-      angle: visualState?.angle ?? localPlayer.renderAngle ?? localPlayer.angle,
-      turretAngle: visualState?.turretAngle ?? localPlayer.renderTurretAngle ?? localPlayer.turretAngle
-    },
-    inputFrame,
-    predictionStepSeconds * predictionScale
-  );
-  applyLocalPredictedState(localPlayer, predicted);
 
   return inputFrame;
 }
@@ -3673,6 +4424,10 @@ function applyPredictionCorrection(localPlayer, correctedState) {
   const correctionTurretAngle = normalizeAngle(previousVisual.turretAngle - correctedState.turretAngle);
   const distanceError = Math.hypot(correctionX, correctionY);
   const stalledStream = getStatePacketAgeMs() >= LOCAL_PREDICTION.stallHardLimitMs;
+  noteReconciliation(distanceError, {
+    stalledStream,
+    pendingReplayCount: pendingInputs.length
+  });
 
   if (distanceError >= LOCAL_PREDICTION.snapGap || stalledStream) {
     localPlayer.correctionOffsetX = 0;
@@ -3753,10 +4508,20 @@ function replayPendingInputs(
 function applySnapshot(payload) {
   const snapshotSeq = payload.snapshotSeq ?? 0;
   if (snapshotSeq <= lastAppliedSnapshotSeq) {
+    recordDebugEvent(
+      "snapshot_out_of_order",
+      `Received out-of-order snapshot ${snapshotSeq} after ${lastAppliedSnapshotSeq}`,
+      {
+        severity: "warn",
+        ttlMs: 8_000,
+        key: "snapshot_out_of_order"
+      }
+    );
     return;
   }
 
   const previousSnapshotSeq = lastAppliedSnapshotSeq;
+  const previousProcessedInputSeq = latestYou?.lastProcessedInputSeq ?? 0;
   const replicationStatus = applyReplication(payload.replication, payload.serverTime, previousSnapshotSeq);
 
   if (replicationStatus === "resync") {
@@ -3764,11 +4529,19 @@ function applySnapshot(payload) {
     if (hasPendingOlderFullSnapshot) {
       return;
     }
+    recordDebugEvent("snapshot_missing_entities", "Snapshot replication baseline mismatched and requested a resync", {
+      severity: "error",
+      ttlMs: 10_000,
+      key: "snapshot_baseline_mismatch"
+    });
     requestLifecycleResync("baseline_mismatch");
     return;
   }
 
   syncServerClock(payload.serverTime, performance.now());
+  syncServerDebugSnapshot(payload.debug, Date.now());
+  noteServerTickSample(payload.simulationTick, performance.now());
+  noteSnapshotDebugState(payload, Date.now());
   lastAppliedSnapshotSeq = snapshotSeq;
   lastSimulationTick = Number(payload.simulationTick) || lastSimulationTick;
   lastSnapshotTick = Number(payload.snapshotTick) || lastSnapshotTick;
@@ -3784,6 +4557,21 @@ function applySnapshot(payload) {
   latestLeaderboard = payload.leaderboard ?? latestLeaderboard;
   latestYou = payload.you ?? latestYou;
   latestInterestStats = payload.replication?.interest ?? latestInterestStats;
+
+  if (payload.you && previousProcessedInputSeq > 0) {
+    const processedSeqJump = Math.abs((payload.you.lastProcessedInputSeq ?? 0) - previousProcessedInputSeq);
+    if (processedSeqJump >= DEBUG_MONITOR.inputSeqJumpWarning) {
+      recordDebugEvent(
+        "last_processed_input_seq_jump",
+        `LastProcessedInputSeq jumped by ${processedSeqJump}`,
+        {
+          severity: processedSeqJump >= DEBUG_MONITOR.inputSeqJumpWarning * 2 ? "error" : "warn",
+          ttlMs: 8_000,
+          key: "last_processed_input_seq_jump"
+        }
+      );
+    }
+  }
 
   if (replicationStatus !== "applied") {
     updateEntityMap(players, payload.players ?? [], { alive: true, ready: false }, {
@@ -3892,6 +4680,11 @@ function applyStateChunk(payload) {
   const snapshotSeq = Number(payload.snapshotSeq);
 
   if (!Number.isInteger(snapshotSeq) || snapshotSeq <= lastAppliedSnapshotSeq) {
+    recordDebugEvent("snapshot_out_of_order", `Ignored stale snapshot chunk for ${snapshotSeq}`, {
+      severity: "warn",
+      ttlMs: 8_000,
+      key: "snapshot_chunk_out_of_order"
+    });
     return;
   }
 
@@ -3904,6 +4697,11 @@ function applyStateChunk(payload) {
     chunkCount <= 0 ||
     chunkIndex >= chunkCount
   ) {
+    recordDebugEvent("snapshot_data_invalid", "Snapshot chunk metadata was invalid or corrupt", {
+      severity: "error",
+      ttlMs: 10_000,
+      key: "snapshot_chunk_invalid"
+    });
     return;
   }
 
@@ -3915,6 +4713,11 @@ function applyStateChunk(payload) {
 
   if (existing.chunkCount !== chunkCount) {
     stateChunks.delete(snapshotSeq);
+    recordDebugEvent("snapshot_data_invalid", "Snapshot chunk count changed mid-stream", {
+      severity: "error",
+      ttlMs: 10_000,
+      key: "snapshot_chunk_mismatch"
+    });
     requestLifecycleResync("chunk_mismatch");
     return;
   }
@@ -3939,10 +4742,20 @@ function applyStateChunk(payload) {
     if (rebuilt.ok && rebuilt.packet.type === MESSAGE_TYPES.STATE) {
       applySnapshot(rebuilt.packet);
     } else {
+      recordDebugEvent("snapshot_data_invalid", "Rebuilt snapshot chunk payload was invalid", {
+        severity: "error",
+        ttlMs: 10_000,
+        key: "snapshot_chunk_decode"
+      });
       requestLifecycleResync("chunk_decode");
     }
   } catch (error) {
     console.warn("Failed to rebuild fragmented snapshot", error);
+    recordDebugEvent("snapshot_data_invalid", "Snapshot chunk data failed to decode", {
+      severity: "error",
+      ttlMs: 10_000,
+      key: "snapshot_chunk_decode_exception"
+    });
     requestLifecycleResync("chunk_decode");
   }
 }
@@ -4042,6 +4855,7 @@ function connect(options = {}) {
   lastResyncRequestAt = 0;
   cameraShakeX = 0;
   cameraShakeY = 0;
+  resetDebugMonitorState({ keepEvents: isReconnect });
 
   if (socket) {
     socket.skipReconnect = true;
@@ -4085,6 +4899,7 @@ function connect(options = {}) {
     lastServerMessageAt = 0;
     lastRenderFrameAt = performance.now();
     lastTimedUiRefreshAt = 0;
+    resetDebugMonitorState();
     localXp = 0;
     displayXp = 0;
     localLevel = 1;
@@ -4149,6 +4964,15 @@ function connect(options = {}) {
     lastServerMessageAt = Date.now();
     const parsed = deserializePacket(String(event.data));
     if (!parsed.ok) {
+      recordDebugEvent(
+        "snapshot_data_invalid",
+        `Received invalid packet data (${parsed.error.code ?? "parse_error"})`,
+        {
+          severity: "error",
+          ttlMs: 10_000,
+          key: "invalid_packet_from_server"
+        }
+      );
       setStatus(parsed.error.message);
       if (parsed.error.code === "unsupported_version" || parsed.error.code === "invalid_version") {
         joinInProgress = false;
@@ -4227,11 +5051,21 @@ function connect(options = {}) {
 
     if (payload.type === MESSAGE_TYPES.PONG) {
       latestLatencyMs = Math.max(0, Date.now() - Number(payload.sentAt));
+      notePong(Number(payload.sentAt), Date.now());
       latencyElement.textContent = `${latestLatencyMs} ms`;
       return;
     }
 
     if (payload.type === MESSAGE_TYPES.ERROR) {
+      recordDebugEvent(
+        payload.code ?? "server_error",
+        payload.message,
+        {
+          severity: payload.code === "input_rate_limit" || payload.code === "anti_cheat_violation" ? "error" : "warn",
+          ttlMs: 10_000,
+          key: `server_error:${payload.code ?? payload.message}`
+        }
+      );
       setStatus(payload.message);
 
       if (!currentRoomId) {
@@ -4337,6 +5171,7 @@ function connect(options = {}) {
     serverTimeOffset = 0;
     serverWallTimeOffset = 0;
     lastTimedUiRefreshAt = 0;
+    resetDebugMonitorState();
     stateChunks.clear();
     processedEventIds.clear();
     processedEventOrder.length = 0;
@@ -5762,40 +6597,107 @@ function handleUpgradeClick(canvasX, canvasY) {
 }
 
 function drawOverlay() {
-  context.fillStyle = "rgba(255,255,255,0.66)";
-  context.font = "16px Segoe UI";
-  context.textAlign = "left";
+  const now = Date.now();
+  const localPlayer = getLocalPlayer();
+  const visualState = ensureLocalVisualState(localPlayer);
   const snapshotAge = lastSnapshotAt ? Math.round(performance.now() - lastSnapshotAt) : 0;
+  const lastProcessedInputSeq = latestYou?.lastProcessedInputSeq ?? 0;
   const lastProcessedInputTick = latestYou?.lastProcessedInputTick ?? 0;
   const pendingInputCount = latestYou?.pendingInputCount ?? pendingInputs.length;
-  context.fillText(`Room: ${currentRoomId ?? "-"}`, 20, 28);
-  context.fillText(`Players: ${players.size}`, 20, 52);
-  context.fillText(`Snapshot age: ${snapshotAge}ms`, 20, 76);
-  if (latestMatch) {
-    context.fillText(`Phase: ${latestMatch.phase}`, 20, 100);
-  }
+  const jitterMs = getLatencyJitterMs();
+  const packetLossPercent = getPacketLossPercent(now);
+  const estimatedTickRate = Number(debugMonitor.estimatedServerTickRate) || GAME_CONFIG.serverTickRate;
+  const clientPositionText = localPlayer && visualState
+    ? `${Math.round(visualState.x)},${Math.round(visualState.y)}`
+    : "-";
+  const serverPositionText = localPlayer
+    ? `${Math.round(localPlayer.x ?? 0)},${Math.round(localPlayer.y ?? 0)}`
+    : "-";
+  const positionDelta = localPlayer && visualState
+    ? Math.hypot((visualState.x ?? localPlayer.x) - (localPlayer.x ?? 0), (visualState.y ?? localPlayer.y) - (localPlayer.y ?? 0))
+    : 0;
+  const issues = getActiveDebugIssues(now);
   const objectiveStatusText = getObjectiveStatusText(latestObjective);
+  const hudTop = getTopLeftHudInset();
+  const leftX = 20;
+  const leftY = hudTop + 4;
+  const lineHeight = 18;
+  const leftLines = [
+    "Debug HUD",
+    `Player ID: ${localPlayerId ? localPlayerId.slice(0, 8) : "-"}`,
+    `Room: ${currentRoomId ?? "-"} | Players: ${players.size} | Phase: ${latestMatch?.phase ?? "-"}`,
+    `Net: ping ${Math.round(latestLatencyMs)}ms | jitter ${Math.round(jitterMs)}ms | loss ${packetLossPercent.toFixed(0)}% | snapshot ${snapshotAge}ms`,
+    `Pos: client ${clientPositionText} | server ${serverPositionText} | delta ${positionDelta.toFixed(1)}`,
+    `Seq: ack ${lastProcessedInputSeq} | tick ${lastProcessedInputTick} | pending ${pendingInputs.length}/${pendingInputCount}`,
+    `Ticks: server ${lastSimulationTick} | snapshot ${lastSnapshotTick} | client ${clientSimulationTick} | est ${estimatedTickRate.toFixed(1)}/s`,
+    `Server: loop ${Math.round(Number(latestDebugInfo?.serverLoopLagMs ?? 0) || 0)}ms | work ${Math.round(Number(latestDebugInfo?.tickDurationMs ?? 0) || 0)}ms`
+  ];
+
   if (objectiveStatusText) {
-    context.fillText(`Objectives${objectiveStatusText.replace(" | ", ": ")}`, 20, 124);
+    leftLines.push(`Objectives${objectiveStatusText.replace(" | ", ": ")}`);
   }
-  context.fillText(`Ticks: server ${lastSimulationTick} | snapshot ${lastSnapshotTick} | client ${clientSimulationTick}`, 20, 148);
-  context.fillText(
-    `Buffers: input ${pendingInputs.length}/${pendingInputCount} | chunks ${stateChunks.size} | ack tick ${lastProcessedInputTick}`,
-    20,
-    172
-  );
+
   if (latestInterestStats) {
-    context.fillText(
-      `Interest: p ${latestInterestStats.selectedPlayers}/${latestInterestStats.candidatePlayers} | b ${latestInterestStats.selectedBullets}/${latestInterestStats.candidateBullets} | cell ${latestInterestStats.cellSize}`,
-      20,
-      196
+    leftLines.push(
+      `Interest: p ${latestInterestStats.selectedPlayers}/${latestInterestStats.candidatePlayers} | b ${latestInterestStats.selectedBullets}/${latestInterestStats.candidateBullets} | cell ${latestInterestStats.cellSize}`
     );
   }
+
+  const leftPanelWidth = Math.min(660, Math.max(340, canvas.width * 0.46));
+  const leftPanelHeight = 16 + leftLines.length * lineHeight;
+  context.textAlign = "left";
+  context.fillStyle = "rgba(9, 16, 30, 0.78)";
+  context.fillRect(leftX - 12, leftY - 18, leftPanelWidth, leftPanelHeight);
+  context.fillStyle = "rgba(103, 231, 255, 0.92)";
+  context.font = "14px Consolas, monospace";
+  leftLines.forEach((line, index) => {
+    context.fillText(line, leftX, leftY + index * lineHeight);
+  });
+
+  const issuePanelWidth = Math.min(560, Math.max(300, canvas.width * 0.36));
+  const issuePanelX = Math.max(20, canvas.width - issuePanelWidth - 20);
+  const issuePanelY = hudTop + 4;
+  const issueHeader = issues.length === 0 ? "Debug Issues: clear" : `Debug Issues: ${issues.length}`;
+  const visibleIssues = issues.slice(0, Math.min(8, issues.length));
+  const issuePanelHeight = 18 + (visibleIssues.length === 0 ? 2 : visibleIssues.length + 1) * lineHeight;
+  context.fillStyle = issues.length === 0 ? "rgba(8, 30, 20, 0.78)" : "rgba(38, 14, 14, 0.82)";
+  context.fillRect(issuePanelX - 12, issuePanelY - 18, issuePanelWidth, issuePanelHeight);
+  context.fillStyle = issues.length === 0 ? "rgba(131, 255, 194, 0.96)" : "rgba(255, 186, 186, 0.96)";
+  context.fillText(issueHeader, issuePanelX, issuePanelY);
+
+  if (visibleIssues.length === 0) {
+    context.fillStyle = "rgba(195, 255, 219, 0.88)";
+    context.fillText("No active breakage signals detected.", issuePanelX, issuePanelY + lineHeight);
+    return;
+  }
+
+  visibleIssues.forEach((issue, index) => {
+    context.fillStyle =
+      issue.severity === "error"
+        ? "rgba(255, 132, 132, 0.96)"
+        : issue.severity === "warn"
+          ? "rgba(255, 214, 120, 0.96)"
+          : "rgba(176, 235, 255, 0.96)";
+    const countSuffix = Number(issue.count ?? 1) > 1 ? ` x${issue.count}` : "";
+    const severityLabel = issue.severity === "error" ? "ERR" : issue.severity === "warn" ? "WARN" : "INFO";
+    context.fillText(
+      `[${severityLabel}${countSuffix}] ${trimDebugMessage(issue.message, 72)}`,
+      issuePanelX,
+      issuePanelY + (index + 1) * lineHeight
+    );
+  });
 }
 
 function render(frameAt = performance.now()) {
   try {
     const deltaSeconds = Math.min(0.05, Math.max(0.001, (frameAt - lastRenderFrameAt) / 1000));
+    if (deltaSeconds * 1000 >= DEBUG_MONITOR.frameSpikeMs) {
+      recordDebugEvent("frame_time_spike", `Frame time spiked to ${Math.round(deltaSeconds * 1000)}ms`, {
+        severity: deltaSeconds * 1000 >= DEBUG_MONITOR.frameSpikeMs * 2 ? "error" : "warn",
+        ttlMs: 4_000,
+        key: "frame_time_spike"
+      });
+    }
     lastRenderFrameAt = frameAt;
     syncLockedCameraZoom();
     const shouldRenderGameScreen = !document.hidden && (!gameScreenEl || !gameScreenEl.hidden);
@@ -5803,6 +6705,7 @@ function render(frameAt = performance.now()) {
     if (shouldRenderGameScreen) {
       refreshTimedUi(frameAt);
 
+      updateResponsiveLocalPrediction(deltaSeconds);
       updateRenderState(deltaSeconds, frameAt);
       updateLocalRenderState(deltaSeconds);
       updateCamera(deltaSeconds);
@@ -6058,15 +6961,19 @@ setInterval(() => {
 
 setInterval(() => {
   if (socket?.readyState === WebSocket.OPEN) {
+    const sentAt = Date.now();
+    notePingSent(sentAt);
     send({
       type: MESSAGE_TYPES.PING,
-      sentAt: Date.now()
+      sentAt
     });
   }
 }, 2000);
 
 setInterval(() => {
   const now = Date.now();
+  prunePendingPingSamples(now);
+  prunePredictedShotExpectations(now);
 
   for (const entry of pendingReliableMessages.values()) {
     if (now - entry.lastSentAt < GAME_CONFIG.network.reliableResendMs) {
