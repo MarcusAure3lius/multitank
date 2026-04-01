@@ -51,7 +51,9 @@ import {
   createSpawnEvent,
   createStatePayload,
   deserializePacket,
+  getLobbyClassProfile,
   getMapLayout,
+  getTankRadiusForClassId,
   getTeamConfig,
   getTeamSpawnZone,
   normalizeAngle,
@@ -369,12 +371,19 @@ const BOT_PROGRESSION_PLANS = Object.freeze([
 ]);
 
 function getCombatClassProfile(classId) {
-  const profiles = GAME_CONFIG.combat.classProfiles;
-  const safeClassId = typeof classId === "string" && profiles[classId] ? classId : GAME_CONFIG.lobby.classes[0].id;
+  const defaultClassId = GAME_CONFIG.lobby.classes[0]?.id ?? "basic";
+  const safeClassId =
+    typeof classId === "string" && GAME_CONFIG.combat.classProfiles[classId]
+      ? classId
+      : defaultClassId;
   return {
     classId: safeClassId,
-    ...profiles[safeClassId]
+    ...getLobbyClassProfile(safeClassId)
   };
+}
+
+function getPlayerTankRadius(player) {
+  return player?.isBot ? GAME_CONFIG.tank.radius : getTankRadiusForClassId(player?.classId);
 }
 
 function createPlayerCombatState(player, now = Date.now()) {
@@ -522,6 +531,10 @@ function createBotAiState(playerId, now = Date.now()) {
     evasiveUntil: 0,
     lastKnownHp: null,
     lastDamageAtSeen: 0,
+    moveAxisX: 0,
+    moveAxisY: 0,
+    moveAxisXCommitUntil: 0,
+    moveAxisYCommitUntil: 0,
     rangeBias:
       preferredRangeJitter > 0
         ? (Math.abs(hashSeed(`range:${playerId}`)) % (preferredRangeJitter * 2 + 1)) - preferredRangeJitter
@@ -535,6 +548,13 @@ function circleIntersectsRect(x, y, radius, rect) {
   const dx = x - nearestX;
   const dy = y - nearestY;
   return dx * dx + dy * dy < radius * radius;
+}
+
+function circleIntersectsCircle(ax, ay, aRadius, bx, by, bRadius) {
+  const dx = ax - bx;
+  const dy = ay - by;
+  const combinedRadius = aRadius + bRadius;
+  return dx * dx + dy * dy < combinedRadius * combinedRadius;
 }
 
 function segmentIntersectsRect(startX, startY, endX, endY, rect, padding = 0) {
@@ -680,6 +700,21 @@ function collidesWithObstacle(x, y, radius = GAME_CONFIG.tank.radius, mapLayout 
   return (mapLayout?.obstacles ?? []).some((obstacle) => circleIntersectsRect(x, y, radius, obstacle));
 }
 
+function collidesWithShape(room, x, y, radius = GAME_CONFIG.tank.radius, options = {}) {
+  const { excludeShapeId = null } = options;
+  for (const shape of room?.shapes?.values?.() ?? []) {
+    if (!shape || shape.id === excludeShapeId || (shape.hp ?? 0) <= 0) {
+      continue;
+    }
+
+    if (circleIntersectsCircle(x, y, radius, shape.x, shape.y, shape.radius)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function segmentHitsObstacle(startX, startY, endX, endY, radius = 0, mapLayout = getRoomMapLayout()) {
   return (mapLayout?.obstacles ?? []).some((obstacle) =>
     segmentIntersectsRect(startX, startY, endX, endY, obstacle, radius)
@@ -707,6 +742,40 @@ function distanceSquaredToSegment(startX, startY, endX, endY, pointX, pointY) {
   const dx = pointX - closestX;
   const dy = pointY - closestY;
   return dx * dx + dy * dy;
+}
+
+function segmentHitsBlockingShape(room, startX, startY, endX, endY, radius = 0, options = {}) {
+  const { excludeShapeId = null } = options;
+  for (const shape of room?.shapes?.values?.() ?? []) {
+    if (!shape || shape.id === excludeShapeId || (shape.hp ?? 0) <= 0) {
+      continue;
+    }
+
+    const hitRadius = Math.max(0, radius) + Math.max(0, shape.radius ?? 0);
+    if (distanceSquaredToSegment(startX, startY, endX, endY, shape.x, shape.y) < hitRadius * hitRadius) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function segmentHitsBotBlocker(room, startX, startY, endX, endY, radius = 0, mapLayout = getRoomMapLayout(room), options = {}) {
+  return (
+    segmentHitsObstacle(startX, startY, endX, endY, radius, mapLayout) ||
+    segmentHitsBlockingShape(room, startX, startY, endX, endY, radius, options)
+  );
+}
+
+function isBotNavigableWorldPoint(room, x, y, radius = GAME_CONFIG.tank.radius, mapLayout = getRoomMapLayout(room)) {
+  return isNavigableWorldPoint(x, y, radius, mapLayout) && !collidesWithShape(room, x, y, radius);
+}
+
+function canBotNavigateDirectly(room, start, goal, radius = GAME_CONFIG.tank.radius + 4, mapLayout = getRoomMapLayout(room)) {
+  return (
+    canNavigateDirectly(start, goal, radius, mapLayout) &&
+    !segmentHitsBlockingShape(room, start.x, start.y, goal.x, goal.y, radius)
+  );
 }
 
 function distanceSquaredBetweenPoints(left, right) {
@@ -1125,6 +1194,44 @@ function normalizeVector(x, y) {
   };
 }
 
+function resolveBotMovementAxis(player, axis, value, now, options = {}) {
+  const ai = player?.ai;
+  if (!ai) {
+    return 0;
+  }
+
+  const axisKey = axis === "x" ? "moveAxisX" : "moveAxisY";
+  const commitKey = axis === "x" ? "moveAxisXCommitUntil" : "moveAxisYCommitUntil";
+  const previousSign = Number(ai[axisKey] ?? 0) || 0;
+  const commitUntil = Number(ai[commitKey] ?? 0) || 0;
+  const engageThreshold = Math.max(0.01, options.engageThreshold ?? 0.28);
+  const releaseThreshold = Math.min(
+    engageThreshold,
+    Math.max(0.005, options.releaseThreshold ?? Math.max(0.1, engageThreshold * 0.6))
+  );
+  const flipThreshold = Math.max(engageThreshold, options.flipThreshold ?? BOT_AI_AXIS_FLIP_THRESHOLD);
+  const commitMs = Math.max(0, Math.round(options.commitMs ?? BOT_AI_AXIS_COMMIT_MS));
+  const absValue = Math.abs(value);
+  const desiredSign = absValue >= engageThreshold ? (value > 0 ? 1 : -1) : 0;
+  let nextSign = previousSign;
+
+  if (previousSign === 0) {
+    nextSign = desiredSign;
+  } else if (desiredSign === 0) {
+    nextSign = absValue <= releaseThreshold ? 0 : previousSign;
+  } else if (desiredSign === previousSign) {
+    nextSign = previousSign;
+  } else if (now < commitUntil && absValue < flipThreshold) {
+    nextSign = previousSign;
+  } else {
+    nextSign = desiredSign;
+  }
+
+  ai[axisKey] = nextSign;
+  ai[commitKey] = nextSign === 0 ? 0 : (nextSign !== previousSign ? now + commitMs : commitUntil);
+  return nextSign;
+}
+
 function getBotProjectileSpeed(player) {
   const classDef = CLASS_TREE[player?.tankClassId] ?? CLASS_TREE.basic;
   const bulletSpeedStat = Number(player?.stats?.bulletSpeed ?? 0) || 0;
@@ -1377,16 +1484,23 @@ function clearSpawnProtectionOnAction(player, now = Date.now()) {
 function isSpawnPointSafe(room, x, y, options = {}) {
   const {
     teamId = null,
+    classId = GAME_CONFIG.lobby.classes[0]?.id ?? "basic",
+    isBot = false,
     enforceEnemyBuffer = true,
     minDistanceToPlayers = null
   } = options;
   const mapLayout = getRoomMapLayout(room);
-  if (collidesWithObstacle(x, y, GAME_CONFIG.tank.radius + 8, mapLayout)) {
+  const tankRadius = isBot ? GAME_CONFIG.tank.radius : getTankRadiusForClassId(classId);
+  if (collidesWithObstacle(x, y, tankRadius + 8, mapLayout)) {
+    return false;
+  }
+
+  if (collidesWithShape(room, x, y, tankRadius + 12)) {
     return false;
   }
 
   for (const objectiveZone of getRoomObjectiveZones(room)) {
-    const objectiveBuffer = objectiveZone.radius + GAME_CONFIG.tank.radius + 20;
+    const objectiveBuffer = objectiveZone.radius + tankRadius + 20;
     const objectiveDx = x - objectiveZone.x;
     const objectiveDy = y - objectiveZone.y;
     if (objectiveDx * objectiveDx + objectiveDy * objectiveDy < objectiveBuffer * objectiveBuffer) {
@@ -1406,12 +1520,12 @@ function isSpawnPointSafe(room, x, y, options = {}) {
     const dx = x - player.x;
     const dy = y - player.y;
     const configuredPlayerBuffer = Number.isFinite(Number(minDistanceToPlayers))
-      ? Math.max(GAME_CONFIG.tank.radius * 3, Number(minDistanceToPlayers))
+      ? Math.max(tankRadius * 3, Number(minDistanceToPlayers))
       : null;
     const minDistance = configuredPlayerBuffer ?? (
       enforceEnemyBuffer && teamId && player.teamId !== teamId
         ? GAME_CONFIG.spawn.safeEnemyDistance
-        : GAME_CONFIG.tank.radius * 3
+        : tankRadius * 3
     );
     if (dx * dx + dy * dy < minDistance * minDistance) {
       return false;
@@ -1425,6 +1539,10 @@ function createSpawnPoint(room = null, options = {}) {
   const teamId = isValidLobbyOptionId(options.teamId, GAME_CONFIG.lobby.teams)
     ? options.teamId
     : GAME_CONFIG.lobby.teams[0]?.id ?? "alpha";
+  const classId = isValidLobbyOptionId(options.classId, GAME_CONFIG.lobby.classes)
+    ? options.classId
+    : GAME_CONFIG.lobby.classes[0]?.id ?? "basic";
+  const isBot = options.isBot === true;
   const spawnKey = String(options.spawnKey ?? "");
   const enforceEnemyBuffer = options.enforceEnemyBuffer !== false;
   const minDistanceToPlayers = Number.isFinite(Number(options.minDistanceToPlayers))
@@ -1444,7 +1562,7 @@ function createSpawnPoint(room = null, options = {}) {
       continue;
     }
 
-    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer, minDistanceToPlayers })) {
+    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, classId, isBot, enforceEnemyBuffer, minDistanceToPlayers })) {
       return candidate;
     }
   }
@@ -1457,7 +1575,7 @@ function createSpawnPoint(room = null, options = {}) {
       y: spawnZone.top + fallbackRng.nextFloat() * spawnZone.height
     };
 
-    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer, minDistanceToPlayers })) {
+    if (isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, classId, isBot, enforceEnemyBuffer, minDistanceToPlayers })) {
       return candidate;
     }
   }
@@ -1479,7 +1597,7 @@ function createSpawnPoint(room = null, options = {}) {
 
   return (
     fallbackPoints.find((candidate) =>
-      isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, enforceEnemyBuffer, minDistanceToPlayers })
+      isSpawnPointSafe(room, candidate.x, candidate.y, { teamId, classId, isBot, enforceEnemyBuffer, minDistanceToPlayers })
     ) ?? {
       x: spawnZone.centerX,
       y: spawnZone.centerY
@@ -1520,6 +1638,8 @@ function assignPlayerHomeSpawn(room, player, options = {}) {
 
   const spawn = createSpawnPoint(room, {
     teamId,
+    classId: options.classId ?? player?.classId,
+    isBot: options.isBot ?? player?.isBot,
     spawnKey: String(options.spawnKey ?? player?.id ?? ""),
     enforceEnemyBuffer: options.enforceEnemyBuffer
   });
@@ -1611,6 +1731,8 @@ const BOT_AI_PURSUIT_MEMORY_MS = 1600;
 const BOT_AI_AIM_SAMPLE_MS = 180;
 const BOT_AI_MAX_LEAD_SECONDS = 0.65;
 const BOT_AI_ANCHOR_HOLD_MS = 850;
+const BOT_AI_AXIS_COMMIT_MS = 320;
+const BOT_AI_AXIS_FLIP_THRESHOLD = 0.72;
 
 function createProfilesDocument() {
   return {
@@ -1967,7 +2089,7 @@ function validatePlayerSimulationState(room, player, previousState, deltaSeconds
     player.x > GAME_CONFIG.world.width - GAME_CONFIG.world.padding ||
     player.y < GAME_CONFIG.world.padding ||
     player.y > GAME_CONFIG.world.height - GAME_CONFIG.world.padding;
-  const insideObstacle = collidesWithObstacle(player.x, player.y, GAME_CONFIG.tank.radius, getRoomMapLayout(room));
+  const insideObstacle = collidesWithObstacle(player.x, player.y, getPlayerTankRadius(player), getRoomMapLayout(room));
   const movedDistance = Math.hypot(player.x - previousState.x, player.y - previousState.y);
   const maxAllowedDistance =
     Math.max(GAME_CONFIG.tank.speed, GAME_CONFIG.tank.reverseSpeed) * deltaSeconds +
@@ -2135,6 +2257,8 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
   const teamConfig = getTeamConfig(normalizedTeamId);
   const spawn = createSpawnPoint(room, {
     teamId: normalizedTeamId,
+    classId,
+    isBot,
     spawnKey: id
   });
   const now = Date.now();
@@ -2486,6 +2610,16 @@ const SHAPE_DRIFT_SPEED = Object.freeze({
   pentagon: 8,
   alpha_pentagon: 5
 });
+const SHAPE_BOUNCE = Object.freeze({
+  playerResolveBias: 0.2,
+  shapeNudgeScale: 1.8,
+  shapeNudgeMin: 10,
+  shapeNudgeMax: 40,
+  impactImpulseBase: 54,
+  impactImpulseScale: 14,
+  maxImpulse: 180,
+  impulseDecayPerSecond: 3.5
+});
 
 function countShapesByType(room, type) {
   let count = 0;
@@ -2528,6 +2662,65 @@ function isShapePointSafe(room, x, y, radius) {
   return true;
 }
 
+function isBlockingShapeCollisionTarget(player) {
+  return Boolean(player && player.connected && player.alive && !player.isSpectator);
+}
+
+function canShapeOccupyPoint(room, shape, x, y, options = {}) {
+  const {
+    ignoreShapeId = shape?.id ?? null,
+    ignorePlayerId = null
+  } = options;
+
+  if (!isShapePointSafe(room, x, y, shape.radius)) {
+    return false;
+  }
+
+  for (const player of room?.players?.values?.() ?? []) {
+    if (!isBlockingShapeCollisionTarget(player) || player.id === ignorePlayerId) {
+      continue;
+    }
+
+    if (circleIntersectsCircle(x, y, shape.radius, player.x, player.y, getPlayerTankRadius(player))) {
+      return false;
+    }
+  }
+
+  for (const otherShape of room?.shapes?.values?.() ?? []) {
+    if (!otherShape || otherShape.id === ignoreShapeId || (otherShape.hp ?? 0) <= 0) {
+      continue;
+    }
+
+    if (circleIntersectsCircle(x, y, shape.radius, otherShape.x, otherShape.y, otherShape.radius)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function moveShapeSafely(room, shape, targetX, targetY, options = {}) {
+  const candidates = [
+    { x: targetX, y: targetY },
+    { x: targetX, y: shape.y },
+    { x: shape.x, y: targetY }
+  ];
+
+  for (const candidate of candidates) {
+    if (!Number.isFinite(candidate.x) || !Number.isFinite(candidate.y)) {
+      continue;
+    }
+
+    if (canShapeOccupyPoint(room, shape, candidate.x, candidate.y, options)) {
+      shape.x = candidate.x;
+      shape.y = candidate.y;
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function getShapeSpawnHotspots(room, type) {
   const hotspots = getRoomMapLayout(room)?.shapeHotspots?.[type];
   return Array.isArray(hotspots) && hotspots.length > 0 ? hotspots : null;
@@ -2553,6 +2746,10 @@ function createShapeHotspotCandidate(room, type, radius) {
 function createShapeSpawnPoint(room, type, radius) {
   const centeredShape = type === SHAPE_TYPES.ALPHA_PENTAGON;
   const objective = getRoomObjectiveConfig(room);
+  const shapeTemplate = {
+    id: null,
+    radius
+  };
   for (let attempt = 0; attempt < 96; attempt += 1) {
     const hotspotCandidate = createShapeHotspotCandidate(room, type, radius);
     const candidate = hotspotCandidate ?? (
@@ -2567,7 +2764,7 @@ function createShapeSpawnPoint(room, type, radius) {
           }
     );
 
-    if (isShapePointSafe(room, candidate.x, candidate.y, radius)) {
+    if (canShapeOccupyPoint(room, shapeTemplate, candidate.x, candidate.y)) {
       return candidate;
     }
   }
@@ -2598,7 +2795,9 @@ function createShape(room, type, x, y) {
     angleVel: (getRandomFloat(room) - 0.5) * 0.28,
     driftAngle: getRandomFloat(room) * Math.PI * 2,
     driftSpeed: (SHAPE_DRIFT_SPEED[type] ?? 12) * (0.85 + getRandomFloat(room) * 0.3),
-    driftTurnVelocity: (getRandomFloat(room) - 0.5) * 0.18
+    driftTurnVelocity: (getRandomFloat(room) - 0.5) * 0.18,
+    impulseX: 0,
+    impulseY: 0
   };
 }
 
@@ -2612,22 +2811,36 @@ function spawnInitialShapes(room) {
 }
 
 function updateShapes(room, deltaSeconds, now) {
+  const impulseDecay = clamp(1 - deltaSeconds * SHAPE_BOUNCE.impulseDecayPerSecond, 0, 1);
   for (const shape of room.shapes.values()) {
     shape.angle += shape.angleVel * deltaSeconds;
     shape.driftAngle = normalizeAngle((shape.driftAngle ?? 0) + (shape.driftTurnVelocity ?? 0) * deltaSeconds);
+    shape.impulseX = Number.isFinite(shape.impulseX) ? shape.impulseX : 0;
+    shape.impulseY = Number.isFinite(shape.impulseY) ? shape.impulseY : 0;
     const driftDistance = (shape.driftSpeed ?? 0) * deltaSeconds;
-    if (driftDistance <= 0) {
+    const impulseDistanceX = shape.impulseX * deltaSeconds;
+    const impulseDistanceY = shape.impulseY * deltaSeconds;
+
+    if (driftDistance <= 0 && Math.abs(impulseDistanceX) < 0.01 && Math.abs(impulseDistanceY) < 0.01) {
       continue;
     }
 
-    const nextX = shape.x + Math.cos(shape.driftAngle) * driftDistance;
-    const nextY = shape.y + Math.sin(shape.driftAngle) * driftDistance;
-    if (isShapePointSafe(room, nextX, nextY, shape.radius)) {
-      shape.x = nextX;
-      shape.y = nextY;
+    const nextX = shape.x + Math.cos(shape.driftAngle) * driftDistance + impulseDistanceX;
+    const nextY = shape.y + Math.sin(shape.driftAngle) * driftDistance + impulseDistanceY;
+    if (moveShapeSafely(room, shape, nextX, nextY)) {
+      shape.impulseX *= impulseDecay;
+      shape.impulseY *= impulseDecay;
+      if (Math.abs(shape.impulseX) < 0.2) {
+        shape.impulseX = 0;
+      }
+      if (Math.abs(shape.impulseY) < 0.2) {
+        shape.impulseY = 0;
+      }
       continue;
     }
 
+    shape.impulseX *= 0.4;
+    shape.impulseY *= 0.4;
     shape.driftAngle = normalizeAngle(shape.driftAngle + Math.PI * (0.6 + getRandomFloat(room) * 0.8));
     shape.driftTurnVelocity = (getRandomFloat(room) - 0.5) * 0.24;
   }
@@ -3132,7 +3345,7 @@ function canViewerSeePlayer(room, viewer, candidate) {
     return true;
   }
 
-  return canViewerSeePosition(room, viewer, candidate.x, candidate.y, GAME_CONFIG.tank.radius);
+  return canViewerSeePosition(room, viewer, candidate.x, candidate.y, getPlayerTankRadius(candidate));
 }
 
 function createViewerPlayerState(candidate, viewer) {
@@ -3409,7 +3622,7 @@ function rebuildRoomInterestIndex(room) {
     addEntityToInterestCells(index.playerCells, player.id, player.x, player.y);
   }
 
-  for (const bullet of Array.from(room.bullets.values()).sort(compareBulletsInInterestOrder)) {
+  for (const bullet of room.bullets.values()) {
     if (!Number.isFinite(bullet.x) || !Number.isFinite(bullet.y)) {
       continue;
     }
@@ -3417,7 +3630,7 @@ function rebuildRoomInterestIndex(room) {
     addEntityToInterestCells(index.bulletCells, bullet.id, bullet.x, bullet.y);
   }
 
-  for (const shape of Array.from(room.shapes.values()).sort(compareShapesInInterestOrder)) {
+  for (const shape of room.shapes.values()) {
     if (!Number.isFinite(shape.x) || !Number.isFinite(shape.y)) {
       continue;
     }
@@ -8050,6 +8263,8 @@ function resetPlayerForRound(room, player) {
   const now = Date.now();
   const spawn = createSpawnPoint(room, {
     teamId: player.teamId,
+    classId: player.classId,
+    isBot: player.isBot,
     spawnKey: `${player.id}:round:${Math.floor(now)}`,
     enforceEnemyBuffer: true,
     minDistanceToPlayers: GAME_CONFIG.spawn.safeRespawnDistance
@@ -8128,6 +8343,8 @@ function clearRoomCombatState(room) {
     const now = Date.now();
     const spawn = createSpawnPoint(room, {
       teamId: player.teamId,
+      classId: player.classId,
+      isBot: player.isBot,
       spawnKey: `${player.id}:reset:${Math.floor(now)}`,
       enforceEnemyBuffer: true,
       minDistanceToPlayers: GAME_CONFIG.spawn.safeRespawnDistance
@@ -8965,6 +9182,8 @@ function respawnPlayer(room, player, now = Date.now()) {
 
   const spawn = createSpawnPoint(room, {
     teamId: player.teamId,
+    classId: player.classId,
+    isBot: player.isBot,
     spawnKey: `${player.id}:${Math.floor(now)}`,
     enforceEnemyBuffer: true,
     minDistanceToPlayers: GAME_CONFIG.spawn.safeRespawnDistance
@@ -9095,7 +9314,7 @@ function applyGrenadeExplosion(room, attacker, now = Date.now()) {
       continue;
     }
 
-    const hitDistance = explosionRadius + GAME_CONFIG.tank.radius;
+    const hitDistance = explosionRadius + getPlayerTankRadius(target);
     const dx = target.x - explosionCenter.x;
     const dy = target.y - explosionCenter.y;
     if (dx * dx + dy * dy > hitDistance * hitDistance) {
@@ -9523,7 +9742,7 @@ function canBotSenseTarget(room, player, candidate, now) {
   }
 
   const awarenessRange = getBotAwarenessRange(player);
-  if (canViewerSeePosition(room, player, candidate.x, candidate.y, GAME_CONFIG.tank.radius, awarenessRange)) {
+  if (canViewerSeePosition(room, player, candidate.x, candidate.y, getPlayerTankRadius(candidate), awarenessRange)) {
     return true;
   }
 
@@ -9542,7 +9761,8 @@ function scoreBotTarget(room, player, candidate, now) {
   const shootRange = getBotShootRange(player);
   const preferredRange = getBotPreferredRange(player);
   const distance = Math.hypot(candidate.x - player.x, candidate.y - player.y);
-  const hasLineOfSight = !segmentHitsObstacle(
+  const hasLineOfSight = !segmentHitsBotBlocker(
+    room,
     player.x,
     player.y,
     candidate.x,
@@ -9625,13 +9845,15 @@ function hasLivingEnemyHuman(room, player, now) {
 
 function scoreBotShapeTarget(room, player, shape) {
   const distance = Math.hypot(shape.x - player.x, shape.y - player.y);
-  const hasLineOfSight = !segmentHitsObstacle(
+  const hasLineOfSight = !segmentHitsBotBlocker(
+    room,
     player.x,
     player.y,
     shape.x,
     shape.y,
     shape.radius * 0.25,
-    getRoomMapLayout(room)
+    getRoomMapLayout(room),
+    { excludeShapeId: shape.id }
   );
   let score = Math.max(0, 900 - distance);
   score += (SHAPE_XP[shape.type] ?? 10) * 4;
@@ -9651,17 +9873,29 @@ function selectBotShapeTarget(room, player) {
 function chooseBotGoalCandidate(room, player, target, candidates, options = {}) {
   const { preferCover = false, desiredSpacing = null } = options;
   const mapLayout = getRoomMapLayout(room);
+  const tankRadius = getPlayerTankRadius(player);
+  const targetShapeId = target && room.shapes.has(target.id) ? target.id : null;
   return candidates
-    .filter((candidate) => candidate && isNavigableWorldPoint(candidate.x, candidate.y, GAME_CONFIG.tank.radius, mapLayout))
+    .filter((candidate) => candidate && isBotNavigableWorldPoint(room, candidate.x, candidate.y, tankRadius, mapLayout))
     .map((candidate) => {
       const hasLineToTarget =
-        target && !segmentHitsObstacle(candidate.x, candidate.y, target.x, target.y, GAME_CONFIG.bullet.radius, mapLayout);
+        target &&
+        !segmentHitsBotBlocker(
+          room,
+          candidate.x,
+          candidate.y,
+          target.x,
+          target.y,
+          GAME_CONFIG.bullet.radius,
+          mapLayout,
+          { excludeShapeId: targetShapeId }
+        );
       const lineToTargetScore = target
         ? preferCover
           ? (hasLineToTarget ? -260 : 460)
           : (hasLineToTarget ? 400 : 40)
         : 0;
-      const directTravelScore = canNavigateDirectly(player, candidate, GAME_CONFIG.tank.radius + 4, mapLayout) ? 180 : 0;
+      const directTravelScore = canBotNavigateDirectly(room, player, candidate, tankRadius + 4, mapLayout) ? 180 : 0;
       const spacingPenalty =
         target && Number.isFinite(desiredSpacing)
           ? Math.abs(Math.hypot(candidate.x - target.x, candidate.y - target.y) - desiredSpacing) *
@@ -9688,7 +9922,7 @@ function getBotCoverCandidates(room, player, target) {
   const maxDistance = Math.max(GAME_CONFIG.ai.coverSearchDistance, GAME_CONFIG.ai.retreatDistance * 1.7);
   return getNavigationGraphForRoom(room).nodes
     .filter((node) => Math.hypot(node.x - player.x, node.y - player.y) <= maxDistance)
-    .filter((node) => segmentHitsObstacle(node.x, node.y, target.x, target.y, GAME_CONFIG.bullet.radius, mapLayout))
+    .filter((node) => segmentHitsBotBlocker(room, node.x, node.y, target.x, target.y, GAME_CONFIG.bullet.radius, mapLayout))
     .map((node) => ({ x: node.x, y: node.y }));
 }
 
@@ -9807,7 +10041,7 @@ function getBotCombatAnchor(room, player, target, now, options = {}) {
     ai.anchorTargetId === target.id &&
     now <= (Number(ai.anchorUntil ?? 0) || 0) &&
     isFiniteWorldPoint(ai.anchorX, ai.anchorY) &&
-    isNavigableWorldPoint(ai.anchorX, ai.anchorY, GAME_CONFIG.tank.radius, getRoomMapLayout(room))
+    isBotNavigableWorldPoint(room, ai.anchorX, ai.anchorY, getPlayerTankRadius(player), getRoomMapLayout(room))
   ) {
     return {
       x: ai.anchorX,
@@ -9960,7 +10194,7 @@ function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfS
 
 function selectBotBulletThreat(room, player) {
   const lookaheadSeconds = GAME_CONFIG.ai.dodgeLookaheadMs / 1000;
-  const dangerRadiusBase = GAME_CONFIG.tank.radius + GAME_CONFIG.ai.dodgeRadius;
+  const dangerRadiusBase = getPlayerTankRadius(player) + GAME_CONFIG.ai.dodgeRadius;
   let bestThreat = null;
 
   for (const bullet of room.bullets.values()) {
@@ -10164,6 +10398,7 @@ function buildBotSteeringVector(room, player, navigationTarget, enemyTarget, opt
   const preferredRange = options.preferredRange ?? getBotPreferredRange(player);
   const shootRange = options.shootRange ?? getBotShootRange(player);
   const rangeTolerance = GAME_CONFIG.ai.preferredRangeTolerance;
+  const holdPosition = Boolean(options.holdPosition);
   const strafeWeight = options.soloBotDuel
     ? GAME_CONFIG.ai.strafeWeight * 0.55
     : options.advancedCombat
@@ -10184,7 +10419,8 @@ function buildBotSteeringVector(room, player, navigationTarget, enemyTarget, opt
       const shouldStrafe =
         Boolean(options.hasLineOfSight) &&
         distance <= shootRange * 1.05 &&
-        !shouldRetreat;
+        !shouldRetreat &&
+        (!holdPosition || options.bulletThreat || (Number(player.ai?.evasiveUntil ?? 0) || 0) > options.now);
 
       if (shouldRetreat || distance < preferredRange - rangeTolerance) {
         const retreatWeight = shouldRetreat
@@ -10202,8 +10438,13 @@ function buildBotSteeringVector(room, player, navigationTarget, enemyTarget, opt
       }
 
       if (shouldStrafe) {
-        totalX += -toTarget.y * (player.ai?.strafeDirection ?? 1) * strafeWeight;
-        totalY += toTarget.x * (player.ai?.strafeDirection ?? 1) * strafeWeight;
+        const rangeOffset = Math.abs(distance - preferredRange);
+        const effectiveStrafeWeight =
+          rangeOffset <= rangeTolerance * 0.45
+            ? strafeWeight * 0.72
+            : strafeWeight;
+        totalX += -toTarget.y * (player.ai?.strafeDirection ?? 1) * effectiveStrafeWeight;
+        totalY += toTarget.x * (player.ai?.strafeDirection ?? 1) * effectiveStrafeWeight;
       }
     }
   }
@@ -10252,7 +10493,7 @@ function updateBotRoute(player, goal, now, options = {}) {
     Math.hypot(goal.x - ai.goalX, goal.y - ai.goalY) >= GAME_CONFIG.ai.repathGoalThreshold;
   const waypoint = ai.route[ai.pathIndex] ?? null;
   const waypointInvalid =
-    waypoint && !isNavigableWorldPoint(waypoint.x, waypoint.y, GAME_CONFIG.tank.radius + 2, mapLayout);
+    waypoint && !isBotNavigableWorldPoint(room, waypoint.x, waypoint.y, getPlayerTankRadius(player) + 2, mapLayout);
   const routeExpired = now - ai.lastPlanAt >= GAME_CONFIG.ai.repathIntervalMs;
 
   if (forceReplan || goalChanged || waypointInvalid || routeExpired || ai.stuck) {
@@ -10297,6 +10538,10 @@ function updateBotInputs(room, player, now) {
     clearBotTargetMemory(player);
     clearBotCombatAnchor(player);
     clearBotRoute(player.ai);
+    player.ai.moveAxisX = 0;
+    player.ai.moveAxisY = 0;
+    player.ai.moveAxisXCommitUntil = 0;
+    player.ai.moveAxisYCommitUntil = 0;
     player.input.forward = false;
     player.input.back = false;
     player.input.left = false;
@@ -10324,7 +10569,7 @@ function updateBotInputs(room, player, now) {
   const shootRange = getBotShootRange(player);
   const liveEnemyTarget = selectBotTarget(room, player, now);
   const liveEnemyHasLineOfSight = liveEnemyTarget
-    ? !segmentHitsObstacle(player.x, player.y, liveEnemyTarget.x, liveEnemyTarget.y, GAME_CONFIG.bullet.radius, mapLayout)
+    ? !segmentHitsBotBlocker(room, player.x, player.y, liveEnemyTarget.x, liveEnemyTarget.y, GAME_CONFIG.bullet.radius, mapLayout)
     : false;
   if (liveEnemyTarget && liveEnemyHasLineOfSight) {
     updateBotTargetMemory(player, liveEnemyTarget, now);
@@ -10342,7 +10587,16 @@ function updateBotInputs(room, player, now) {
   const hasLineOfSight = enemyTarget
     ? liveEnemyHasLineOfSight
     : shapeTarget
-      ? !segmentHitsObstacle(player.x, player.y, shapeTarget.x, shapeTarget.y, GAME_CONFIG.bullet.radius, mapLayout)
+      ? !segmentHitsBotBlocker(
+          room,
+          player.x,
+          player.y,
+          shapeTarget.x,
+          shapeTarget.y,
+          GAME_CONFIG.bullet.radius,
+          mapLayout,
+          { excludeShapeId: shapeTarget.id }
+        )
       : false;
   const healthRatio = getBotHealthRatio(player);
   const advancedCombat = Boolean(enemyTarget);
@@ -10405,6 +10659,15 @@ function updateBotInputs(room, player, now) {
 
   const navigationTarget = moveTarget ?? decision.goal ?? { x: player.x, y: player.y };
   const moveDistance = Math.hypot(navigationTarget.x - player.x, navigationTarget.y - player.y);
+  const holdPosition =
+    Boolean(enemyTarget) &&
+    decision.intent === BOT_AI_INTENTS.ENGAGE &&
+    hasLineOfSight &&
+    !bulletThreat &&
+    !shouldRetreat &&
+    (Number(ai.evasiveUntil ?? 0) || 0) <= now &&
+    moveDistance <= GAME_CONFIG.ai.waypointReachDistance * 0.35 &&
+    Math.abs(targetDistance - preferredRange) <= GAME_CONFIG.ai.preferredRangeTolerance * 0.45;
   const steering = buildBotSteeringVector(room, player, navigationTarget, enemyTarget, {
     now,
     soloBotDuel,
@@ -10414,18 +10677,45 @@ function updateBotInputs(room, player, now) {
     hasLineOfSight,
     targetDistance,
     bulletThreat,
-    shouldRetreat
+    shouldRetreat,
+    holdPosition
   });
-  const shouldMove = moveDistance > GAME_CONFIG.ai.waypointReachDistance * 0.35 || steering.magnitude > 0.18;
-  const axisThreshold = bulletThreat ? 0.12 : 0.22;
+  const shouldMove = !holdPosition && (moveDistance > GAME_CONFIG.ai.waypointReachDistance * 0.35 || steering.magnitude > 0.18);
+  const axisEngageThreshold = bulletThreat ? 0.12 : 0.28;
+  const axisReleaseThreshold = bulletThreat ? 0.06 : 0.14;
+  const axisCommitMs = bulletThreat ? Math.round(BOT_AI_AXIS_COMMIT_MS * 0.65) : BOT_AI_AXIS_COMMIT_MS;
+  const moveAxisX = shouldMove
+    ? resolveBotMovementAxis(player, "x", steering.x, now, {
+        engageThreshold: axisEngageThreshold,
+        releaseThreshold: axisReleaseThreshold,
+        flipThreshold: bulletThreat ? 0.5 : BOT_AI_AXIS_FLIP_THRESHOLD,
+        commitMs: axisCommitMs
+      })
+    : resolveBotMovementAxis(player, "x", 0, now, {
+        engageThreshold: axisEngageThreshold,
+        releaseThreshold: axisReleaseThreshold,
+        commitMs: axisCommitMs
+      });
+  const moveAxisY = shouldMove
+    ? resolveBotMovementAxis(player, "y", steering.y, now, {
+        engageThreshold: axisEngageThreshold,
+        releaseThreshold: axisReleaseThreshold,
+        flipThreshold: bulletThreat ? 0.5 : BOT_AI_AXIS_FLIP_THRESHOLD,
+        commitMs: axisCommitMs
+      })
+    : resolveBotMovementAxis(player, "y", 0, now, {
+        engageThreshold: axisEngageThreshold,
+        releaseThreshold: axisReleaseThreshold,
+        commitMs: axisCommitMs
+      });
 
   player.input.seq = player.lastProcessedInputSeq;
   player.input.clientSentAt = now;
   player.input.receivedAt = now;
-  player.input.left = shouldMove && steering.x < -axisThreshold;
-  player.input.right = shouldMove && steering.x > axisThreshold;
-  player.input.forward = shouldMove && steering.y < -axisThreshold;
-  player.input.back = shouldMove && steering.y > axisThreshold;
+  player.input.left = moveAxisX < 0;
+  player.input.right = moveAxisX > 0;
+  player.input.forward = moveAxisY < 0;
+  player.input.back = moveAxisY > 0;
 
   const objectiveFocusZone = getObjectiveGoalZone(room, player.teamId, player) ?? getRoomObjectiveZones(room)[1] ?? null;
   const predictedAimTarget =
@@ -10467,6 +10757,74 @@ function clampTankPosition(x, y) {
   };
 }
 
+function resolvePlayerShapeCollisions(room, player) {
+  const tankRadius = getPlayerTankRadius(player);
+  for (let pass = 0; pass < 3; pass += 1) {
+    let collided = false;
+
+    for (const shape of room.shapes.values()) {
+      if (!shape || (shape.hp ?? 0) <= 0) {
+        continue;
+      }
+
+      const dx = player.x - shape.x;
+      const dy = player.y - shape.y;
+      const minDistance = tankRadius + shape.radius;
+      const distSq = dx * dx + dy * dy;
+      if (distSq >= minDistance * minDistance) {
+        continue;
+      }
+
+      collided = true;
+      const dist = Math.sqrt(distSq);
+      const fallbackAngle = Number.isFinite(player.angle) ? player.angle : 0;
+      const nx = dist > 0.001 ? dx / dist : Math.cos(fallbackAngle);
+      const ny = dist > 0.001 ? dy / dist : Math.sin(fallbackAngle);
+      const overlap = minDistance - Math.max(dist, 0.001);
+      const playerPush = overlap + SHAPE_BOUNCE.playerResolveBias;
+      const target = clampTankPosition(player.x + nx * playerPush, player.y + ny * playerPush);
+      const mapLayout = getRoomMapLayout(room);
+
+      if (
+        !collidesWithObstacle(target.x, player.y, tankRadius, mapLayout) &&
+        !collidesWithShape(room, target.x, player.y, tankRadius, { excludeShapeId: shape.id })
+      ) {
+        player.x = target.x;
+      }
+
+      if (
+        !collidesWithObstacle(player.x, target.y, tankRadius, mapLayout) &&
+        !collidesWithShape(room, player.x, target.y, tankRadius, { excludeShapeId: shape.id })
+      ) {
+        player.y = target.y;
+      }
+
+      const shapeNudge = clamp(
+        overlap * SHAPE_BOUNCE.shapeNudgeScale,
+        SHAPE_BOUNCE.shapeNudgeMin,
+        SHAPE_BOUNCE.shapeNudgeMax
+      );
+      moveShapeSafely(room, shape, shape.x - nx * shapeNudge, shape.y - ny * shapeNudge, {
+        ignorePlayerId: player.id
+      });
+
+      const impactImpulse = clamp(
+        SHAPE_BOUNCE.impactImpulseBase + overlap * SHAPE_BOUNCE.impactImpulseScale,
+        0,
+        SHAPE_BOUNCE.maxImpulse
+      );
+      shape.impulseX = clamp((shape.impulseX ?? 0) - nx * impactImpulse, -SHAPE_BOUNCE.maxImpulse, SHAPE_BOUNCE.maxImpulse);
+      shape.impulseY = clamp((shape.impulseY ?? 0) - ny * impactImpulse, -SHAPE_BOUNCE.maxImpulse, SHAPE_BOUNCE.maxImpulse);
+      shape.driftAngle = normalizeAngle(Math.atan2(-ny, -nx));
+      shape.driftTurnVelocity = (getRandomFloat(room) - 0.5) * 0.24;
+    }
+
+    if (!collided) {
+      break;
+    }
+  }
+}
+
 function movePlayerWithCollision(room, player, distance) {
   const nextX = player.x + distance.x;
   const nextY = player.y + distance.y;
@@ -10474,13 +10832,16 @@ function movePlayerWithCollision(room, player, distance) {
   const clampedY = clampTankPosition(player.x, nextY).y;
 
   const mapLayout = getRoomMapLayout(room);
-  if (!collidesWithObstacle(clampedX, player.y, GAME_CONFIG.tank.radius, mapLayout)) {
+  const tankRadius = getPlayerTankRadius(player);
+  if (!collidesWithObstacle(clampedX, player.y, tankRadius, mapLayout)) {
     player.x = clampedX;
   }
 
-  if (!collidesWithObstacle(player.x, clampedY, GAME_CONFIG.tank.radius, mapLayout)) {
+  if (!collidesWithObstacle(player.x, clampedY, tankRadius, mapLayout)) {
     player.y = clampedY;
   }
+
+  resolvePlayerShapeCollisions(room, player);
 }
 
 function updateObjective(room, deltaSeconds, now) {
@@ -10494,23 +10855,38 @@ function updateObjective(room, deltaSeconds, now) {
   }
 
   for (const zone of getRoomObjectiveZones(room)) {
-    const occupants = Array.from(room.players.values()).filter((player) => {
-      if (!player.connected || !player.alive || player.isSpectator) {
-        return false;
+    let occupyingTeamId = null;
+    let contested = false;
+
+    for (const player of room.players.values()) {
+      if (!player.connected || !player.alive || player.isSpectator || !player.teamId) {
+        continue;
       }
 
-      return isPlayerInsideObjectiveZone(player, zone);
-    });
-    const occupyingTeams = [...new Set(occupants.map((player) => player.teamId).filter(Boolean))];
-    zone.contested = occupyingTeams.length > 1;
+      if (!isPlayerInsideObjectiveZone(player, zone)) {
+        continue;
+      }
+
+      if (occupyingTeamId === null) {
+        occupyingTeamId = player.teamId;
+        continue;
+      }
+
+      if (occupyingTeamId !== player.teamId) {
+        contested = true;
+        break;
+      }
+    }
+
+    zone.contested = contested;
 
     if (zone.contested) {
       zone.nextRewardAt = null;
       continue;
     }
 
-    if (occupyingTeams.length === 1) {
-      const captureTeamId = occupyingTeams[0];
+    if (occupyingTeamId) {
+      const captureTeamId = occupyingTeamId;
       const captureTeam = getTeamConfig(captureTeamId);
       const captureTeamName = captureTeam?.name ?? captureTeamId;
 
@@ -10568,20 +10944,19 @@ function updateObjective(room, deltaSeconds, now) {
       GAME_CONFIG.objective.rewardIntervalMs > 0 &&
       now >= zone.nextRewardAt
     ) {
-      const rewardRecipients = Array.from(room.players.values()).filter(
-        (player) =>
-          player.connected &&
-          player.alive &&
-          !player.isSpectator &&
-          player.teamId === zone.ownerTeamId
-      );
+      let rewardedCount = 0;
 
-      if (rewardRecipients.length === 0) {
-        zone.nextRewardAt = null;
-        continue;
-      }
+      for (const rewardRecipient of room.players.values()) {
+        if (
+          !rewardRecipient.connected ||
+          !rewardRecipient.alive ||
+          rewardRecipient.isSpectator ||
+          rewardRecipient.teamId !== zone.ownerTeamId
+        ) {
+          continue;
+        }
 
-      for (const rewardRecipient of rewardRecipients) {
+        rewardedCount += 1;
         if (GAME_CONFIG.objective.scoreReward > 0) {
           rewardRecipient.score += GAME_CONFIG.objective.scoreReward;
           queueScoreStateEvent(room, rewardRecipient, "objective", now);
@@ -10591,6 +10966,11 @@ function updateObjective(room, deltaSeconds, now) {
           rewardRecipient.credits += GAME_CONFIG.objective.creditsReward;
           queueInventoryStateEvent(room, rewardRecipient, now);
         }
+      }
+
+      if (rewardedCount === 0) {
+        zone.nextRewardAt = null;
+        continue;
       }
 
       zone.nextRewardAt = now + GAME_CONFIG.objective.rewardIntervalMs;
@@ -10836,7 +11216,7 @@ function simulateBulletToTime(room, bullet, targetTime, currentTime = targetTime
         continue;
       }
 
-      const hitDistance = GAME_CONFIG.tank.radius + (bullet.radius ?? GAME_CONFIG.bullet.radius);
+      const hitDistance = getPlayerTankRadius(player) + (bullet.radius ?? GAME_CONFIG.bullet.radius);
       const distanceSquared = distanceSquaredToSegment(
         previousX,
         previousY,
@@ -10903,6 +11283,7 @@ function resolvePendingShots(room, now) {
     const baseBulletDamage = (shotClassDef.bulletDamage ?? GAME_CONFIG.bullet.damage) * (1 + bulletDmgStat * 0.10);
     const baseBulletRadius = shotClassDef.bulletRadius ?? GAME_CONFIG.bullet.radius;
     const shotBarrels = shotClassDef.barrels ?? [{ x: 40, y: 0, w: 40, h: 14 }];
+    const tankRadius = getPlayerTankRadius(player);
 
     for (const barrel of shotBarrels) {
       const barrelAngle = barrel.autoRotate
@@ -10915,8 +11296,8 @@ function resolvePendingShots(room, now) {
       const bullet = {
         id: bulletId,
         ownerId: player.id,
-        x: shooterState.x + Math.cos(barrelAngle) * (GAME_CONFIG.tank.radius + 8) + rightX * lateralOffset,
-        y: shooterState.y + Math.sin(barrelAngle) * (GAME_CONFIG.tank.radius + 8) + rightY * lateralOffset,
+        x: shooterState.x + Math.cos(barrelAngle) * (tankRadius + 8) + rightX * lateralOffset,
+        y: shooterState.y + Math.sin(barrelAngle) * (tankRadius + 8) + rightY * lateralOffset,
         angle: barrelAngle,
         speed: baseBulletSpeed,
         damage: baseBulletDamage,
@@ -11394,8 +11775,6 @@ function resolveTankBodyCollisions(room, now) {
   const alivePlayers = Array.from(room.players.values()).filter(
     (p) => p.alive && !p.isSpectator
   );
-  const tankR = GAME_CONFIG.tank.radius;
-  const minDist = tankR * 2;
   const baseDamage = 8;
   const cooldownMs = 300;
 
@@ -11411,6 +11790,7 @@ function resolveTankBodyCollisions(room, now) {
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const distSq = dx * dx + dy * dy;
+      const minDist = getPlayerTankRadius(a) + getPlayerTankRadius(b);
 
       if (distSq >= minDist * minDist) {
         continue;
@@ -11456,6 +11836,7 @@ function resolveTankBodyCollisions(room, now) {
 
 function simulateRooms(deltaSeconds, now) {
   reapIdleRooms(now);
+  let shouldBroadcast = false;
 
   for (const [roomId, room] of rooms.entries()) {
     room.tickNumber += 1;
@@ -11484,7 +11865,13 @@ function simulateRooms(deltaSeconds, now) {
     updateObjective(room, deltaSeconds, now);
     updateRoomPhase(room, now);
     recordRoomHistory(room, now);
+
+    if (room.clients.size > 0 && room.tickNumber > 0 && room.tickNumber % snapshotTickStride === 0) {
+      shouldBroadcast = true;
+    }
   }
+
+  return shouldBroadcast;
 }
 
 function broadcastRooms(now, options = {}) {
@@ -11728,10 +12115,7 @@ const simulationInterval = setInterval(() => {
   while (simulationAccumulatorMs >= fixedTickMs && processedTicks < GAME_CONFIG.simulation.maxCatchUpTicks) {
     simulatedNowMs += fixedTickMs;
     lastSimulatedAt = Math.round(simulatedNowMs);
-    simulateRooms(fixedDeltaSeconds, lastSimulatedAt);
-    const shouldBroadcast = Array.from(rooms.values()).some(
-      (room) => room.clients.size > 0 && room.tickNumber > 0 && room.tickNumber % snapshotTickStride === 0
-    );
+    const shouldBroadcast = simulateRooms(fixedDeltaSeconds, lastSimulatedAt);
 
     if (shouldBroadcast) {
       broadcastRooms(lastSimulatedAt);

@@ -184,6 +184,9 @@ export const GAME_CONFIG = Object.freeze({
     maxPlayerRecordsPerSnapshot: 16,
     maxBulletRecordsPerSnapshot: 32
   }),
+  camera: Object.freeze({
+    lockedSightRadius: 1100
+  }),
   visibility: Object.freeze({
     playerVisionRadius: 1280,
     bulletVisionRadius: 1320,
@@ -254,6 +257,7 @@ export const GAME_CONFIG = Object.freeze({
         armorMultiplier: 1,
         critChance: 0.1,
         critMultiplier: 1.35,
+        sizeMultiplier: 1,
         statusEffect: STATUS_EFFECTS.NONE,
         statusChance: 0,
         statusDurationMs: 0
@@ -263,6 +267,7 @@ export const GAME_CONFIG = Object.freeze({
         armorMultiplier: 1,
         critChance: 0.1,
         critMultiplier: 1.35,
+        sizeMultiplier: 1.25,
         statusEffect: STATUS_EFFECTS.NONE,
         statusChance: 0,
         statusDurationMs: 0
@@ -272,6 +277,7 @@ export const GAME_CONFIG = Object.freeze({
         armorMultiplier: 1,
         critChance: 0.1,
         critMultiplier: 1.35,
+        sizeMultiplier: 1.1,
         statusEffect: STATUS_EFFECTS.NONE,
         statusChance: 0,
         statusDurationMs: 0
@@ -281,6 +287,7 @@ export const GAME_CONFIG = Object.freeze({
         armorMultiplier: 1,
         critChance: 0.1,
         critMultiplier: 1.35,
+        sizeMultiplier: 1,
         statusEffect: STATUS_EFFECTS.NONE,
         statusChance: 0,
         statusDurationMs: 0
@@ -382,9 +389,9 @@ export const GAME_CONFIG = Object.freeze({
     damageRetreatMs: 1200,
     lowHealthRetreatRatio: 0.45,
     reengageHealthRatio: 0.72,
-    strafeIntervalMs: 650,
-    strafeJitterMs: 350,
-    strafeWeight: 0.95,
+    strafeIntervalMs: 900,
+    strafeJitterMs: 300,
+    strafeWeight: 0.8,
     dodgeLookaheadMs: 450,
     dodgeRadius: 160,
     dodgeWeight: 1.2,
@@ -565,6 +572,29 @@ export function clamp(value, min, max) {
 
 export function getTeamConfig(teamId) {
   return GAME_CONFIG.lobby.teams.find((team) => team.id === teamId) ?? GAME_CONFIG.lobby.teams[0] ?? null;
+}
+
+export function getLobbyClassProfile(classId) {
+  const profiles = GAME_CONFIG.combat.classProfiles;
+  const defaultClassId = GAME_CONFIG.lobby.classes[0]?.id ?? "basic";
+  const safeClassId = typeof classId === "string" && profiles[classId] ? classId : defaultClassId;
+  return profiles[safeClassId] ?? profiles[defaultClassId] ?? profiles.basic;
+}
+
+export function getTankScaleForClassId(classId) {
+  const sizeMultiplier = Number(getLobbyClassProfile(classId)?.sizeMultiplier);
+  return Number.isFinite(sizeMultiplier) && sizeMultiplier > 0 ? sizeMultiplier : 1;
+}
+
+export function getTankRadiusForClassId(classId) {
+  return GAME_CONFIG.tank.radius * getTankScaleForClassId(classId);
+}
+
+export function getLockedCameraZoom(viewportWidth, viewportHeight) {
+  const width = Math.max(1, Number(viewportWidth) || 0);
+  const height = Math.max(1, Number(viewportHeight) || 0);
+  const sightRadius = Math.max(1, Number(GAME_CONFIG.camera.lockedSightRadius) || 1);
+  return Math.max(1, Math.hypot(width, height) / (sightRadius * 2));
 }
 
 export function getTeamSpawnZone(teamId) {

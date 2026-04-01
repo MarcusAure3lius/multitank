@@ -20,7 +20,9 @@ import {
   VFX_CUES,
   XP_PER_LEVEL,
   deserializePacket,
+  getLockedCameraZoom,
   getMapLayout,
+  getTankRadiusForClassId,
   getTeamConfig,
   getTeamSpawnZone,
   normalizeAngle,
@@ -72,6 +74,9 @@ const resultsSummaryElement = document.getElementById("results-summary");
 const resultsListElement = document.getElementById("results-list");
 const deathOverlayElement = document.getElementById("death-overlay");
 const respawnButton = document.getElementById("respawn-button");
+const legacyFallbackVisualsBlockedByHiddenAncestor = Boolean(
+  playAreaElement?.closest("[hidden]") || fallbackVisualLayerElement?.closest("[hidden]")
+);
 
 const STORAGE_KEYS = {
   name: "multitank.name",
@@ -130,10 +135,20 @@ const combatEffects = [];
 const killFeedEntries = [];
 const shapeParticles = [];
 const shapeSpriteCache = new Map();
+const NEUTRAL_OBJECTIVE_COLORS = Object.freeze({
+  fill: "rgba(0, 0, 0, 0.12)",
+  ring: "rgba(0, 0, 0, 0.88)",
+  core: "rgba(0, 0, 0, 0.72)",
+  label: "#111827",
+  coreLabel: "#f8fafc",
+  minimapFill: "rgba(0, 0, 0, 0.16)",
+  minimapStroke: "#111111"
+});
 let minimapBackgroundCache = {
   key: "",
   canvas: null
 };
+const fallbackRemoteMarkerCache = new Map();
 function createEmptyAllocatedStats() {
   return Object.fromEntries(STAT_NAMES.map((statName) => [statName, 0]));
 }
@@ -801,19 +816,15 @@ function syncFallbackRemoteMarkers() {
     return;
   }
 
-  const activeRemotePlayers = Array.from(players.values()).filter(
-    (player) => player.id !== localPlayerId && !player.isSpectator && !player.isBot
-  );
-  const activeIds = new Set(activeRemotePlayers.map((player) => player.id));
+  const activeIds = new Set();
 
-  for (const node of Array.from(fallbackRemoteMarkersElement.children)) {
-    if (!activeIds.has(node.dataset.playerId)) {
-      node.remove();
+  for (const player of players.values()) {
+    if (player.id === localPlayerId || player.isSpectator || player.isBot) {
+      continue;
     }
-  }
 
-  for (const player of activeRemotePlayers) {
-    let marker = fallbackRemoteMarkersElement.querySelector(`[data-player-id="${player.id}"]`);
+    activeIds.add(player.id);
+    let marker = fallbackRemoteMarkerCache.get(player.id);
     if (!marker) {
       marker = document.createElement("div");
       marker.className = "fallback-remote-marker";
@@ -824,6 +835,7 @@ function syncFallbackRemoteMarkers() {
         <div class="fallback-remote-label"></div>
       `;
       fallbackRemoteMarkersElement.append(marker);
+      fallbackRemoteMarkerCache.set(player.id, marker);
     }
 
     const label = marker.querySelector(".fallback-remote-label");
@@ -833,10 +845,24 @@ function syncFallbackRemoteMarkers() {
     setFallbackMarkerScale(marker);
     positionFallbackMarker(marker, getPlayerVisualX(player), getPlayerVisualY(player));
   }
+
+  for (const [playerId, marker] of fallbackRemoteMarkerCache.entries()) {
+    if (activeIds.has(playerId)) {
+      continue;
+    }
+
+    marker.remove();
+    fallbackRemoteMarkerCache.delete(playerId);
+  }
 }
 
 function updateFallbackVisuals() {
-  if (!playAreaElement || !fallbackVisualLayerElement) {
+  if (
+    legacyFallbackVisualsBlockedByHiddenAncestor ||
+    !playAreaElement ||
+    !fallbackVisualLayerElement ||
+    !playAreaElement.classList.contains("active")
+  ) {
     return;
   }
 
@@ -1712,6 +1738,28 @@ function getLocalPlayer() {
   return players.get(localPlayerId) ?? null;
 }
 
+function getPlayerBodyRadius(player) {
+  return player?.isBot ? GAME_CONFIG.tank.radius : getTankRadiusForClassId(player?.classId);
+}
+
+function getLocalLobbyClassId(localPlayer = getLocalPlayer()) {
+  return (
+    localPlayer?.classId ??
+    latestYou?.classId ??
+    getLobbyClassConfig(classSelect?.value)?.id ??
+    GAME_CONFIG.lobby.classes[0]?.id ??
+    "basic"
+  );
+}
+
+function getLocalBodyRadius(localPlayer = getLocalPlayer()) {
+  return getTankRadiusForClassId(getLocalLobbyClassId(localPlayer));
+}
+
+function syncLockedCameraZoom() {
+  cameraZoom = getLockedCameraZoom(canvas.width, canvas.height);
+}
+
 function resizeCanvas() {
   const nextWidth = Math.max(640, Math.round(window.innerWidth));
   const nextHeight = Math.max(360, Math.round(window.innerHeight));
@@ -1722,6 +1770,7 @@ function resizeCanvas() {
 
   canvas.width = nextWidth;
   canvas.height = nextHeight;
+  syncLockedCameraZoom();
   cameraNeedsSnap = true;
   refreshPointerWorldPosition();
 }
@@ -2249,8 +2298,98 @@ function circleIntersectsRect(x, y, radius, rect) {
   return dx * dx + dy * dy < radius * radius;
 }
 
+function circleIntersectsCircle(ax, ay, aRadius, bx, by, bRadius) {
+  const dx = ax - bx;
+  const dy = ay - by;
+  const combinedRadius = aRadius + bRadius;
+  return dx * dx + dy * dy < combinedRadius * combinedRadius;
+}
+
 function collidesWithObstacle(x, y, radius = GAME_CONFIG.tank.radius) {
   return getActiveMapLayout().obstacles.some((obstacle) => circleIntersectsRect(x, y, radius, obstacle));
+}
+
+function collidesWithBlockingShape(x, y, radius = GAME_CONFIG.tank.radius, options = {}) {
+  const { excludeId = null } = options;
+  for (const shape of shapes.values()) {
+    if (!shape || shape.id === excludeId) {
+      continue;
+    }
+
+    const shapeX = shape.renderX ?? shape.x;
+    const shapeY = shape.renderY ?? shape.y;
+    const shapeRadius = shape.radius ?? 20;
+    if (circleIntersectsCircle(x, y, radius, shapeX, shapeY, shapeRadius)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function resolvePredictedShapeCollisions(x, y, radius = GAME_CONFIG.tank.radius, fallbackAngle = 0) {
+  let resolvedX = x;
+  let resolvedY = y;
+
+  for (let pass = 0; pass < 3; pass += 1) {
+    let collided = false;
+
+    for (const shape of shapes.values()) {
+      if (!shape) {
+        continue;
+      }
+
+      const shapeX = shape.renderX ?? shape.x;
+      const shapeY = shape.renderY ?? shape.y;
+      const shapeRadius = shape.radius ?? 20;
+      const dx = resolvedX - shapeX;
+      const dy = resolvedY - shapeY;
+      const minDistance = radius + shapeRadius;
+      const distSq = dx * dx + dy * dy;
+      if (distSq >= minDistance * minDistance) {
+        continue;
+      }
+
+      collided = true;
+      const dist = Math.sqrt(distSq);
+      const nx = dist > 0.001 ? dx / dist : Math.cos(fallbackAngle);
+      const ny = dist > 0.001 ? dy / dist : Math.sin(fallbackAngle);
+      const pushDistance = minDistance - Math.max(dist, 0.001) + 2;
+      const targetX = clamp(
+        resolvedX + nx * pushDistance,
+        GAME_CONFIG.world.padding,
+        GAME_CONFIG.world.width - GAME_CONFIG.world.padding
+      );
+      const targetY = clamp(
+        resolvedY + ny * pushDistance,
+        GAME_CONFIG.world.padding,
+        GAME_CONFIG.world.height - GAME_CONFIG.world.padding
+      );
+
+      if (
+        !collidesWithObstacle(targetX, resolvedY, radius) &&
+        !collidesWithBlockingShape(targetX, resolvedY, radius, { excludeId: shape.id })
+      ) {
+        resolvedX = targetX;
+      }
+
+      if (
+        !collidesWithObstacle(resolvedX, targetY, radius) &&
+        !collidesWithBlockingShape(resolvedX, targetY, radius, { excludeId: shape.id })
+      ) {
+        resolvedY = targetY;
+      }
+    }
+
+    if (!collided) {
+      break;
+    }
+  }
+
+  return {
+    x: resolvedX,
+    y: resolvedY
+  };
 }
 
 function getTeleportDistanceForKind(kind) {
@@ -2400,6 +2539,7 @@ function simulateTankMovement(state, input, deltaSeconds) {
   const normalizedMoveY = moveMagnitude > 0 ? moveY / moveMagnitude : 0;
   const nextAngle = moveMagnitude > 0 ? Math.atan2(normalizedMoveY, normalizedMoveX) : state.angle;
   const moveSpeed = moveMagnitude > 0 ? getEffectiveLocalMoveSpeed() : 0;
+  const collisionRadius = getLocalBodyRadius();
   const nextX = Math.max(
     GAME_CONFIG.world.padding,
     Math.min(GAME_CONFIG.world.width - GAME_CONFIG.world.padding, state.x + normalizedMoveX * moveSpeed * deltaSeconds)
@@ -2411,13 +2551,17 @@ function simulateTankMovement(state, input, deltaSeconds) {
   let resolvedX = state.x;
   let resolvedY = state.y;
 
-  if (!collidesWithObstacle(nextX, state.y)) {
+  if (!collidesWithObstacle(nextX, state.y, collisionRadius)) {
     resolvedX = nextX;
   }
 
-  if (!collidesWithObstacle(resolvedX, nextY)) {
+  if (!collidesWithObstacle(resolvedX, nextY, collisionRadius)) {
     resolvedY = nextY;
   }
+
+  const shapeResolved = resolvePredictedShapeCollisions(resolvedX, resolvedY, collisionRadius, nextAngle);
+  resolvedX = shapeResolved.x;
+  resolvedY = shapeResolved.y;
 
   return {
     x: resolvedX,
@@ -2445,7 +2589,7 @@ function spawnPredictedProjectile(localPlayer, inputFrame) {
     const lateralOffset = barrel.y ?? 0;
     const bRightX = -Math.sin(barrelAngle);
     const bRightY = Math.cos(barrelAngle);
-    const muzzleDistance = GAME_CONFIG.tank.radius + 8;
+    const muzzleDistance = getLocalBodyRadius(localPlayer) + 8;
     const muzzleX =
       origin.x + Math.cos(barrelAngle) * muzzleDistance + bRightX * lateralOffset;
     const muzzleY =
@@ -2824,7 +2968,8 @@ function simulatePredictedProjectiles(deltaSeconds) {
       projectile.x > GAME_CONFIG.world.width ||
       projectile.y < 0 ||
       projectile.y > GAME_CONFIG.world.height ||
-      collidesWithObstacle(projectile.x, projectile.y, GAME_CONFIG.bullet.radius)
+      collidesWithObstacle(projectile.x, projectile.y, GAME_CONFIG.bullet.radius) ||
+      collidesWithBlockingShape(projectile.x, projectile.y, GAME_CONFIG.bullet.radius)
     ) {
       predictedProjectiles.delete(projectileId);
     }
@@ -3767,12 +3912,11 @@ function drawCenterProbe() {
   // Hidden while we isolate the local player's movement view.
 }
 
-function drawGrid() {
+function drawGrid(viewport = getVisibleViewportSize()) {
   const theme = getActiveMapLayout().theme;
   const gridColor = theme?.gridMinor ?? "rgba(122, 128, 136, 0.34)";
   const cellSize = 40;
   const lineWidth = Math.max(1.8 / cameraZoom, 1.4);
-  const viewport = getVisibleViewportSize();
   const startX = Math.max(0, Math.floor(camera.x / cellSize) * cellSize - cellSize);
   const endX = Math.min(GAME_CONFIG.world.width, camera.x + viewport.width + cellSize);
   const startY = Math.max(0, Math.floor(camera.y / cellSize) * cellSize - cellSize);
@@ -3781,21 +3925,19 @@ function drawGrid() {
   context.save();
   context.lineWidth = lineWidth;
   context.strokeStyle = gridColor;
+  context.beginPath();
 
   for (let x = startX; x <= endX; x += cellSize) {
-    context.beginPath();
     context.moveTo(x, startY);
     context.lineTo(x, endY);
-    context.stroke();
   }
 
   for (let y = startY; y <= endY; y += cellSize) {
-    context.beginPath();
     context.moveTo(startX, y);
     context.lineTo(endX, y);
-    context.stroke();
   }
 
+  context.stroke();
   context.restore();
 }
 
@@ -3837,7 +3979,7 @@ function drawObjective() {
       Boolean(zone.captureTargetTeamId) &&
       (zone.ownerTeamId !== zone.captureTargetTeamId || progress < 1);
 
-    context.fillStyle = zone.ownerTeamId ? colorWithAlpha(ownerColor, 0.18) : "rgba(255, 209, 102, 0.12)";
+    context.fillStyle = zone.ownerTeamId ? colorWithAlpha(ownerColor, 0.18) : NEUTRAL_OBJECTIVE_COLORS.fill;
     context.beginPath();
     context.arc(zone.x, zone.y, zone.radius, 0, Math.PI * 2);
     context.fill();
@@ -3848,7 +3990,7 @@ function drawObjective() {
       ? "rgba(255, 209, 102, 0.95)"
       : zone.ownerTeamId
         ? colorWithAlpha(ownerColor, 0.92)
-        : "rgba(255,255,255,0.85)";
+        : NEUTRAL_OBJECTIVE_COLORS.ring;
     context.arc(zone.x, zone.y, zone.radius, 0, Math.PI * 2);
     context.stroke();
 
@@ -3860,18 +4002,18 @@ function drawObjective() {
       context.stroke();
     }
 
-    context.fillStyle = zone.ownerTeamId ? ownerColor : "rgba(255,255,255,0.14)";
+    context.fillStyle = zone.ownerTeamId ? ownerColor : NEUTRAL_OBJECTIVE_COLORS.core;
     context.beginPath();
     context.arc(zone.x, zone.y, zone.radius * 0.3, 0, Math.PI * 2);
     context.fill();
 
     context.font = `${Math.max(13 / cameraZoom, 8)}px Segoe UI`;
     context.textAlign = "center";
-    context.fillStyle = "#10243b";
+    context.fillStyle = zone.ownerTeamId ? "#10243b" : NEUTRAL_OBJECTIVE_COLORS.coreLabel;
     context.fillText((zone.slot?.[0] ?? "O").toUpperCase(), zone.x, zone.y + 4 / cameraZoom);
 
     context.font = `${Math.max(15 / cameraZoom, 9)}px Segoe UI`;
-    context.fillStyle = zone.contested ? "#ffd166" : "#ffffff";
+    context.fillStyle = zone.contested ? "#ffd166" : zone.ownerTeamId ? "#ffffff" : NEUTRAL_OBJECTIVE_COLORS.label;
     context.fillText(
       zone.contested
         ? "Contested"
@@ -3962,17 +4104,16 @@ function getTeamName(teamId) {
   return getTeamConfig(teamId)?.name ?? (typeof teamId === "string" && teamId ? teamId : "Team");
 }
 
-function drawTank(player) {
+function drawTank(player, pose = getTankRenderPose(player), frameNow = performance.now()) {
   if (!player || player.isSpectator || !player.alive) {
     return;
   }
 
-  const pose = getTankRenderPose(player);
   const x = pose.x;
   const y = pose.y;
   const bodyAngle = pose.angle;
   const turretAngle = pose.turretAngle;
-  const bodyRadius = GAME_CONFIG.tank.radius;
+  const bodyRadius = getPlayerBodyRadius(player);
   const isLocalPlayer = player.id === localPlayerId;
   const bodyColor = player.color ?? getTeamConfig(player.teamId)?.color ?? "#ff4d00";
   const alpha = player.connected === false ? 0.42 : 1;
@@ -4023,7 +4164,7 @@ function drawTank(player) {
 
   const shieldRemainingMs = player.combat?.shieldRemainingMs ?? 0;
   if (shieldRemainingMs > 0) {
-    const shieldPulse = 1 + Math.sin(performance.now() / 140) * 0.04;
+    const shieldPulse = 1 + Math.sin(frameNow / 140) * 0.04;
     const shieldRadius = (bodyRadius + 14) * shieldPulse;
     context.save();
     context.globalAlpha = Math.min(alpha, 0.9);
@@ -4080,7 +4221,9 @@ function drawProjectile(projectile, options = {}) {
 
   const prevX = projectile.previousRenderX ?? x;
   const prevY = projectile.previousRenderY ?? y;
-  if (Math.hypot(x - prevX, y - prevY) > 1) {
+  const trailDx = x - prevX;
+  const trailDy = y - prevY;
+  if (trailDx * trailDx + trailDy * trailDy > 1) {
     context.save();
     context.globalAlpha = alpha * 0.35;
     context.strokeStyle = headColor;
@@ -4113,13 +4256,16 @@ function drawPredictedProjectile(projectile) {
   });
 }
 
-function drawCombatEffects() {
-  const now = performance.now();
+function drawCombatEffects(now = performance.now(), viewport = null) {
   pruneCombatEffects(now);
 
   for (const effect of combatEffects) {
     const life = Math.max(0, (effect.expiresAt - now) / 700);
     if (life <= 0) {
+      continue;
+    }
+
+    if (viewport && !isWorldCircleVisible(effect.x, effect.y, 36, 40, viewport)) {
       continue;
     }
 
@@ -4320,7 +4466,7 @@ function maybeSpawnShapeDeathParticles(shape) {
   spawnShapeDeathParticles(shape);
 }
 
-function drawShapeParticles(now) {
+function drawShapeParticles(now, viewport = null) {
   for (let i = shapeParticles.length - 1; i >= 0; i--) {
     const p = shapeParticles[i];
     const age = now - p.bornAt;
@@ -4334,6 +4480,10 @@ function drawShapeParticles(now) {
     const px = p.x + p.vx * elapsed;
     const py = p.y + p.vy * elapsed;
     const rotation = p.rotation + p.rotationSpeed * elapsed;
+    const renderedSize = p.size * (1 - life * 0.3);
+    if (viewport && !isWorldCircleVisible(px, py, renderedSize * 0.75, 40, viewport)) {
+      continue;
+    }
 
     context.save();
     context.globalAlpha = alpha;
@@ -4342,9 +4492,8 @@ function drawShapeParticles(now) {
     context.fillStyle = p.color;
     context.strokeStyle = "rgba(0,0,0,0.3)";
     context.lineWidth = 1.2;
-    const s = p.size * (1 - life * 0.3);
     context.beginPath();
-    context.rect(-s / 2, -s / 2, s, s);
+    context.rect(-renderedSize / 2, -renderedSize / 2, renderedSize, renderedSize);
     context.fill();
     context.stroke();
     context.restore();
@@ -4490,8 +4639,8 @@ function drawMinimap() {
 
   for (const zone of getObjectiveZones(latestObjective)) {
     const teamColor = getObjectiveTeamColor(zone.ownerTeamId, "#ffd166");
-    context.fillStyle = zone.ownerTeamId ? colorWithAlpha(teamColor, 0.24) : "rgba(255, 209, 102, 0.2)";
-    context.strokeStyle = zone.ownerTeamId ? teamColor : "#ffd166";
+    context.fillStyle = zone.ownerTeamId ? colorWithAlpha(teamColor, 0.24) : NEUTRAL_OBJECTIVE_COLORS.minimapFill;
+    context.strokeStyle = zone.ownerTeamId ? teamColor : NEUTRAL_OBJECTIVE_COLORS.minimapStroke;
     context.lineWidth = 1.5;
     context.beginPath();
     context.arc(projectX(zone.x), projectY(zone.y), 4.5, 0, Math.PI * 2);
@@ -4859,12 +5008,13 @@ function render(frameAt = performance.now()) {
       updateCameraShake(deltaSeconds);
       updateFallbackVisuals();
       drawBackground();
+      const worldViewport = getVisibleViewportSize();
 
       context.save();
       context.scale(cameraZoom, cameraZoom);
       context.translate(-camera.x + cameraShakeX, -camera.y + cameraShakeY);
       drawMapSquare();
-      drawGrid();
+      drawGrid(worldViewport);
       drawCenterProbe();
       drawObstacles();
       drawObjective();
@@ -4872,19 +5022,35 @@ function render(frameAt = performance.now()) {
       drawShapes();
 
       for (const bullet of bullets.values()) {
+        const bulletX = bullet.renderX ?? bullet.x;
+        const bulletY = bullet.renderY ?? bullet.y;
+        const bulletRadius = bullet.radius ?? GAME_CONFIG.bullet.radius;
+        if (!isWorldCircleVisible(bulletX, bulletY, bulletRadius, 96, worldViewport)) {
+          continue;
+        }
         drawBullet(bullet);
       }
 
       for (const projectile of predictedProjectiles.values()) {
+        const projectileX = projectile.renderX ?? projectile.x;
+        const projectileY = projectile.renderY ?? projectile.y;
+        const projectileRadius = projectile.radius ?? GAME_CONFIG.bullet.radius;
+        if (!isWorldCircleVisible(projectileX, projectileY, projectileRadius, 96, worldViewport)) {
+          continue;
+        }
         drawPredictedProjectile(projectile);
       }
 
       for (const player of players.values()) {
-        drawTank(player);
+        const pose = getTankRenderPose(player);
+        if (!isWorldCircleVisible(pose.x, pose.y, getPlayerBodyRadius(player) + 56, 112, worldViewport)) {
+          continue;
+        }
+        drawTank(player, pose, frameAt);
       }
 
-      drawShapeParticles(frameAt);
-      drawCombatEffects();
+      drawShapeParticles(frameAt, worldViewport);
+      drawCombatEffects(frameAt, worldViewport);
       context.restore();
 
       // Canvas HUD (drawn in screen space, not world space)
@@ -5021,26 +5187,6 @@ window.addEventListener("blur", () => {
 });
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
-
-  const bounds = canvas.getBoundingClientRect();
-  const normalizedX = (event.clientX - bounds.left) / bounds.width;
-  const normalizedY = (event.clientY - bounds.top) / bounds.height;
-  const previousViewport = getVisibleViewportSize();
-  const anchorWorldX = camera.x + normalizedX * previousViewport.width;
-  const anchorWorldY = camera.y + normalizedY * previousViewport.height;
-  const zoomFactor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
-
-  cameraZoom = clamp(cameraZoom * zoomFactor, 0.05, 12);
-
-  const nextViewport = getVisibleViewportSize();
-  const clamped = clampCameraPosition(
-    anchorWorldX - normalizedX * nextViewport.width,
-    anchorWorldY - normalizedY * nextViewport.height
-  );
-  camera.x = clamped.x;
-  camera.y = clamped.y;
-  cameraNeedsSnap = false;
-  refreshPointerWorldPosition();
 }, { passive: false });
 
 setInterval(() => {

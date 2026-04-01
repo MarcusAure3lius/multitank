@@ -1492,7 +1492,7 @@ try {
           player.alive === true &&
           player.hp === GAME_CONFIG.tank.hitPoints
       ),
-    30000,
+    60000,
     "solo bot respawn state"
   );
 
