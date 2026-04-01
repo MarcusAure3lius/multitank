@@ -9639,32 +9639,85 @@ function createInputFrame(payload, receivedAt) {
   };
 }
 
-function applyPendingInputs(player, tickNumber) {
-  if (player.pendingInputs.length === 0) {
-    return;
-  }
+function capturePlayerInputState(player) {
+  return {
+    seq: player.input.seq,
+    clientSentAt: player.input.clientSentAt,
+    receivedAt: player.input.receivedAt,
+    forward: player.input.forward,
+    back: player.input.back,
+    left: player.input.left,
+    right: player.input.right,
+    shoot: player.input.shoot,
+    turretAngle: player.input.turretAngle
+  };
+}
+
+function applyInputFrameToPlayer(player, nextInput, tickNumber) {
+  player.input.seq = nextInput.seq;
+  player.input.clientSentAt = nextInput.clientSentAt;
+  player.input.receivedAt = nextInput.receivedAt;
+  player.input.forward = nextInput.forward;
+  player.input.back = nextInput.back;
+  player.input.left = nextInput.left;
+  player.input.right = nextInput.right;
+  player.input.shoot = nextInput.shoot;
+  player.input.turretAngle = nextInput.turretAngle;
+
+  player.lastProcessedInputSeq = nextInput.seq;
+  player.lastProcessedInputTick = Math.max(0, Number(tickNumber) || 0);
+  player.lastProcessedInputClientSentAt = nextInput.clientSentAt;
+}
+
+function applyPendingInputs(player, tickNumber, tickStartedAt, tickEndedAt) {
+  const safeTickStartedAt = Number.isFinite(tickStartedAt) ? tickStartedAt : tickEndedAt;
+  const safeTickEndedAt = Number.isFinite(tickEndedAt) ? Math.max(safeTickStartedAt, tickEndedAt) : safeTickStartedAt;
+  const inputSegments = [];
+  let activeInput = capturePlayerInputState(player);
+  let segmentStartedAt = safeTickStartedAt;
 
   while (player.pendingInputs.length > 0) {
-    const nextInput = player.pendingInputs.shift();
+    const nextInput = player.pendingInputs[0];
 
     if (nextInput.seq <= player.lastProcessedInputSeq) {
+      player.pendingInputs.shift();
       continue;
     }
 
-    player.input.seq = nextInput.seq;
-    player.input.clientSentAt = nextInput.clientSentAt;
-    player.input.receivedAt = nextInput.receivedAt;
-    player.input.forward = nextInput.forward;
-    player.input.back = nextInput.back;
-    player.input.left = nextInput.left;
-    player.input.right = nextInput.right;
-    player.input.shoot = nextInput.shoot;
-    player.input.turretAngle = nextInput.turretAngle;
+    if (Number.isFinite(nextInput.receivedAt) && nextInput.receivedAt > safeTickEndedAt) {
+      break;
+    }
 
-    player.lastProcessedInputSeq = nextInput.seq;
-    player.lastProcessedInputTick = Math.max(0, Number(tickNumber) || 0);
-    player.lastProcessedInputClientSentAt = nextInput.clientSentAt;
+    player.pendingInputs.shift();
+    const segmentEndedAt = clamp(
+      Number.isFinite(nextInput.receivedAt) ? nextInput.receivedAt : safeTickEndedAt,
+      safeTickStartedAt,
+      safeTickEndedAt
+    );
+
+    if (segmentEndedAt > segmentStartedAt) {
+      inputSegments.push({
+        input: activeInput,
+        deltaSeconds: (segmentEndedAt - segmentStartedAt) / 1000,
+        endsAt: segmentEndedAt
+      });
+    }
+
+    applyInputFrameToPlayer(player, nextInput, tickNumber);
+    activeInput = capturePlayerInputState(player);
+    segmentStartedAt = segmentEndedAt;
   }
+
+  const finalSegmentSeconds = Math.max(0, safeTickEndedAt - segmentStartedAt) / 1000;
+  if (finalSegmentSeconds > 0 || inputSegments.length === 0) {
+    inputSegments.push({
+      input: activeInput,
+      deltaSeconds: finalSegmentSeconds,
+      endsAt: safeTickEndedAt
+    });
+  }
+
+  return inputSegments;
 }
 
 function handleInput(socket, payload, now) {
@@ -11373,10 +11426,11 @@ function updatePlayer(room, player, deltaSeconds, now) {
     return;
   }
 
+  const tickStartedAt = now - deltaSeconds * 1000;
   syncPlayerCombatProfile(player, now);
   applyPassiveRegeneration(player, deltaSeconds, now);
   updateBotInputs(room, player, now);
-  applyPendingInputs(player, room.tickNumber);
+  const inputSegments = applyPendingInputs(player, room.tickNumber, tickStartedAt, now);
   clearSpawnProtectionOnAction(player, now);
 
   if (!player.alive) {
@@ -11404,27 +11458,36 @@ function updatePlayer(room, player, deltaSeconds, now) {
     angle: player.angle,
     turretAngle: player.turretAngle
   };
-  const stunned = getRemainingStunMs(player, now) > 0;
 
-  player.turretAngle = player.input.turretAngle;
+  for (const inputSegment of inputSegments) {
+    if (!inputSegment || inputSegment.deltaSeconds <= 0) {
+      continue;
+    }
 
-  const moveX = !stunned ? (player.input.right ? 1 : 0) - (player.input.left ? 1 : 0) : 0;
-  const moveY = !stunned ? (player.input.back ? 1 : 0) - (player.input.forward ? 1 : 0) : 0;
-  const moveMagnitude = Math.hypot(moveX, moveY);
-  const normalizedMoveX = moveMagnitude > 0 ? moveX / moveMagnitude : 0;
-  const normalizedMoveY = moveMagnitude > 0 ? moveY / moveMagnitude : 0;
-  const moveSpeedStat = player.stats?.movementSpeed ?? 0;
-  const moveSpeed = moveMagnitude > 0 ? GAME_CONFIG.tank.speed * (1 + moveSpeedStat * 0.07) : 0;
+    const activeInput = inputSegment.input;
+    const stunned = getRemainingStunMs(player, inputSegment.endsAt ?? now) > 0;
 
-  if (moveMagnitude > 0) {
-    player.angle = Math.atan2(normalizedMoveY, normalizedMoveX);
+    player.turretAngle = activeInput.turretAngle;
+
+    const moveX = !stunned ? (activeInput.right ? 1 : 0) - (activeInput.left ? 1 : 0) : 0;
+    const moveY = !stunned ? (activeInput.back ? 1 : 0) - (activeInput.forward ? 1 : 0) : 0;
+    const moveMagnitude = Math.hypot(moveX, moveY);
+    const normalizedMoveX = moveMagnitude > 0 ? moveX / moveMagnitude : 0;
+    const normalizedMoveY = moveMagnitude > 0 ? moveY / moveMagnitude : 0;
+    const moveSpeedStat = player.stats?.movementSpeed ?? 0;
+    const moveSpeed = moveMagnitude > 0 ? GAME_CONFIG.tank.speed * (1 + moveSpeedStat * 0.07) : 0;
+
+    if (moveMagnitude > 0) {
+      player.angle = Math.atan2(normalizedMoveY, normalizedMoveX);
+    }
+
+    movePlayerWithCollision(room, player, {
+      x: normalizedMoveX * moveSpeed * inputSegment.deltaSeconds,
+      y: normalizedMoveY * moveSpeed * inputSegment.deltaSeconds
+    });
   }
 
-  movePlayerWithCollision(room, player, {
-    x: normalizedMoveX * moveSpeed * deltaSeconds,
-    y: normalizedMoveY * moveSpeed * deltaSeconds
-  });
-
+  const stunned = getRemainingStunMs(player, now) > 0;
   if (!stunned && canShootPhase(room.match.phase) && player.input.shoot) {
     const fireContext = getLagCompensatedFireContext(player, now);
 

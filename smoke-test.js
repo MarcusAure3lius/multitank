@@ -1469,7 +1469,14 @@ try {
 
     const targetBot =
       replicatedPlayers
-        .filter((player) => player.isBot && player.teamId === localPlayer.teamId && player.alive)
+        .filter(
+          (player) =>
+            player.isBot &&
+            player.alive &&
+            player.teamId &&
+            localPlayer.teamId &&
+            player.teamId !== localPlayer.teamId
+        )
         .sort(
           (left, right) =>
             Math.hypot(left.x - localPlayer.x, left.y - localPlayer.y) -
@@ -1638,9 +1645,10 @@ try {
   );
   bravoInputSeq = bravoSpawnExit.nextSeq;
 
-  const stagingMoveInput = findClearMovementInput(stagingAlphaPlayer);
+  const stagingReferencePlayer = getPlayerState(alphaSpawnExit.crossedState, alphaPlayerId) ?? stagingAlphaPlayer;
+  const stagingMoveInput = findClearMovementInput(stagingReferencePlayer);
   const stagingMoveSeqStart = alphaInputSeq;
-  for (let attempt = 0; attempt < 6; attempt += 1) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     sendInput(alpha, {
       seq: alphaInputSeq++,
       clientSentAt: Date.now(),
@@ -1651,9 +1659,31 @@ try {
       shoot: false,
       turretAngle: 0
     });
-    await new Promise((resolve) => setTimeout(resolve, 40));
   }
   const stagingMoveSeqEnd = alphaInputSeq - 1;
+
+  const stagingBurstState = await waitForState(
+    alpha,
+    (payload) => {
+      if (
+        payload.match?.phase !== MATCH_PHASES.WAITING &&
+        payload.match?.phase !== MATCH_PHASES.WARMUP &&
+        payload.match?.phase !== MATCH_PHASES.IN_PROGRESS
+      ) {
+        return false;
+      }
+
+      return (payload.you?.lastProcessedInputSeq ?? 0) >= stagingMoveSeqStart;
+    },
+    "batched movement acknowledgement"
+  );
+
+  if (
+    (stagingBurstState.you?.lastProcessedInputSeq ?? 0) >= stagingMoveSeqEnd ||
+    (stagingBurstState.you?.pendingInputCount ?? 0) <= 0
+  ) {
+    throw new Error("Expected authoritative movement to leave buffered inputs queued after the first processed burst snapshot");
+  }
 
   const stagingMoveState = await waitForState(
     alpha,
@@ -1671,7 +1701,7 @@ try {
         payload.you?.lastProcessedInputSeq >= stagingMoveSeqEnd &&
         (
           !player ||
-          Math.hypot(player.x - stagingAlphaPlayer.x, player.y - stagingAlphaPlayer.y) >= 6 ||
+          Math.hypot(player.x - stagingReferencePlayer.x, player.y - stagingReferencePlayer.y) >= 6 ||
           payload.you?.lastProcessedInputTick >= 1
         )
       );
