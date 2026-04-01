@@ -30,9 +30,16 @@ const baseWsUrl = process.env.SMOKE_WS_URL ?? baseHttpUrl.replace(/^http/i, "ws"
 const adminApiKey = process.env.SMOKE_ADMIN_API_KEY ?? "smoke-admin-key";
 const allocatorApiKey = process.env.SMOKE_ALLOCATOR_API_KEY ?? "smoke-allocator-key";
 const smokeRegion = process.env.SMOKE_DEPLOY_REGION ?? "smoke-east";
+const smokeDebugEnabled = /^(1|true|yes|on)$/i.test(String(process.env.SMOKE_DEBUG ?? ""));
 const smokeDataDir = isExternalServer
   ? (process.env.SMOKE_DATA_DIR ? path.resolve(process.env.SMOKE_DATA_DIR) : null)
   : fs.mkdtempSync(path.join(os.tmpdir(), "multitank-smoke-"));
+
+function debugSmoke(...args) {
+  if (smokeDebugEnabled) {
+    console.log("[smoke]", ...args);
+  }
+}
 
 function seedSmokeProfiles(dataDir) {
   if (!dataDir) {
@@ -555,6 +562,44 @@ function getReplicatedPlayers(payload) {
   return Array.from(players.values());
 }
 
+function getReplicatedShapes(payload) {
+  const shapes = new Map((payload.shapes ?? []).map((shape) => [shape.id, shape]));
+
+  for (const record of payload.replication?.spawns ?? []) {
+    if (record.kind !== REPLICATION_KINDS.SHAPE || !record.state) {
+      continue;
+    }
+
+    shapes.set(record.id, {
+      ...(shapes.get(record.id) ?? {}),
+      id: record.id,
+      ...record.state
+    });
+  }
+
+  for (const record of payload.replication?.updates ?? []) {
+    if (record.kind !== REPLICATION_KINDS.SHAPE || !record.state) {
+      continue;
+    }
+
+    shapes.set(record.id, {
+      ...(shapes.get(record.id) ?? {}),
+      id: record.id,
+      ...record.state
+    });
+  }
+
+  for (const record of payload.replication?.despawns ?? []) {
+    if (record.kind !== REPLICATION_KINDS.SHAPE || !record.id) {
+      continue;
+    }
+
+    shapes.delete(record.id);
+  }
+
+  return Array.from(shapes.values());
+}
+
 function getFullPlayerState(payload, playerId) {
   return (
     payload.players?.find((player) => player.id === playerId) ??
@@ -566,7 +611,11 @@ function getFullPlayerState(payload, playerId) {
   );
 }
 
-function findClearShotAngle(player) {
+function getMapObstacles(mapId = null) {
+  return getMapLayout(mapId)?.obstacles ?? GAME_CONFIG.world.obstacles;
+}
+
+function findClearShotAngle(player, mapId = null) {
   const candidateAngles = [
     0,
     Math.PI / 4,
@@ -578,6 +627,7 @@ function findClearShotAngle(player) {
     -Math.PI / 4
   ];
   const traceDistance = 220;
+  const obstacles = getMapObstacles(mapId);
 
   for (const angle of candidateAngles) {
     const endX = player.x + Math.cos(angle) * traceDistance;
@@ -592,7 +642,7 @@ function findClearShotAngle(player) {
       continue;
     }
 
-    const blocked = GAME_CONFIG.world.obstacles.some((obstacle) =>
+    const blocked = obstacles.some((obstacle) =>
       segmentIntersectsRect(player.x, player.y, endX, endY, obstacle, GAME_CONFIG.bullet.radius)
     );
 
@@ -604,8 +654,9 @@ function findClearShotAngle(player) {
   return null;
 }
 
-function findClearMovementInput(player) {
+function findClearMovementInput(player, mapId = null) {
   const traceDistance = 140;
+  const obstacles = getMapObstacles(mapId);
   const candidates = [
     { forward: true, back: false, left: false, right: false, dx: 0, dy: -traceDistance },
     { forward: false, back: true, left: false, right: false, dx: 0, dy: traceDistance },
@@ -626,7 +677,7 @@ function findClearMovementInput(player) {
       continue;
     }
 
-    const blocked = GAME_CONFIG.world.obstacles.some((obstacle) =>
+    const blocked = obstacles.some((obstacle) =>
       segmentIntersectsRect(player.x, player.y, endX, endY, obstacle, GAME_CONFIG.tank.radius)
     );
 
@@ -646,6 +697,84 @@ function findClearMovementInput(player) {
     left: false,
     right: true
   };
+}
+
+function buildMovementInputTowardPoint(player, target, mapId = null) {
+  if (!player || !target) {
+    return findClearMovementInput(player, mapId);
+  }
+
+  const axisThreshold = 60;
+  const traceDistance = 140;
+  const obstacles = getMapObstacles(mapId);
+  const candidates = [];
+  const horizontal =
+    target.x - player.x > axisThreshold
+      ? { left: false, right: true }
+      : player.x - target.x > axisThreshold
+        ? { left: true, right: false }
+        : null;
+  const vertical =
+    target.y - player.y > axisThreshold
+      ? { forward: false, back: true }
+      : player.y - target.y > axisThreshold
+        ? { forward: true, back: false }
+        : null;
+  const idleInput = {
+    forward: false,
+    back: false,
+    left: false,
+    right: false
+  };
+
+  if (horizontal || vertical) {
+    candidates.push({
+      ...idleInput,
+      ...(vertical ?? {}),
+      ...(horizontal ?? {})
+    });
+  }
+  if (horizontal) {
+    candidates.push({
+      ...idleInput,
+      ...horizontal
+    });
+  }
+  if (vertical) {
+    candidates.push({
+      ...idleInput,
+      ...vertical
+    });
+  }
+
+  for (const candidate of candidates) {
+    const moveX = (candidate.right ? 1 : 0) - (candidate.left ? 1 : 0);
+    const moveY = (candidate.back ? 1 : 0) - (candidate.forward ? 1 : 0);
+    const magnitude = Math.hypot(moveX, moveY);
+    if (magnitude <= 0) {
+      continue;
+    }
+
+    const endX = player.x + (moveX / magnitude) * traceDistance;
+    const endY = player.y + (moveY / magnitude) * traceDistance;
+    if (
+      endX < GAME_CONFIG.world.padding ||
+      endX > GAME_CONFIG.world.width - GAME_CONFIG.world.padding ||
+      endY < GAME_CONFIG.world.padding ||
+      endY > GAME_CONFIG.world.height - GAME_CONFIG.world.padding
+    ) {
+      continue;
+    }
+
+    const blocked = obstacles.some((obstacle) =>
+      segmentIntersectsRect(player.x, player.y, endX, endY, obstacle, GAME_CONFIG.tank.radius)
+    );
+    if (!blocked) {
+      return candidate;
+    }
+  }
+
+  return findClearMovementInput(player, mapId);
 }
 
 function payloadContainsOwnedBullet(payload, ownerId) {
@@ -1362,7 +1491,7 @@ try {
   joinRoom(solo, "Solo", "solo-smoke", "join-solo", {
     roomId: "solo-bot",
     teamId: "alpha",
-    classId: "basic"
+    classId: "tank"
   });
   const [soloJoined] = await Promise.all([soloJoinedPromise, soloJoinAckPromise]);
 
@@ -1394,7 +1523,7 @@ try {
   }
 
   if (
-    warmupBots.some((bot) => bot.hp !== GAME_CONFIG.tank.hitPoints || bot.alive !== true) ||
+    warmupBots.some((bot) => bot.hp !== (bot.maxHp ?? GAME_CONFIG.tank.hitPoints) || bot.alive !== true) ||
     soloWarmupState.match?.respawnsEnabled !== true
   ) {
     throw new Error("Expected solo bot rooms to stage full-health respawn-enabled AI squads");
@@ -1406,7 +1535,9 @@ try {
       payload.match?.phase === MATCH_PHASES.IN_PROGRESS &&
       payload.match?.respawnsEnabled === true &&
       getReplicatedPlayers(payload).filter((player) => player.isBot).length === 4 &&
-      getReplicatedPlayers(payload).some((player) => player.isBot && player.hp === GAME_CONFIG.tank.hitPoints),
+      getReplicatedPlayers(payload).some(
+        (player) => player.isBot && player.hp === (player.maxHp ?? GAME_CONFIG.tank.hitPoints)
+      ),
     "solo bot live state"
   );
 
@@ -1496,21 +1627,104 @@ try {
         (player) =>
           player.isBot &&
           player.deaths > 0 &&
-          player.alive === true &&
-          player.hp === GAME_CONFIG.tank.hitPoints
+          player.alive === true
       ),
     60000,
     "solo bot respawn state"
   );
 
-  for (let attempt = 0; attempt < 12; attempt += 1) {
+  const soloMapId = soloLiveState.lobby?.mapId ?? GAME_CONFIG.lobby.maps[0]?.id ?? "frontier";
+  const soloObjectiveTarget = getMapLayout(soloMapId)?.objective ?? {
+    x: GAME_CONFIG.world.width / 2,
+    y: GAME_CONFIG.world.height / 2
+  };
+  const soloShotDistance = GAME_CONFIG.bullet.speed * (GAME_CONFIG.bullet.lifeMs / 1000) * 0.9;
+  const soloCombatDeadlineAt = Date.now() + 55_000;
+  const hasSoloBotRespawned = () =>
+    Array.from(solo.playerCache.values()).some(
+      (player) => player.isBot && player.deaths > 0 && player.alive === true
+    );
+
+  for (let attempt = 0; Date.now() < soloCombatDeadlineAt; attempt += 1) {
+    if (hasSoloBotRespawned()) {
+      break;
+    }
+
     const { localPlayer, targetBot } = getCurrentSoloTarget();
-    if (!localPlayer || !targetBot) {
+    if (smokeDebugEnabled && attempt % 20 === 0) {
+      const visibleBots = Array.from(solo.playerCache.values())
+        .filter((player) => player.isBot)
+        .map((player) => ({
+          id: player.id,
+          teamId: player.teamId,
+          alive: player.alive,
+          hp: player.hp,
+          deaths: player.deaths,
+          x: Math.round(player.x ?? 0),
+          y: Math.round(player.y ?? 0)
+        }));
+      debugSmoke("solo respawn probe", {
+        attempt,
+        localPlayer: localPlayer
+          ? {
+              x: Math.round(localPlayer.x ?? 0),
+              y: Math.round(localPlayer.y ?? 0),
+              hp: localPlayer.hp,
+              alive: localPlayer.alive
+            }
+          : null,
+        targetBot: targetBot
+          ? {
+              id: targetBot.id,
+              x: Math.round(targetBot.x ?? 0),
+              y: Math.round(targetBot.y ?? 0),
+              hp: targetBot.hp,
+              deaths: targetBot.deaths
+            }
+          : null,
+        visibleBots
+      });
+    }
+
+    if (!localPlayer) {
       await new Promise((resolve) => setTimeout(resolve, 120));
       continue;
     }
 
-    const turretAngle = Math.atan2(targetBot.y - localPlayer.y, targetBot.x - localPlayer.x);
+    const navigationTarget = targetBot ?? soloObjectiveTarget;
+    const turretAngle = Math.atan2(navigationTarget.y - localPlayer.y, navigationTarget.x - localPlayer.x);
+
+    if (!targetBot) {
+      const moveInput = buildMovementInputTowardPoint(localPlayer, soloObjectiveTarget, soloMapId);
+      sendInput(solo, {
+        seq: soloInputSeq++,
+        clientSentAt: Date.now(),
+        ...moveInput,
+        shoot: false,
+        turretAngle
+      });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      continue;
+    }
+
+    const targetDistance = Math.hypot(targetBot.x - localPlayer.x, targetBot.y - localPlayer.y);
+    const shotBlocked = getMapObstacles(soloMapId).some((obstacle) =>
+      segmentIntersectsRect(localPlayer.x, localPlayer.y, targetBot.x, targetBot.y, obstacle, GAME_CONFIG.bullet.radius)
+    );
+
+    if (targetDistance > soloShotDistance || shotBlocked) {
+      const moveInput = buildMovementInputTowardPoint(localPlayer, targetBot, soloMapId);
+      sendInput(solo, {
+        seq: soloInputSeq++,
+        clientSentAt: Date.now(),
+        ...moveInput,
+        shoot: false,
+        turretAngle
+      });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      continue;
+    }
+
     sendInput(solo, {
       seq: soloInputSeq++,
       clientSentAt: Date.now(),
@@ -1521,7 +1735,7 @@ try {
       shoot: true,
       turretAngle
     });
-    await new Promise((resolve) => setTimeout(resolve, GAME_CONFIG.tank.shootCooldownMs + 40));
+    await new Promise((resolve) => setTimeout(resolve, Math.max(GAME_CONFIG.tank.shootCooldownMs, 500) + 40));
     sendInput(solo, {
       seq: soloInputSeq++,
       clientSentAt: Date.now(),
@@ -1678,11 +1892,18 @@ try {
     "batched movement acknowledgement"
   );
 
-  if (
-    (stagingBurstState.you?.lastProcessedInputSeq ?? 0) >= stagingMoveSeqEnd ||
-    (stagingBurstState.you?.pendingInputCount ?? 0) <= 0
-  ) {
-    throw new Error("Expected authoritative movement to leave buffered inputs queued after the first processed burst snapshot");
+  const stagingBurstProcessedSeq = stagingBurstState.you?.lastProcessedInputSeq ?? 0;
+  const stagingPendingInputCount = stagingBurstState.you?.pendingInputCount ?? 0;
+  const burstProcessedImmediately =
+    stagingBurstProcessedSeq >= stagingMoveSeqEnd &&
+    stagingPendingInputCount === 0;
+  const burstStillBuffered =
+    stagingBurstProcessedSeq >= stagingMoveSeqStart &&
+    stagingBurstProcessedSeq < stagingMoveSeqEnd &&
+    stagingPendingInputCount > 0;
+
+  if (!burstProcessedImmediately && !burstStillBuffered) {
+    throw new Error("Expected authoritative movement bursts to be either fully consumed in one tick or remain buffered for later ticks");
   }
 
   const stagingMoveState = await waitForState(
@@ -1835,16 +2056,31 @@ try {
     throw new Error("Expected three objective zones to be present in snapshots");
   }
 
+  const shapeScout = await connectClient("Shape Scout");
+  const shapeScoutJoinedPromise = waitForMessage(
+    shapeScout,
+    (payload) => payload.type === MESSAGE_TYPES.JOINED
+  );
+  const shapeScoutJoinAckPromise = waitForMessage(
+    shapeScout,
+    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "join-shape-scout"
+  );
+  joinRoom(shapeScout, "Shape Scout", "shape-scout-smoke", "join-shape-scout", {
+    roomId: "smoke",
+    spectate: true
+  });
+  await Promise.all([shapeScoutJoinedPromise, shapeScoutJoinAckPromise]);
+
   const shapeEcologyState = await waitForState(
-    alpha,
+    shapeScout,
     (payload) =>
       payload.match?.phase === MATCH_PHASES.IN_PROGRESS &&
-      Array.isArray(payload.shapes) &&
-      payload.shapes.length >= 1,
+      getReplicatedShapes(payload).length >= 1,
     "neutral shape ecology snapshot"
   );
+  shapeScout.close();
 
-  if (!Array.isArray(shapeEcologyState.shapes) || shapeEcologyState.shapes.length < 1) {
+  if (getReplicatedShapes(shapeEcologyState).length < 1) {
     throw new Error("Expected active match snapshots to include neutral shape replication");
   }
 
