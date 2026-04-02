@@ -2666,8 +2666,8 @@ function populateClassTabs() {
 }
 
 function getTopLeftHudInset() {
-  const classTabsBottom = Math.max(0, Math.ceil(classTabsPanelElement?.getBoundingClientRect?.().bottom ?? 0));
-  const devBadgeBottom = devBadgeElement?.hidden ? 0 : Math.max(0, Math.ceil(devBadgeElement?.getBoundingClientRect?.().bottom ?? 0));
+  const classTabsBottom = Math.max(0, Math.ceil(getCanvasOverlayRect(classTabsPanelElement)?.bottom ?? 0));
+  const devBadgeBottom = Math.max(0, Math.ceil(getCanvasOverlayRect(devBadgeElement)?.bottom ?? 0));
   return Math.max(14, classTabsBottom + 10, devBadgeBottom + 10);
 }
 
@@ -2676,6 +2676,38 @@ function createRoomCode() {
 }
 
 function createCommanderName() {
+function getCanvasOverlayRect(element) {
+  if (!element || element.hidden || !canvas?.getBoundingClientRect) {
+    return null;
+  }
+
+  const elementRect = element.getBoundingClientRect?.();
+  const canvasRect = canvas.getBoundingClientRect();
+  if (!elementRect || !canvasRect) {
+    return null;
+  }
+
+  const scaleX = canvas.width / Math.max(1, canvasRect.width);
+  const scaleY = canvas.height / Math.max(1, canvasRect.height);
+  const left = clamp((elementRect.left - canvasRect.left) * scaleX, 0, canvas.width);
+  const top = clamp((elementRect.top - canvasRect.top) * scaleY, 0, canvas.height);
+  const right = clamp((elementRect.right - canvasRect.left) * scaleX, 0, canvas.width);
+  const bottom = clamp((elementRect.bottom - canvasRect.top) * scaleY, 0, canvas.height);
+
+  if (right - left < 2 || bottom - top < 2) {
+    return null;
+  }
+
+  return {
+    left,
+    top,
+    right,
+    bottom,
+    width: right - left,
+    height: bottom - top
+  };
+}
+
   return `Cmdr-${profileId.slice(0, 4).toUpperCase()}`;
 }
 
@@ -8164,12 +8196,13 @@ function buildExpandedDebugIssueBoardHeaderLines(aiReport, options = {}) {
 }
 
 function drawExpandedDebugIssueBoard(aiReport, issues, options = {}) {
-  const boardX = 12;
-  const boardY = 12;
-  const boardWidth = Math.max(320, canvas.width - 24);
-  const boardHeight = Math.max(240, canvas.height - 24);
+  const boardRect = getExpandedDebugIssueBoardRect();
+  const boardX = boardRect.x;
+  const boardY = boardRect.y;
+  const boardWidth = boardRect.width;
+  const boardHeight = boardRect.height;
   const headerPaddingX = 16;
-  const headerFontSize = canvas.width < 1100 ? 11 : 12;
+  const headerFontSize = boardWidth < 1100 ? 11 : 12;
   const headerLineHeight = headerFontSize + 5;
   const headerCharBudget = Math.max(36, Math.floor((boardWidth - headerPaddingX * 2) / 7.2));
   const headerLines = buildExpandedDebugIssueBoardHeaderLines(aiReport, options)
@@ -8183,6 +8216,162 @@ function drawExpandedDebugIssueBoard(aiReport, issues, options = {}) {
   context.save();
   context.textAlign = "left";
   context.fillStyle = "rgba(4, 8, 16, 0.92)";
+function rectsOverlap(a, b) {
+  return Boolean(
+    a &&
+    b &&
+    a.x < b.right &&
+    a.x + a.width > b.left &&
+    a.y < b.bottom &&
+    a.y + a.height > b.top
+  );
+}
+
+function normalizeBoardRect(rect) {
+  if (!rect) {
+    return null;
+  }
+
+  const x = Math.round(rect.x);
+  const y = Math.round(rect.y);
+  const width = Math.round(rect.width);
+  const height = Math.round(rect.height);
+  if (width < 320 || height < 220) {
+    return null;
+  }
+
+  return { x, y, width, height };
+}
+
+function avoidBoardOverlay(rect, overlayRect, options = {}) {
+  if (!rect || !overlayRect || !rectsOverlap(rect, overlayRect)) {
+    return rect;
+  }
+
+  const gap = Math.max(0, Math.round(options.gap ?? 14));
+  const minWidth = Math.max(320, Math.round(options.minWidth ?? 320));
+  const minHeight = Math.max(220, Math.round(options.minHeight ?? 220));
+  const variants = [];
+
+  const widthBeforeOverlay = Math.floor(overlayRect.left - gap - rect.x);
+  if (widthBeforeOverlay >= minWidth) {
+    variants.push({
+      x: rect.x,
+      y: rect.y,
+      width: widthBeforeOverlay,
+      height: rect.height
+    });
+  }
+
+  const heightBeforeOverlay = Math.floor(overlayRect.top - gap - rect.y);
+  if (heightBeforeOverlay >= minHeight) {
+    variants.push({
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: heightBeforeOverlay
+    });
+  }
+
+  if (variants.length === 0) {
+    return rect;
+  }
+
+  variants.sort((a, b) => b.width * b.height - a.width * a.height);
+  return variants[0];
+}
+
+function getExpandedDebugIssueBoardRect() {
+  const outerMargin = 12;
+  const overlayGap = 16;
+  const minWidth = 320;
+  const minHeight = 220;
+  const defaultRect = {
+    x: outerMargin,
+    y: outerMargin,
+    width: Math.max(minWidth, canvas.width - outerMargin * 2),
+    height: Math.max(minHeight, canvas.height - outerMargin * 2)
+  };
+  const classTabsRect = getCanvasOverlayRect(classTabsPanelElement);
+  const scoreboardRect = getCanvasOverlayRect(scoreboardPanelElement);
+  const diagnosticRect =
+    diagnosticBannerElement?.classList?.contains("diagnostic-banner--debug")
+      ? getCanvasOverlayRect(diagnosticBannerElement)
+      : null;
+  const devBadgeRect = getCanvasOverlayRect(devBadgeElement);
+  const topInset = Math.max(
+    outerMargin,
+    Math.ceil(classTabsRect?.bottom ?? 0) + overlayGap,
+    Math.ceil(scoreboardRect?.bottom ?? 0) + overlayGap,
+    Math.ceil(devBadgeRect?.bottom ?? 0) + overlayGap
+  );
+  const candidates = [];
+
+  const centerRect = normalizeBoardRect({
+    x: Math.max(outerMargin, Math.ceil(classTabsRect?.right ?? 0) + overlayGap),
+    y: outerMargin,
+    width:
+      Math.min(canvas.width - outerMargin, Math.floor(scoreboardRect?.left ?? canvas.width) - overlayGap) -
+      Math.max(outerMargin, Math.ceil(classTabsRect?.right ?? 0) + overlayGap),
+    height: canvas.height - outerMargin * 2
+  });
+  if (centerRect) {
+    candidates.push({
+      rect: avoidBoardOverlay(centerRect, diagnosticRect, {
+        gap: overlayGap,
+        minWidth,
+        minHeight
+      }),
+      priority:
+        classTabsRect &&
+        scoreboardRect &&
+        centerRect.width >= 520
+          ? 2
+          : 1
+    });
+  }
+
+  const belowTopRect = normalizeBoardRect({
+    x: outerMargin,
+    y: topInset,
+    width: canvas.width - outerMargin * 2,
+    height: canvas.height - topInset - outerMargin
+  });
+  if (belowTopRect) {
+    candidates.push({
+      rect: avoidBoardOverlay(belowTopRect, diagnosticRect, {
+        gap: overlayGap,
+        minWidth,
+        minHeight
+      }),
+      priority: 1
+    });
+  }
+
+  const fallbackRect = avoidBoardOverlay(defaultRect, diagnosticRect, {
+    gap: overlayGap,
+    minWidth,
+    minHeight
+  });
+  candidates.push({ rect: fallbackRect, priority: 0 });
+
+  candidates.sort((left, right) => {
+    const priorityDelta = right.priority - left.priority;
+    if (priorityDelta !== 0) {
+      return priorityDelta;
+    }
+
+    const areaDelta = right.rect.width * right.rect.height - left.rect.width * left.rect.height;
+    if (areaDelta !== 0) {
+      return areaDelta;
+    }
+
+    return left.rect.y - right.rect.y;
+  });
+
+  return candidates[0]?.rect ?? defaultRect;
+}
+
   context.fillRect(boardX, boardY, boardWidth, boardHeight);
   context.strokeStyle = "rgba(102, 206, 255, 0.24)";
   context.lineWidth = 1;
