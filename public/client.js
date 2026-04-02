@@ -1229,8 +1229,11 @@ function getLocalPredictionDelta() {
 }
 
 function getExpectedPredictionSlackDistance(now = Date.now()) {
-  const oneWayLatencyMs = Math.max(0, Number(latestLatencyMs) || 0) * 0.5;
-  const jitterAllowanceMs = Math.min(LOCAL_PREDICTION.stallSoftLimitMs, getLatencyJitterMs()) * 0.4;
+  const oneWayLatencyMs = Math.max(
+    Math.max(0, Number(latestLatencyMs) || 0) * 0.5,
+    getRemoteInterpolationBackTimeMs()
+  );
+  const jitterAllowanceMs = Math.min(LOCAL_PREDICTION.stallSoftLimitMs, getLatencyJitterMs()) * 0.7;
   const snapshotAllowanceMs = Math.max(
     0,
     Math.min(
@@ -1249,7 +1252,14 @@ function getExpectedPredictionSlackDistance(now = Date.now()) {
 function getActionablePredictionErrorDistance(now = Date.now()) {
   return Math.max(
     DEBUG_MONITOR.correctionIssueDistance,
-    Math.round(getExpectedPredictionSlackDistance(now) + Math.max(6, getLocalBodyRadius() * 0.25))
+    Math.round(getExpectedPredictionSlackDistance(now) + Math.max(8, getLocalBodyRadius() * 0.4))
+  );
+}
+
+function getActionableHighJitterThresholdMs() {
+  return Math.max(
+    DEBUG_MONITOR.highJitterMs + 4,
+    Math.round(Math.max(0, Number(latestLatencyMs) || 0) * 0.28)
   );
 }
 
@@ -1634,6 +1644,7 @@ function getDynamicDebugIssues(now = Date.now()) {
 
   const issues = [];
   const jitterMs = getLatencyJitterMs();
+  const actionableJitterThresholdMs = getActionableHighJitterThresholdMs();
   const packetLossPercent = getPacketLossPercent(now);
   const snapshotDelayMs = lastSnapshotAt ? Math.round(performance.now() - lastSnapshotAt) : 0;
   const estimatedTickRate = Number(debugMonitor.estimatedServerTickRate) || GAME_CONFIG.serverTickRate;
@@ -1651,7 +1662,7 @@ function getDynamicDebugIssues(now = Date.now()) {
     issues.push(buildDynamicDebugIssue("high_ping", `Ping is high at ${Math.round(latestLatencyMs)}ms`, "warn", now));
   }
 
-  if (jitterMs >= DEBUG_MONITOR.highJitterMs) {
+  if (debugMonitor.latencySamples.length >= 6 && jitterMs >= actionableJitterThresholdMs) {
     issues.push(buildDynamicDebugIssue("high_jitter", `Jitter is high at ${Math.round(jitterMs)}ms`, "warn", now));
   }
 
@@ -2665,17 +2676,6 @@ function populateClassTabs() {
   refreshClassTabs();
 }
 
-function getTopLeftHudInset() {
-  const classTabsBottom = Math.max(0, Math.ceil(getCanvasOverlayRect(classTabsPanelElement)?.bottom ?? 0));
-  const devBadgeBottom = Math.max(0, Math.ceil(getCanvasOverlayRect(devBadgeElement)?.bottom ?? 0));
-  return Math.max(14, classTabsBottom + 10, devBadgeBottom + 10);
-}
-
-function createRoomCode() {
-  return crypto.randomUUID().slice(0, 8).toLowerCase();
-}
-
-function createCommanderName() {
 function getCanvasOverlayRect(element) {
   if (!element || element.hidden || !canvas?.getBoundingClientRect) {
     return null;
@@ -2708,6 +2708,17 @@ function getCanvasOverlayRect(element) {
   };
 }
 
+function getTopLeftHudInset() {
+  const classTabsBottom = Math.max(0, Math.ceil(getCanvasOverlayRect(classTabsPanelElement)?.bottom ?? 0));
+  const devBadgeBottom = Math.max(0, Math.ceil(getCanvasOverlayRect(devBadgeElement)?.bottom ?? 0));
+  return Math.max(14, classTabsBottom + 10, devBadgeBottom + 10);
+}
+
+function createRoomCode() {
+  return crypto.randomUUID().slice(0, 8).toLowerCase();
+}
+
+function createCommanderName() {
   return `Cmdr-${profileId.slice(0, 4).toUpperCase()}`;
 }
 
@@ -4319,6 +4330,13 @@ function collidesWithObstacle(x, y, radius = GAME_CONFIG.tank.radius) {
   return getActiveMapLayout().obstacles.some((obstacle) => circleIntersectsRect(x, y, radius, obstacle));
 }
 
+function getShapeCollisionPosition(shape) {
+  return {
+    x: Number.isFinite(Number(shape?.x)) ? Number(shape.x) : (shape?.targetX ?? shape?.renderX ?? 0),
+    y: Number.isFinite(Number(shape?.y)) ? Number(shape.y) : (shape?.targetY ?? shape?.renderY ?? 0)
+  };
+}
+
 function collidesWithBlockingShape(x, y, radius = GAME_CONFIG.tank.radius, options = {}) {
   const { excludeId = null } = options;
   for (const shape of shapes.values()) {
@@ -4326,8 +4344,9 @@ function collidesWithBlockingShape(x, y, radius = GAME_CONFIG.tank.radius, optio
       continue;
     }
 
-    const shapeX = shape.renderX ?? shape.x;
-    const shapeY = shape.renderY ?? shape.y;
+    const collisionPosition = getShapeCollisionPosition(shape);
+    const shapeX = collisionPosition.x;
+    const shapeY = collisionPosition.y;
     const shapeRadius = shape.radius ?? 20;
     if (circleIntersectsCircle(x, y, radius, shapeX, shapeY, shapeRadius)) {
       return true;
@@ -4349,8 +4368,9 @@ function resolvePredictedShapeCollisions(x, y, radius = GAME_CONFIG.tank.radius,
         continue;
       }
 
-      const shapeX = shape.renderX ?? shape.x;
-      const shapeY = shape.renderY ?? shape.y;
+      const collisionPosition = getShapeCollisionPosition(shape);
+      const shapeX = collisionPosition.x;
+      const shapeY = collisionPosition.y;
       const shapeRadius = shape.radius ?? 20;
       const dx = resolvedX - shapeX;
       const dy = resolvedY - shapeY;
@@ -8195,27 +8215,6 @@ function buildExpandedDebugIssueBoardHeaderLines(aiReport, options = {}) {
   return headerLines;
 }
 
-function drawExpandedDebugIssueBoard(aiReport, issues, options = {}) {
-  const boardRect = getExpandedDebugIssueBoardRect();
-  const boardX = boardRect.x;
-  const boardY = boardRect.y;
-  const boardWidth = boardRect.width;
-  const boardHeight = boardRect.height;
-  const headerPaddingX = 16;
-  const headerFontSize = boardWidth < 1100 ? 11 : 12;
-  const headerLineHeight = headerFontSize + 5;
-  const headerCharBudget = Math.max(36, Math.floor((boardWidth - headerPaddingX * 2) / 7.2));
-  const headerLines = buildExpandedDebugIssueBoardHeaderLines(aiReport, options)
-    .flatMap((line) => wrapMonospaceDebugText(line, headerCharBudget));
-  const headerHeight = 18 + headerLines.length * headerLineHeight;
-  const issueAreaY = boardY + headerHeight + 10;
-  const issueAreaHeight = Math.max(120, boardHeight - headerHeight - 22);
-  const issueAreaWidth = boardWidth - 24;
-  const layout = buildExpandedDebugIssueBoardLayout(issues, issueAreaWidth, issueAreaHeight);
-
-  context.save();
-  context.textAlign = "left";
-  context.fillStyle = "rgba(4, 8, 16, 0.92)";
 function rectsOverlap(a, b) {
   return Boolean(
     a &&
@@ -8372,6 +8371,27 @@ function getExpandedDebugIssueBoardRect() {
   return candidates[0]?.rect ?? defaultRect;
 }
 
+function drawExpandedDebugIssueBoard(aiReport, issues, options = {}) {
+  const boardRect = getExpandedDebugIssueBoardRect();
+  const boardX = boardRect.x;
+  const boardY = boardRect.y;
+  const boardWidth = boardRect.width;
+  const boardHeight = boardRect.height;
+  const headerPaddingX = 16;
+  const headerFontSize = boardWidth < 1100 ? 11 : 12;
+  const headerLineHeight = headerFontSize + 5;
+  const headerCharBudget = Math.max(36, Math.floor((boardWidth - headerPaddingX * 2) / 7.2));
+  const headerLines = buildExpandedDebugIssueBoardHeaderLines(aiReport, options)
+    .flatMap((line) => wrapMonospaceDebugText(line, headerCharBudget));
+  const headerHeight = 18 + headerLines.length * headerLineHeight;
+  const issueAreaY = boardY + headerHeight + 10;
+  const issueAreaHeight = Math.max(120, boardHeight - headerHeight - 22);
+  const issueAreaWidth = boardWidth - 24;
+  const layout = buildExpandedDebugIssueBoardLayout(issues, issueAreaWidth, issueAreaHeight);
+
+  context.save();
+  context.textAlign = "left";
+  context.fillStyle = "rgba(4, 8, 16, 0.92)";
   context.fillRect(boardX, boardY, boardWidth, boardHeight);
   context.strokeStyle = "rgba(102, 206, 255, 0.24)";
   context.lineWidth = 1;
