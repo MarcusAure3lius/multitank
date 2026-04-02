@@ -9937,6 +9937,13 @@ function createInputFrame(payload, receivedAt) {
   };
 }
 
+function estimateServerTimelineAtWallTime(wallTime = Date.now()) {
+  const resolvedWallTime = Number.isFinite(Number(wallTime)) ? Number(wallTime) : Date.now();
+  const tickAnchorWallTime = Number.isFinite(lastRealtimeTickAt) ? lastRealtimeTickAt : resolvedWallTime;
+  const tickAnchorTimeline = Number.isFinite(simulatedNowMs) ? simulatedNowMs : resolvedWallTime;
+  return tickAnchorTimeline + Math.max(0, resolvedWallTime - tickAnchorWallTime);
+}
+
 function capturePlayerInputState(player) {
   return {
     seq: player.input.seq,
@@ -10054,7 +10061,8 @@ function handleInput(socket, payload, now) {
     return;
   }
 
-  const inputResult = createInputFrame(payload, now);
+  const inputTimelineNow = estimateServerTimelineAtWallTime(now);
+  const inputResult = createInputFrame(payload, inputTimelineNow);
   if (!inputResult.ok) {
     recordPlayerDebugSignal(player, inputResult.code, inputResult.message, now, {
       severity: "error",

@@ -385,7 +385,7 @@ export const GAME_CONFIG = Object.freeze({
     historyMs: 1500,
     maxProjectileCompensationMs: 120,
     fairnessBiasMs: 35,
-    projectileCatchupStepMs: 16,
+    projectileCatchupStepMs: 33,
     maxHistoricalSampleGapMs: 250
   }),
   economy: Object.freeze({

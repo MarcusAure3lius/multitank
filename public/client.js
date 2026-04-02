@@ -113,7 +113,7 @@ const NETWORK_RENDER = Object.freeze({
 });
 
 const LOCAL_PROJECTILE_HANDOFF = Object.freeze({
-  maxMatchDistance: 160,
+  maxMatchDistance: 220,
   settleRate: 18
 });
 
@@ -153,7 +153,8 @@ const DEBUG_MONITOR = Object.freeze({
   packetWindowSize: 24,
   pingTimeoutMs: 6_000,
   correctionWindowMs: 4_000,
-  frequentCorrectionThreshold: 5,
+  frequentCorrectionThreshold: 8,
+  correctionIssueDistance: Math.max(10, Math.round(GAME_CONFIG.tank.radius * 0.5)),
   highPingMs: 160,
   highJitterMs: 24,
   highPacketLossPercent: 10,
@@ -162,10 +163,11 @@ const DEBUG_MONITOR = Object.freeze({
   inputSeqJumpWarning: 12,
   frameSpikeMs: 34,
   tickRateLowRatio: 0.85,
-  predictedShotTimeoutMs: 450,
+  predictedShotTimeoutMs: 650,
   bulletVolleyWindowMs: 80,
   fireRateSlack: 0.45,
   staleReliableActionMs: 2_500,
+  movementSampleWindowMs: 750,
   entitySpeedSlack: 2.2,
   teleportDistance: 240,
   bulletTrackTtlMs: GAME_CONFIG.bullet.lifeMs + 2_000
@@ -522,11 +524,13 @@ function notePingSent(sentAt = Date.now()) {
 
 function notePong(sentAt, now = Date.now()) {
   prunePendingPingSamples(now);
-  if (debugMonitor.pendingPings.delete(sentAt)) {
-    pushPacketWindowSample(1);
+  const normalizedSentAt = Number(sentAt);
+  if (!Number.isFinite(normalizedSentAt) || !debugMonitor.pendingPings.delete(normalizedSentAt)) {
+    return null;
   }
+  pushPacketWindowSample(1);
 
-  const rtt = Math.max(0, now - sentAt);
+  const rtt = Math.max(0, now - normalizedSentAt);
   debugMonitor.latencySamples.push({
     at: now,
     rtt
@@ -535,6 +539,8 @@ function notePong(sentAt, now = Date.now()) {
   while (debugMonitor.latencySamples.length > DEBUG_MONITOR.latencySampleSize) {
     debugMonitor.latencySamples.shift();
   }
+
+  return rtt;
 }
 
 function getLatencyJitterMs() {
@@ -685,7 +691,7 @@ function getLocalPredictionDelta() {
 
 function noteReconciliation(distanceError, options = {}) {
   const now = Date.now();
-  if (distanceError <= 0.5 && !options.stalledStream) {
+  if (distanceError < DEBUG_MONITOR.correctionIssueDistance) {
     return;
   }
 
@@ -697,18 +703,16 @@ function noteReconciliation(distanceError, options = {}) {
     (event) => now - event.at <= DEBUG_MONITOR.correctionWindowMs
   );
 
-  if (distanceError >= 4 || options.stalledStream) {
-    recordDebugEvent("desync_detected", `Client/server state diverged by ${Math.round(distanceError)} units`, {
-      severity: distanceError >= LOCAL_PREDICTION.snapGap || options.stalledStream ? "error" : "warn",
-      ttlMs: 8_000,
-      key: "desync_detected"
-    });
-    recordDebugEvent("movement_corrected_by_server", `Server reconciliation corrected ${Math.round(distanceError)} units`, {
-      severity: distanceError >= LOCAL_PREDICTION.snapGap ? "error" : "warn",
-      ttlMs: 8_000,
-      key: "movement_corrected_by_server"
-    });
-  }
+  recordDebugEvent("desync_detected", `Client/server state diverged by ${Math.round(distanceError)} units`, {
+    severity: distanceError >= LOCAL_PREDICTION.snapGap ? "error" : "warn",
+    ttlMs: 8_000,
+    key: "desync_detected"
+  });
+  recordDebugEvent("movement_corrected_by_server", `Server reconciliation corrected ${Math.round(distanceError)} units`, {
+    severity: distanceError >= LOCAL_PREDICTION.snapGap ? "error" : "warn",
+    ttlMs: 8_000,
+    key: "movement_corrected_by_server"
+  });
 
   if (distanceError >= LOCAL_PREDICTION.maxSmoothGap) {
     recordDebugEvent(
@@ -724,7 +728,7 @@ function noteReconciliation(distanceError, options = {}) {
 
   if (
     Math.max(0, Number(options.pendingReplayCount ?? pendingInputs.length) || 0) >= DEBUG_MONITOR.replayInputWarningCount &&
-    distanceError >= 4
+    distanceError >= DEBUG_MONITOR.correctionIssueDistance
   ) {
     recordDebugEvent(
       "large_correction_after_replay",
@@ -803,6 +807,9 @@ function noteSnapshotDebugState(payload, now = Date.now()) {
   const playersInSnapshot = Array.isArray(payload?.players) ? payload.players : [];
   const bulletsInSnapshot = Array.isArray(payload?.bullets) ? payload.bullets : [];
   const playersById = new Map();
+  const snapshotPhase = payload?.match?.phase ?? latestMatch?.phase ?? "";
+  const snapshotRoundNumber = Number(payload?.match?.roundNumber ?? latestMatch?.roundNumber ?? 0) || 0;
+  const snapshotRoundKey = `${snapshotPhase}:${snapshotRoundNumber}`;
 
   for (const player of playersInSnapshot) {
     if (player?.id) {
@@ -852,10 +859,19 @@ function noteSnapshotDebugState(payload, now = Date.now()) {
     const previousState = debugMonitor.lastKnownPlayers.get(player.id);
     if (previousState) {
       const elapsedMs = now - Number(previousState.at ?? now);
+      const sameRound = previousState.roundKey === snapshotRoundKey;
+      const sameTeam = previousState.teamId === player.teamId;
+      const canCompareMovement =
+        elapsedMs > 0 &&
+        elapsedMs <= DEBUG_MONITOR.movementSampleWindowMs &&
+        sameRound &&
+        sameTeam;
       const movedDistance = Math.hypot(player.x - previousState.x, player.y - previousState.y);
-      if (elapsedMs > 0 && previousState.alive && player.alive) {
+      const crossedSpawnBoundary = canCompareMovement && crossedOwnSpawnBoundary(player.teamId, previousState.x, player.x);
+      const recentlyDead = previousState.lastSeenDeadAt != null && (now - previousState.lastSeenDeadAt < 2_000);
+      if (canCompareMovement && previousState.alive && player.alive && !recentlyDead) {
         const speed = movedDistance / (elapsedMs / 1000);
-        if (speed > GAME_CONFIG.tank.speed * DEBUG_MONITOR.entitySpeedSlack) {
+        if (!crossedSpawnBoundary && speed > GAME_CONFIG.tank.speed * DEBUG_MONITOR.entitySpeedSlack) {
           recordDebugEvent(
             "movement_speed_too_high",
             `${player.name ?? player.id} moved at ${Math.round(speed)} units/s`,
@@ -866,17 +882,17 @@ function noteSnapshotDebugState(payload, now = Date.now()) {
             }
           );
         }
+
+        if (!crossedSpawnBoundary && movedDistance > DEBUG_MONITOR.teleportDistance) {
+          recordDebugEvent("teleport_detected", `${player.name ?? player.id} jumped ${Math.round(movedDistance)} units`, {
+            severity: "warn",
+            ttlMs: 8_000,
+            key: `teleport_detected:${player.id}`
+          });
+        }
       }
 
-      if (movedDistance > DEBUG_MONITOR.teleportDistance) {
-        recordDebugEvent("teleport_detected", `${player.name ?? player.id} jumped ${Math.round(movedDistance)} units`, {
-          severity: "warn",
-          ttlMs: 8_000,
-          key: `teleport_detected:${player.id}`
-        });
-      }
-
-      if (!player.alive && movedDistance > 8) {
+      if (canCompareMovement && !crossedSpawnBoundary && !player.alive && movedDistance > 8) {
         recordDebugEvent("dead_player_still_acting", `${player.name ?? player.id} moved after death`, {
           severity: "error",
           ttlMs: 10_000,
@@ -885,15 +901,19 @@ function noteSnapshotDebugState(payload, now = Date.now()) {
       }
     }
 
+    const prevLastSeenDeadAt = previousState?.lastSeenDeadAt ?? null;
     debugMonitor.lastKnownPlayers.set(player.id, {
       id: player.id,
       name: player.name,
       x: Number(player.x) || 0,
       y: Number(player.y) || 0,
       alive: Boolean(player.alive),
+      teamId: player.teamId,
       classId: player.classId,
       tankClassId: player.tankClassId ?? player.classId,
-      at: now
+      roundKey: snapshotRoundKey,
+      at: now,
+      lastSeenDeadAt: !player.alive ? now : prevLastSeenDeadAt
     });
   }
 
@@ -4075,7 +4095,6 @@ function dispatchLocalInput(options = {}) {
     return null;
   }
 
-  const previousDispatchAt = lastInputDispatchAt;
   const inputFrame = createInputFrame(liveInputState);
   send(serializeInputFrame(inputFrame));
   lastInputDispatchAt = getInputTimelineSentAt(inputFrame);
@@ -4094,24 +4113,6 @@ function dispatchLocalInput(options = {}) {
     localPlayer.lastPredictedShotAt = Date.now();
     spawnPredictedProjectile(localPlayer, inputFrame);
   }
-
-  const visualState = ensureLocalVisualState(localPlayer);
-  const predictionScale = getPredictionScaleForGapMs(getStatePacketAgeMs());
-  const predictionStepSeconds =
-    previousDispatchAt > 0
-      ? clamp((getInputTimelineSentAt(inputFrame) - previousDispatchAt) / 1000, 1 / 120, CLIENT_TICK.fixedDeltaSeconds)
-      : CLIENT_TICK.fixedDeltaSeconds;
-  const predicted = simulateTankMovement(
-    {
-      x: visualState?.x ?? localPlayer.renderX ?? localPlayer.x,
-      y: visualState?.y ?? localPlayer.renderY ?? localPlayer.y,
-      angle: visualState?.angle ?? localPlayer.renderAngle ?? localPlayer.angle,
-      turretAngle: visualState?.turretAngle ?? localPlayer.renderTurretAngle ?? localPlayer.turretAngle
-    },
-    inputFrame,
-    predictionStepSeconds * predictionScale
-  );
-  applyLocalPredictedState(localPlayer, predicted);
 
   return inputFrame;
 }
@@ -4633,6 +4634,10 @@ function applySnapshot(payload) {
 
   const previousSnapshotSeq = lastAppliedSnapshotSeq;
   const previousProcessedInputSeq = latestYou?.lastProcessedInputSeq ?? 0;
+  const previousMatchPhase = latestMatch?.phase ?? null;
+  const previousRoundNumber = Number(latestMatch?.roundNumber ?? 0) || 0;
+  const nextMatchPhase = payload.match?.phase ?? previousMatchPhase;
+  const nextRoundNumber = Number(payload.match?.roundNumber ?? previousRoundNumber) || previousRoundNumber;
   const replicationStatus = applyReplication(payload.replication, payload.serverTime, previousSnapshotSeq);
 
   if (replicationStatus === "resync") {
@@ -4652,6 +4657,14 @@ function applySnapshot(payload) {
   syncServerClock(payload.serverTime, performance.now());
   syncServerDebugSnapshot(payload.debug, Date.now());
   noteServerTickSample(payload.simulationTick, performance.now(), payload.tickRate);
+  if (
+    (previousMatchPhase && nextMatchPhase && nextMatchPhase !== previousMatchPhase) ||
+    (previousRoundNumber > 0 && nextRoundNumber > 0 && nextRoundNumber !== previousRoundNumber)
+  ) {
+    debugMonitor.lastKnownPlayers.clear();
+    debugMonitor.knownBullets.clear();
+    debugMonitor.lastVolleyByOwner.clear();
+  }
   noteSnapshotDebugState(payload, Date.now());
   lastAppliedSnapshotSeq = snapshotSeq;
   lastSimulationTick = Number(payload.simulationTick) || lastSimulationTick;
@@ -5167,9 +5180,11 @@ function connect(options = {}) {
     }
 
     if (payload.type === MESSAGE_TYPES.PONG) {
-      latestLatencyMs = Math.max(0, Date.now() - Number(payload.sentAt));
-      notePong(Number(payload.sentAt), Date.now());
-      latencyElement.textContent = `${latestLatencyMs} ms`;
+      const rtt = notePong(Number(payload.sentAt), Date.now());
+      if (Number.isFinite(rtt)) {
+        latestLatencyMs = rtt;
+        latencyElement.textContent = `${latestLatencyMs} ms`;
+      }
       return;
     }
 
