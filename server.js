@@ -3240,6 +3240,7 @@ function queueAnimationStateEvent(room, player, action, now, extras = {}) {
       playerId: player.id,
       action,
       eventSeq: player.animation.eventSeq,
+      inputSeq: Math.max(0, Number(extras.inputSeq ?? 0) || 0),
       emoteId: extras.emoteId ?? null,
       animation: player.animation
     })
@@ -11886,7 +11887,9 @@ function updatePlayer(room, player, deltaSeconds, now) {
         clientSentAt: player.input.clientSentAt,
         inputSeq: player.input.seq
       });
-      queueAnimationStateEvent(room, player, ANIMATION_ACTIONS.FIRE, now);
+      queueAnimationStateEvent(room, player, ANIMATION_ACTIONS.FIRE, now, {
+        inputSeq: player.input.seq
+      });
 
       updateProfileStats(player.profileId, (stats) => {
         stats.shotsFired += 1;

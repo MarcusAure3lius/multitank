@@ -1299,6 +1299,7 @@ export function createAnimationEvent(event) {
     playerId: sanitizeText(event?.playerId ?? "", "", 96),
     action: Object.values(ANIMATION_ACTIONS).includes(event?.action) ? event.action : ANIMATION_ACTIONS.NONE,
     eventSeq: Math.max(0, readInteger(event?.eventSeq, 0)),
+    inputSeq: Math.max(0, readInteger(event?.inputSeq, 0)),
     animation: createAnimationState(event?.animation),
     emoteId: sanitizeText(event?.emoteId ?? "", "", 32) || null
   };

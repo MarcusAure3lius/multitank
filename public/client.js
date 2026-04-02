@@ -1063,23 +1063,36 @@ function notePong(sentAt, now = Date.now()) {
   return rtt;
 }
 
+function getMedianLatencyValue(values) {
+  const sorted = (values ?? [])
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value))
+    .sort((left, right) => left - right);
+  if (sorted.length === 0) {
+    return 0;
+  }
+
+  const middle = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[middle - 1] + sorted[middle]) * 0.5;
+  }
+
+  return sorted[middle];
+}
+
 function getLatencyJitterMs() {
   const now = Date.now();
   debugMonitor.latencySamples = debugMonitor.latencySamples.filter(
     (sample) => now - Number(sample?.at ?? 0) <= DEBUG_MONITOR.latencySampleWindowMs
   );
-  if (debugMonitor.latencySamples.length < 2) {
+  const recentSamples = debugMonitor.latencySamples.slice(-8).map((sample) => Number(sample?.rtt ?? 0));
+  if (recentSamples.length < 4) {
     return 0;
   }
 
-  let totalVariance = 0;
-  let comparisons = 0;
-  for (let index = 1; index < debugMonitor.latencySamples.length; index += 1) {
-    totalVariance += Math.abs(debugMonitor.latencySamples[index].rtt - debugMonitor.latencySamples[index - 1].rtt);
-    comparisons += 1;
-  }
-
-  return comparisons > 0 ? totalVariance / comparisons : 0;
+  const medianRtt = getMedianLatencyValue(recentSamples);
+  const deviations = recentSamples.map((rtt) => Math.abs(rtt - medianRtt));
+  return getMedianLatencyValue(deviations);
 }
 
 function getPacketLossPercent(now = Date.now()) {
@@ -1548,9 +1561,33 @@ function notePredictedShotMatched(projectileId) {
   debugMonitor.pendingPredictedShots.delete(projectileId);
 }
 
-function prunePredictedShotExpectations(now = Date.now()) {
+function notePredictedShotConfirmedBySeq(inputSeq) {
+  const resolvedSeq = Math.max(0, Number(inputSeq) || 0);
+  if (resolvedSeq <= 0) {
+    return;
+  }
+
   for (const [projectileId, pendingShot] of debugMonitor.pendingPredictedShots.entries()) {
-    if (now - Number(pendingShot.createdAt ?? 0) < DEBUG_MONITOR.predictedShotTimeoutMs) {
+    if ((Number(pendingShot?.seq ?? 0) || 0) === resolvedSeq) {
+      debugMonitor.pendingPredictedShots.delete(projectileId);
+    }
+  }
+}
+
+function getPredictedShotTimeoutMs(now = Date.now()) {
+  const snapshotGapMs = lastSnapshotAt ? Math.max(0, performance.now() - lastSnapshotAt) : 0;
+  const networkSlackMs = Math.max(0, Number(latestLatencyMs) || 0) + Math.max(0, getLatencyJitterMs());
+  return clamp(
+    Math.round(DEBUG_MONITOR.predictedShotTimeoutMs + networkSlackMs + Math.min(220, snapshotGapMs)),
+    DEBUG_MONITOR.predictedShotTimeoutMs,
+    2_000
+  );
+}
+
+function prunePredictedShotExpectations(now = Date.now()) {
+  const timeoutMs = getPredictedShotTimeoutMs(now);
+  for (const [projectileId, pendingShot] of debugMonitor.pendingPredictedShots.entries()) {
+    if (now - Number(pendingShot.createdAt ?? 0) < timeoutMs) {
       continue;
     }
 
@@ -3274,6 +3311,9 @@ function triggerAnimationEvent(event) {
 
   switch (event.action) {
     case ANIMATION_ACTIONS.FIRE:
+      if (player.id === localPlayerId) {
+        notePredictedShotConfirmedBySeq(event.inputSeq);
+      }
       if (player.id === localPlayerId && now - (player.lastPredictedRecoilAt ?? -Infinity) <= 220) {
         player.muzzleFlashUntil = Math.max(player.muzzleFlashUntil ?? 0, now + 90);
         break;
@@ -4250,7 +4290,7 @@ function collidesWithObstacle(x, y, radius = GAME_CONFIG.tank.radius) {
 function collidesWithBlockingShape(x, y, radius = GAME_CONFIG.tank.radius, options = {}) {
   const { excludeId = null } = options;
   for (const shape of shapes.values()) {
-    if (!shape || shape.id === excludeId) {
+    if (!shape || shape.id === excludeId || (shape.hp ?? 0) <= 0) {
       continue;
     }
 
@@ -4273,7 +4313,7 @@ function resolvePredictedShapeCollisions(x, y, radius = GAME_CONFIG.tank.radius,
     let collided = false;
 
     for (const shape of shapes.values()) {
-      if (!shape) {
+      if (!shape || (shape.hp ?? 0) <= 0) {
         continue;
       }
 
@@ -4292,7 +4332,7 @@ function resolvePredictedShapeCollisions(x, y, radius = GAME_CONFIG.tank.radius,
       const dist = Math.sqrt(distSq);
       const nx = dist > 0.001 ? dx / dist : Math.cos(fallbackAngle);
       const ny = dist > 0.001 ? dy / dist : Math.sin(fallbackAngle);
-      const pushDistance = minDistance - Math.max(dist, 0.001) + 2;
+      const pushDistance = minDistance - Math.max(dist, 0.001) + 0.2;
       const targetX = clamp(
         resolvedX + nx * pushDistance,
         GAME_CONFIG.world.padding,
@@ -5011,7 +5051,6 @@ function dropAcknowledgedPendingInputs(lastProcessedInputSeq, lastProcessedInput
   while (
     pendingInputs.length > 0 &&
     (pendingInputs[0].seq <= lastProcessedInputSeq ||
-      getInputTimelineSentAt(pendingInputs[0]) <= lastProcessedInputClientSentAt ||
       getInputTimelineSentAt(pendingInputs[0]) < oldestAllowedClientSentAt)
   ) {
     pendingInputs.shift();
@@ -5237,6 +5276,7 @@ function applySnapshot(payload) {
 
   const previousSnapshotSeq = lastAppliedSnapshotSeq;
   const previousProcessedInputSeq = latestYou?.lastProcessedInputSeq ?? 0;
+  const previousProcessedInputClientSentAt = latestYou?.lastProcessedInputClientSentAt ?? 0;
   const previousMatchPhase = latestMatch?.phase ?? null;
   const previousRoundNumber = Number(latestMatch?.roundNumber ?? 0) || 0;
   const nextMatchPhase = payload.match?.phase ?? previousMatchPhase;
@@ -5286,8 +5326,20 @@ function applySnapshot(payload) {
   latestInterestStats = payload.replication?.interest ?? latestInterestStats;
 
   if (payload.you && previousProcessedInputSeq > 0) {
-    const processedSeqJump = Math.abs((payload.you.lastProcessedInputSeq ?? 0) - previousProcessedInputSeq);
-    if (processedSeqJump >= DEBUG_MONITOR.inputSeqJumpWarning) {
+    const processedSeqJump = Math.max(0, Number(payload.you.lastProcessedInputSeq ?? 0) - previousProcessedInputSeq);
+    const processedInputWindowMs = Math.max(
+      0,
+      Number(payload.you.lastProcessedInputClientSentAt ?? 0) - Number(previousProcessedInputClientSentAt ?? 0)
+    );
+    const expectedSeqJump =
+      processedInputWindowMs > 0
+        ? Math.max(1, Math.ceil(processedInputWindowMs / getLocalInputDispatchMinIntervalMs()))
+        : 1;
+    const jumpAllowance = Math.max(4, Math.ceil((Number(latestLatencyMs) || 0) / 40));
+    if (
+      processedSeqJump >= DEBUG_MONITOR.inputSeqJumpWarning &&
+      processedSeqJump > expectedSeqJump + jumpAllowance
+    ) {
       recordDebugEvent(
         "last_processed_input_seq_jump",
         `LastProcessedInputSeq jumped by ${processedSeqJump}`,
