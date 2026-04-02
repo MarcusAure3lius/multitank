@@ -1587,8 +1587,9 @@ function notePredictedShotConfirmedBySeq(inputSeq) {
 function getPredictedShotTimeoutMs(now = Date.now()) {
   const snapshotGapMs = lastSnapshotAt ? Math.max(0, performance.now() - lastSnapshotAt) : 0;
   const networkSlackMs = Math.max(0, Number(latestLatencyMs) || 0) + Math.max(0, getLatencyJitterMs());
+  const serverLagSlackMs = Math.max(0, Number(latestDebugInfo?.serverLoopLagMs ?? 0) || 0);
   return clamp(
-    Math.round(DEBUG_MONITOR.predictedShotTimeoutMs + networkSlackMs + Math.min(220, snapshotGapMs)),
+    Math.round(DEBUG_MONITOR.predictedShotTimeoutMs + networkSlackMs + Math.min(220, snapshotGapMs) + Math.min(300, serverLagSlackMs)),
     DEBUG_MONITOR.predictedShotTimeoutMs,
     2_000
   );

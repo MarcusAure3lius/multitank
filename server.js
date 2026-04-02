@@ -4138,26 +4138,32 @@ function buildViewerInterestSet(room, viewer, socket = null) {
   const bulletLimit = !viewer || viewer.isSpectator
     ? candidateBullets.length
     : GAME_CONFIG.replication.maxBulletRecordsPerSnapshot;
+  const playerPriorityCache = new Map(
+    candidatePlayers.map((c) => [c.id, computePlayerInterestPriority(room, viewer, c, knownEntities)])
+  );
+  const bulletPriorityCache = new Map(
+    candidateBullets.map((b) => [b.id, computeBulletInterestPriority(room, viewer, b, knownEntities)])
+  );
   const selectedPlayers = prioritizeEntities(
     candidatePlayers,
     playerLimit,
-    (candidate) => computePlayerInterestPriority(room, viewer, candidate, knownEntities),
+    (candidate) => playerPriorityCache.get(candidate.id),
     comparePlayersInSimulationOrder
   );
   const selectedBullets = prioritizeEntities(
     candidateBullets,
     bulletLimit,
-    (bullet) => computeBulletInterestPriority(room, viewer, bullet, knownEntities),
+    (bullet) => bulletPriorityCache.get(bullet.id),
     compareBulletsInInterestOrder
   );
   const objectiveState = createViewerObjectiveState(room, viewer);
   const prioritizedRecords = [
     ...selectedPlayers.map((candidate) => ({
-      priority: computePlayerInterestPriority(room, viewer, candidate, knownEntities),
+      priority: playerPriorityCache.get(candidate.id),
       record: createReplicationSnapshot(REPLICATION_KINDS.PLAYER, candidate, viewer)
     })),
     ...selectedBullets.map((bullet) => ({
-      priority: computeBulletInterestPriority(room, viewer, bullet, knownEntities),
+      priority: bulletPriorityCache.get(bullet.id),
       record: createReplicationSnapshot(REPLICATION_KINDS.BULLET, bullet)
     })),
     ...selectedShapes.map((shape) => ({
@@ -6953,7 +6959,14 @@ function sendStatePayload(socket, payload) {
   const byteLength = Buffer.byteLength(serialized, "utf8");
 
   if (byteLength <= GAME_CONFIG.network.maxStatePayloadBytes) {
-    return sendJson(socket, payload);
+    if (socket.readyState !== socket.OPEN) {
+      return false;
+    }
+    if (!canSendBytes(socket, byteLength)) {
+      return false;
+    }
+    socket.send(serialized);
+    return true;
   }
 
   const chunks = [];
