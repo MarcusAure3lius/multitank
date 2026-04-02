@@ -173,6 +173,464 @@ const DEBUG_MONITOR = Object.freeze({
   bulletTrackTtlMs: GAME_CONFIG.bullet.lifeMs + 2_000
 });
 
+const DEBUG_AI_REPORT_HOTKEY = "F8";
+const DEBUG_SUBSYSTEM_TAGS = Object.freeze({
+  ability: "ABLT",
+  combat: "CMBT",
+  input: "INPT",
+  network: "NET",
+  prediction: "PRED",
+  render: "RNDR",
+  replication: "REPL",
+  server: "SRV",
+  session: "SESS",
+  snapshot: "SNAP",
+  state: "STATE",
+  unknown: "GEN"
+});
+const DEBUG_SUBSYSTEM_INSPECT_TARGETS = Object.freeze({
+  ability: Object.freeze([
+    "public/client.js: reliable request + local UI gating",
+    "server.js: handleSpecialization / handleUpgrade / handleStatPoint",
+    "shared/protocol.js: specialization / upgrade payloads"
+  ]),
+  combat: Object.freeze([
+    "public/client.js: predicted shot tracking + combat HUD",
+    "server.js: projectile spawn / combat validation",
+    "shared/protocol.js: projectile snapshot fields"
+  ]),
+  input: Object.freeze([
+    "public/client.js: dispatchLocalInput + input timeline",
+    "server.js: handleInput + createInputFrame",
+    "shared/protocol.js: input packet normalize/encode"
+  ]),
+  network: Object.freeze([
+    "public/client.js: ping/pong tracking + socket state",
+    "server.js: websocket send cadence + heartbeat",
+    "deploy/runtime: region, proxy, and packet path"
+  ]),
+  prediction: Object.freeze([
+    "public/client.js: noteReconciliation + local prediction",
+    "public/client.js: applySnapshot + replay buffer",
+    "server.js: input processing order + state correction"
+  ]),
+  render: Object.freeze([
+    "public/client.js: render loop timing",
+    "public/client.js: updateRenderState + camera smoothing",
+    "browser runtime: tab visibility / GPU throttling"
+  ]),
+  replication: Object.freeze([
+    "public/client.js: snapshot chunk rebuild + resync",
+    "server.js: buildReplicationPayloadForSocket",
+    "shared/protocol.js: state/replication payload encode"
+  ]),
+  server: Object.freeze([
+    "server.js: main loop timing and room tick workload",
+    "server.js: buildDebugSnapshot + state payload",
+    "deploy/runtime: CPU contention or slow host"
+  ]),
+  session: Object.freeze([
+    "public/client.js: reconnect path + reliable join state",
+    "server.js: joinRoom + reconnect/session expiry",
+    "auth/session storage: client token/session id state"
+  ]),
+  snapshot: Object.freeze([
+    "public/client.js: applySnapshot + noteSnapshotDebugState",
+    "server.js: getRoomStatePayload + viewer state builders",
+    "shared/protocol.js: createStatePayload + decode path"
+  ]),
+  state: Object.freeze([
+    "server.js: entity simulation + clamps/corrections",
+    "shared/protocol.js: state sanitization",
+    "public/client.js: local state application"
+  ]),
+  unknown: Object.freeze([
+    "public/client.js: debug issue producer",
+    "server.js: matching issue code producer",
+    "shared/protocol.js: packet encode/decode path"
+  ])
+});
+const DEBUG_ISSUE_INSIGHTS = Object.freeze({
+  ability_denied: {
+    subsystem: "ability",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 92,
+    aiSummary: "The server rejected an ability/stat request because game state did not match the request.",
+    likelyCause: "Client gating is out of sync with server rules or the request was fired at the wrong time.",
+    fixHint: "Mirror the server allow/deny conditions in the client UI and log the exact request state before send."
+  },
+  ability_state_mismatch: {
+    subsystem: "ability",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 58,
+    aiSummary: "An upgrade request stayed pending and did not round-trip back into state.",
+    likelyCause: "The request was dropped, denied, or state replication did not deliver the result.",
+    fixHint: "Check the reliable send path, then compare server upgrade handling with replicated player state."
+  },
+  ability_triggered_no_effect: {
+    subsystem: "ability",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 60,
+    aiSummary: "An ability request was sent but no authoritative state change arrived.",
+    likelyCause: "The request was denied server-side or the result never reached the client.",
+    fixHint: "Trace the reliable message id through send, server handler, and next replicated snapshot."
+  },
+  bullet_missing_owner: {
+    subsystem: "snapshot",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 93,
+    aiSummary: "Projectile snapshots are missing a valid owner link.",
+    likelyCause: "Projectile replication is emitting incomplete state or the owner entity is missing from the same snapshot.",
+    fixHint: "Audit projectile creation/serialization and ensure owner ids survive replication and decode."
+  },
+  cooldown_desync: {
+    subsystem: "combat",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 56,
+    aiSummary: "The client predicted a shot/cooldown state that the server did not confirm.",
+    likelyCause: "Local fire prediction timing differs from authoritative reload or shot acceptance rules.",
+    fixHint: "Compare local reload prediction with server fire gating and authoritative projectile spawn timing."
+  },
+  dead_player_still_acting: {
+    subsystem: "state",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 95,
+    aiSummary: "Replicated state shows actions that should be impossible for a dead entity.",
+    likelyCause: "Death state, projectile cleanup, or movement disable logic is inconsistent.",
+    fixHint: "Inspect death transitions, action gating, and cleanup ordering on the server first."
+  },
+  desync_detected: {
+    subsystem: "prediction",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 55,
+    aiSummary: "Client prediction drifted materially away from server authority.",
+    likelyCause: "Snapshot timing, input replay, or movement simulation differs between client and server.",
+    fixHint: "Check for stale snapshots, large pending input queues, and divergent movement constants."
+  },
+  desync_detected_live: {
+    subsystem: "prediction",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 57,
+    aiSummary: "Live local render state is visibly offset from authoritative player state.",
+    likelyCause: "Prediction smoothing is masking a deeper snapshot or input mismatch.",
+    fixHint: "Compare local predicted position, replay queue length, and incoming snapshot cadence."
+  },
+  duplicate_input_sequence: {
+    subsystem: "input",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 82,
+    aiSummary: "The server is receiving repeated input sequence ids and ignoring them.",
+    likelyCause: "Client sequence generation or resend behavior is duplicating input frames.",
+    fixHint: "Log input seq generation on the client and verify retries do not resend gameplay input packets."
+  },
+  fire_rate_too_high: {
+    subsystem: "combat",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 63,
+    aiSummary: "Projectile cadence exceeds the expected reload timing.",
+    likelyCause: "Reload timing differs between simulation and replication or duplicate projectile spawn is occurring.",
+    fixHint: "Compare class reload constants, fire gating, and projectile dedupe by owner/time window."
+  },
+  fire_rejected: {
+    subsystem: "combat",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 61,
+    aiSummary: "A predicted shot never became an authoritative projectile.",
+    likelyCause: "The shot was denied, dropped, or predicted too early on the client.",
+    fixHint: "Trace the shot from local input seq to server fire validation to projectile replication."
+  },
+  frame_time_spike: {
+    subsystem: "render",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 50,
+    aiSummary: "The local render loop experienced a large frame-time stall.",
+    likelyCause: "CPU/GPU stall, hidden-tab throttling, or too much per-frame work in the client.",
+    fixHint: "Profile the render loop, particle counts, and DOM/canvas work around the spike."
+  },
+  frequent_reconciliation: {
+    subsystem: "prediction",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 59,
+    aiSummary: "Server corrections are happening repeatedly instead of occasionally.",
+    likelyCause: "Prediction is systematically diverging from authoritative movement rather than hitting one-off corrections.",
+    fixHint: "Compare movement math/constants and inspect snapshot delay, pending inputs, and input ordering."
+  },
+  health_out_of_range: {
+    subsystem: "state",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 94,
+    aiSummary: "Replicated health values violate valid entity bounds.",
+    likelyCause: "Damage/heal application or state serialization is bypassing clamps.",
+    fixHint: "Audit server health mutation paths and clamp before replication."
+  },
+  high_jitter: {
+    subsystem: "network",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 54,
+    aiSummary: "Packet arrival timing is unstable even if average latency is acceptable.",
+    likelyCause: "Network burstiness, proxy buffering, or uneven server send cadence.",
+    fixHint: "Compare jitter against server loop lag and snapshot cadence before changing prediction code."
+  },
+  high_ping: {
+    subsystem: "network",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 52,
+    aiSummary: "Round-trip latency is high enough to delay authoritative responses.",
+    likelyCause: "Slow network path, distant host, or server response delay.",
+    fixHint: "Compare ping with server loop lag. If lag is low, investigate transport/hosting path first."
+  },
+  input_buffer_trimmed: {
+    subsystem: "input",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 88,
+    aiSummary: "The server discarded older buffered inputs because the queue overflowed.",
+    likelyCause: "Client is sending faster than the server can consume or state acknowledgements are falling behind.",
+    fixHint: "Inspect input send rate, ack flow, and long server ticks that delay input consumption."
+  },
+  input_rate_limit: {
+    subsystem: "input",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 97,
+    aiSummary: "The server is rejecting inputs because the client exceeded allowed input throughput.",
+    likelyCause: "Input dispatch is firing too often or duplicate input sends are occurring.",
+    fixHint: "Start in the client send path and verify rate limiting, dedupe, and immediate-dispatch triggers."
+  },
+  input_sequence_jump: {
+    subsystem: "input",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 90,
+    aiSummary: "Input sequence numbers skipped farther than the server will accept.",
+    likelyCause: "Client sequence generation or reconnect/reset logic is discontinuous.",
+    fixHint: "Inspect sequence initialization, reconnect resets, and any path that reuses stale input ids."
+  },
+  invalid_entity_state: {
+    subsystem: "state",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 98,
+    aiSummary: "The server corrected an impossible entity state before accepting it.",
+    likelyCause: "Movement, collision, or state mutation produced NaN/out-of-bounds data.",
+    fixHint: "Inspect the server simulation path that writes player position/angle before replication."
+  },
+  invalid_input_value: {
+    subsystem: "input",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 84,
+    aiSummary: "A request contained an invalid enum/id that the server rejected.",
+    likelyCause: "Client UI sent a stale or malformed ability/stat identifier.",
+    fixHint: "Verify client payload construction against shared protocol enums before the send path."
+  },
+  large_correction_after_replay: {
+    subsystem: "prediction",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 66,
+    aiSummary: "Replaying pending inputs still ends in a large correction.",
+    likelyCause: "Replay logic or input ordering is diverging from authoritative simulation.",
+    fixHint: "Compare replay order, fixed delta, and movement constants against the server."
+  },
+  large_reconciliation_correction: {
+    subsystem: "prediction",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 64,
+    aiSummary: "The client needed a large snap-like correction to catch up to the server.",
+    likelyCause: "Prediction drift exceeded the smoothing budget.",
+    fixHint: "Check snapshot cadence and any constants that differ between client and server movement."
+  },
+  missing_input_sequence: {
+    subsystem: "input",
+    kind: "root",
+    confidence: "medium",
+    rootCauseWeight: 79,
+    aiSummary: "Input sequence values are arriving with gaps.",
+    likelyCause: "Input packets are being dropped or the client skipped sequence ids locally.",
+    fixHint: "Log seq generation and compare with websocket send order before investigating simulation."
+  },
+  movement_corrected: {
+    subsystem: "state",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 96,
+    aiSummary: "The server rejected movement as impossible and restored the previous safe state.",
+    likelyCause: "Client movement math, collision assumptions, or speed limits do not match the server.",
+    fixHint: "Compare server movement limits with client prediction constants and collision handling."
+  },
+  movement_corrected_by_server: {
+    subsystem: "prediction",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 62,
+    aiSummary: "Authoritative movement is repeatedly pulling the client back into line.",
+    likelyCause: "Prediction drift or stale snapshots are accumulating.",
+    fixHint: "Treat this as a symptom and prioritize stronger prediction/snapshot/input issues above it."
+  },
+  movement_speed_too_high: {
+    subsystem: "snapshot",
+    kind: "root",
+    confidence: "medium",
+    rootCauseWeight: 80,
+    aiSummary: "Replicated movement exceeds what the simulation should allow.",
+    likelyCause: "Entity state is teleporting, being double-applied, or crossing a stale state boundary.",
+    fixHint: "Inspect movement replication and transitions around spawn, death, and round changes."
+  },
+  packet_loss_high: {
+    subsystem: "network",
+    kind: "root",
+    confidence: "medium",
+    rootCauseWeight: 86,
+    aiSummary: "A meaningful share of recent ping samples were lost or timed out.",
+    likelyCause: "Transport loss or long stalls are preventing packets from round-tripping.",
+    fixHint: "Prioritize network/proxy health before changing prediction code."
+  },
+  player_disconnected: {
+    subsystem: "session",
+    kind: "symptom",
+    confidence: "high",
+    rootCauseWeight: 48,
+    aiSummary: "A player connection was lost during the session.",
+    likelyCause: "Network drop, page unload, or reconnect path failure.",
+    fixHint: "Correlate with close codes, heartbeat timeouts, and session reclaim logs."
+  },
+  server_loop_lag: {
+    subsystem: "server",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 94,
+    aiSummary: "The server loop is starting ticks late, so everything downstream arrives late too.",
+    likelyCause: "Main-thread work or host contention is delaying room updates.",
+    fixHint: "Start with server tick workload and host CPU pressure before tuning client prediction."
+  },
+  server_tick_slow: {
+    subsystem: "server",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 95,
+    aiSummary: "A server tick is taking longer than the tick budget to finish.",
+    likelyCause: "Simulation, replication, or room bookkeeping is too expensive for the current host.",
+    fixHint: "Profile the server tick path and inspect expensive room/player iteration."
+  },
+  session_expired: {
+    subsystem: "session",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 74,
+    aiSummary: "Reconnect grace expired before the session was resumed.",
+    likelyCause: "Reconnect flow took too long or session identifiers were not reused correctly.",
+    fixHint: "Inspect reconnect timing, client session id reuse, and grace-window assumptions."
+  },
+  snapshot_data_invalid: {
+    subsystem: "snapshot",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 99,
+    aiSummary: "Snapshot encode/decode produced invalid numeric state.",
+    likelyCause: "Server payload construction or client decode is emitting non-finite entity values.",
+    fixHint: "Inspect the authoritative state builder and shared packet sanitize/decode path first."
+  },
+  snapshot_delay_high: {
+    subsystem: "snapshot",
+    kind: "root",
+    confidence: "medium",
+    rootCauseWeight: 88,
+    aiSummary: "Authoritative snapshots are arriving too late for smooth prediction.",
+    likelyCause: "Server send cadence, network stalls, or oversized replication is delaying state.",
+    fixHint: "Compare snapshot age with server loop lag and packet loss before changing smoothing."
+  },
+  snapshot_missing_entities: {
+    subsystem: "snapshot",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 97,
+    aiSummary: "A full snapshot is missing entities that should be present.",
+    likelyCause: "Interest selection, replication mode, or snapshot assembly dropped required entities.",
+    fixHint: "Audit full snapshot assembly and viewer-interest filtering on the server."
+  },
+  snapshot_out_of_order: {
+    subsystem: "replication",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 68,
+    aiSummary: "Snapshot chunks are arriving stale or out of order.",
+    likelyCause: "Transport reordering, resend behavior, or chunk assembly is inconsistent.",
+    fixHint: "Inspect chunk sequencing, discard rules, and proxy buffering."
+  },
+  snapshot_resync_requested: {
+    subsystem: "replication",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 63,
+    aiSummary: "The client had to request a lifecycle resync because replication became unreliable.",
+    likelyCause: "Chunk assembly or baseline tracking drifted out of sync.",
+    fixHint: "Inspect the last chunk sequence, baseline invalidation, and resync trigger reason."
+  },
+  teleport_detected: {
+    subsystem: "snapshot",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 67,
+    aiSummary: "An entity jumped farther than normal movement should allow between snapshots.",
+    likelyCause: "Replication skipped intermediate states or state was reset across a transition.",
+    fixHint: "Check round/spawn transitions, stale baselines, and movement replication gaps."
+  },
+  tick_rate_lower_than_expected: {
+    subsystem: "server",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 72,
+    aiSummary: "Observed server tick cadence is below the configured target rate.",
+    likelyCause: "Server loop lag or slow ticks are reducing effective simulation rate.",
+    fixHint: "Treat this as a server performance symptom and pair it with loop/work metrics."
+  },
+  too_many_inputs_replayed: {
+    subsystem: "prediction",
+    kind: "symptom",
+    confidence: "medium",
+    rootCauseWeight: 70,
+    aiSummary: "The client is replaying too many unacknowledged inputs to stay smooth.",
+    likelyCause: "Snapshots/acks are delayed or input send rate is outrunning server acknowledgement.",
+    fixHint: "Check pending input growth against snapshot delay and server tick health."
+  },
+  upgrade_denied: {
+    subsystem: "ability",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 83,
+    aiSummary: "The server rejected an upgrade request.",
+    likelyCause: "Client upgrade UI sent an invalid or no-longer-allowed class choice.",
+    fixHint: "Validate pending upgrade state on the client against server eligibility before send."
+  },
+  value_clamped: {
+    subsystem: "state",
+    kind: "root",
+    confidence: "high",
+    rootCauseWeight: 76,
+    aiSummary: "The server normalized an out-of-range gameplay value instead of accepting it as-is.",
+    likelyCause: "Client or upstream logic is producing values outside valid gameplay bounds.",
+    fixHint: "Find the first writer of the clamped value and align client-side limits with the server."
+  }
+});
+
 const WORLD_RENDER = Object.freeze({
   gridSize: 64,
   cameraFollow: 0.14
@@ -311,6 +769,7 @@ let lastDiagnosticBannerText = "";
 let lastRoomBrowserRenderKey = "";
 let lastTimedUiRefreshAt = 0;
 let latestDebugInfo = null;
+let latestAiDebugReport = null;
 const assetState = {
   manifest: null,
   images: new Map(),
@@ -479,6 +938,52 @@ function setElementText(element, text) {
   }
 }
 
+function downloadTextFile(filename, text) {
+  if (typeof document === "undefined") {
+    return false;
+  }
+
+  const blob = new Blob([String(text ?? "")], { type: "application/json;charset=utf-8" });
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 250);
+  return true;
+}
+
+async function copyAiDebugReportToClipboard() {
+  const report = latestAiDebugReport ?? buildAiDebugReport(Date.now());
+  const reportText = JSON.stringify(report, null, 2);
+
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(reportText);
+      setStatus(`Copied AI debug report to clipboard (${DEBUG_AI_REPORT_HOTKEY}).`);
+      return true;
+    }
+  } catch (error) {
+    // Fall through to download/console fallback.
+  }
+
+  window.__MULTITANK_DEBUG_REPORT__ = report;
+  window.__MULTITANK_COPY_DEBUG_REPORT__ = () => copyAiDebugReportToClipboard();
+  console.info("Multitank AI debug report", report);
+
+  if (downloadTextFile(`multitank-debug-report-${Date.now()}.json`, reportText)) {
+    setStatus(`Clipboard unavailable. Downloaded AI debug report instead (${DEBUG_AI_REPORT_HOTKEY}).`);
+    return true;
+  }
+
+  setStatus("Clipboard unavailable. Read window.__MULTITANK_DEBUG_REPORT__ in the console.");
+  return false;
+}
+
+window.__MULTITANK_COPY_DEBUG_REPORT__ = () => copyAiDebugReportToClipboard();
+
 function getDebugSeverityWeight(severity) {
   switch (severity) {
     case "error":
@@ -600,6 +1105,7 @@ function recordDebugEvent(code, message, options = {}) {
     message: trimDebugMessage(message),
     severity,
     source: String(options.source ?? "client"),
+    scope: typeof options.scope === "string" && options.scope ? options.scope : null,
     count: nextCount,
     firstAt: existing?.firstAt ?? now,
     lastAt: now,
@@ -625,6 +1131,7 @@ function syncServerDebugSnapshot(debugPayload, now = Date.now()) {
           ? signal.severity
           : "warn",
       source: "server",
+      scope: typeof signal.scope === "string" && signal.scope ? signal.scope : null,
       count: Math.max(1, Number(signal.count ?? 1) || 1),
       firstAt: Number(signal.firstAt ?? now) || now,
       lastAt: Number(signal.lastAt ?? now) || now,
@@ -1021,6 +1528,7 @@ function buildDynamicDebugIssue(code, message, severity, now = Date.now(), optio
     message: trimDebugMessage(message),
     severity,
     source: options.source ?? "dynamic",
+    scope: typeof options.scope === "string" && options.scope ? options.scope : null,
     count: Math.max(1, Number(options.count ?? 1) || 1),
     firstAt: now,
     lastAt: now,
@@ -1192,14 +1700,14 @@ function getActiveDebugIssues(now = Date.now()) {
 }
 
 function buildDebugIssuesSummary(now = Date.now()) {
-  const issues = getActiveDebugIssues(now);
+  const issues = buildAiDebugReport(now).issues;
   if (issues.length === 0) {
     return "none";
   }
 
   return issues
     .slice(0, 3)
-    .map((issue) => trimDebugMessage(issue.message, 64))
+    .map((issue) => trimDebugMessage(issue.aiSummary ?? issue.message, 64))
     .join(" | ");
 }
 
@@ -6816,6 +7324,456 @@ function buildStateChunkDebugSummary(now = Date.now()) {
   return `${snapshotSeq} ${receivedCount}/${entry?.chunkCount ?? chunks.length} ${formatDebugAgeMs(ageMs)}${pendingSnapshots.length > 1 ? ` +${pendingSnapshots.length - 1}` : ""}`;
 }
 
+function inferDebugIssueSubsystem(issue) {
+  const code = String(issue?.code ?? "").toLowerCase();
+  const message = String(issue?.message ?? "").toLowerCase();
+
+  if (DEBUG_ISSUE_INSIGHTS[code]?.subsystem) {
+    return DEBUG_ISSUE_INSIGHTS[code].subsystem;
+  }
+
+  if (code.includes("snapshot") || code.includes("chunk") || message.includes("snapshot")) {
+    return code.includes("resync") || code.includes("chunk") ? "replication" : "snapshot";
+  }
+  if (code.includes("input")) {
+    return "input";
+  }
+  if (code.includes("upgrade") || code.includes("ability") || code.includes("stat")) {
+    return "ability";
+  }
+  if (code.includes("ping") || code.includes("jitter") || code.includes("packet") || code.includes("pong")) {
+    return "network";
+  }
+  if (code.includes("fire") || code.includes("cooldown") || code.includes("projectile") || code.includes("bullet")) {
+    return "combat";
+  }
+  if (code.includes("frame") || code.includes("render")) {
+    return "render";
+  }
+  if (code.includes("disconnect") || code.includes("session")) {
+    return "session";
+  }
+  if (code.includes("server") || code.includes("tick")) {
+    return "server";
+  }
+  if (
+    code.includes("desync") ||
+    code.includes("reconciliation") ||
+    code.includes("correction") ||
+    code.includes("replay")
+  ) {
+    return "prediction";
+  }
+  if (
+    code.includes("health") ||
+    code.includes("entity") ||
+    code.includes("teleport") ||
+    code.includes("movement")
+  ) {
+    return "state";
+  }
+
+  return "unknown";
+}
+
+function getDebugIssueKindWeight(kind) {
+  switch (kind) {
+    case "root":
+      return 44;
+    case "symptom":
+      return 18;
+    default:
+      return 8;
+  }
+}
+
+function getDebugIssueConfidenceWeight(confidence) {
+  switch (confidence) {
+    case "high":
+      return 14;
+    case "medium":
+      return 8;
+    default:
+      return 4;
+  }
+}
+
+function buildDebugMetricsSnapshot(now = Date.now(), options = {}) {
+  const localPlayer = options.localPlayer ?? getLocalPlayer();
+  const visualState = options.visualState ?? ensureLocalVisualState(localPlayer);
+  const snapshotAgeMs = lastSnapshotAt ? Math.round(performance.now() - lastSnapshotAt) : 0;
+  const statePacketAgeMs = getStatePacketAgeMs(now);
+  const serverMessageAgeMs = lastServerMessageAt > 0 ? Math.max(0, now - lastServerMessageAt) : 0;
+  const lastInputAgeMs = lastInputDispatchAt > 0 ? Math.max(0, now - lastInputDispatchAt) : 0;
+  const lastInputChangeAgeMs = lastLocalInputChangedAt > 0 ? Math.max(0, now - lastLocalInputChangedAt) : 0;
+  const lastAimChangeAgeMs = lastAimInputChangedAt > 0 ? Math.max(0, now - lastAimInputChangedAt) : 0;
+  const lastResyncAgeMs = lastResyncRequestAt > 0 ? Math.max(0, now - lastResyncRequestAt) : 0;
+  const estimatedTickRate = Number(debugMonitor.estimatedServerTickRate) || GAME_CONFIG.serverTickRate;
+  const localPredictionDelta = localPlayer && visualState
+    ? Math.hypot((visualState.x ?? localPlayer.x) - (localPlayer.x ?? 0), (visualState.y ?? localPlayer.y) - (localPlayer.y ?? 0))
+    : 0;
+
+  return {
+    now,
+    roomId: currentRoomId ?? null,
+    playerId: localPlayerId ?? null,
+    socketState: getSocketReadyStateLabel(socket),
+    latestLatencyMs: Math.max(0, Number(latestLatencyMs) || 0),
+    jitterMs: getLatencyJitterMs(),
+    packetLossPercent: getPacketLossPercent(now),
+    snapshotAgeMs,
+    statePacketAgeMs,
+    serverMessageAgeMs,
+    lastInputAgeMs,
+    lastInputChangeAgeMs,
+    lastAimChangeAgeMs,
+    lastResyncAgeMs,
+    localPredictionDelta,
+    estimatedTickRate,
+    expectedTickRate: GAME_CONFIG.serverTickRate,
+    tickBudgetMs: 1000 / GAME_CONFIG.serverTickRate,
+    serverLoopLagMs: Math.max(0, Number(latestDebugInfo?.serverLoopLagMs ?? 0) || 0),
+    serverTickWorkMs: Math.max(0, Number(latestDebugInfo?.tickDurationMs ?? 0) || 0),
+    lastProcessedInputSeq: latestYou?.lastProcessedInputSeq ?? 0,
+    lastProcessedInputTick: latestYou?.lastProcessedInputTick ?? 0,
+    pendingInputs: pendingInputs.length,
+    pendingInputCount: latestYou?.pendingInputCount ?? pendingInputs.length,
+    pendingPredictedShots: debugMonitor.pendingPredictedShots.size,
+    pendingReliableSummary: buildPendingReliableDebugSummary(now),
+    stateChunkSummary: buildStateChunkDebugSummary(now),
+    reconnectSummary: reconnectTimer !== null ? `wait(${reconnectAttempts})` : String(reconnectAttempts),
+    renderFailure,
+    renderLoopStopped,
+    documentHidden: document.hidden,
+    roomPhase: latestMatch?.phase ?? null,
+    roundNumber: latestMatch?.roundNumber ?? null,
+    playersVisible: players.size,
+    bulletsVisible: bullets.size,
+    shapesVisible: shapes.size,
+    serverSignalCount: Array.isArray(latestDebugInfo?.signals) ? latestDebugInfo.signals.length : 0
+  };
+}
+
+function getDebugIssueInsight(issue) {
+  const code = String(issue?.code ?? "").trim();
+  const fallbackSubsystem = inferDebugIssueSubsystem(issue);
+  const insight = DEBUG_ISSUE_INSIGHTS[code] ?? null;
+
+  return {
+    subsystem: insight?.subsystem ?? fallbackSubsystem,
+    kind: insight?.kind ?? (issue?.source === "server" ? "root" : "symptom"),
+    confidence: insight?.confidence ?? (issue?.source === "server" ? "high" : "medium"),
+    rootCauseWeight: Math.max(0, Number(insight?.rootCauseWeight ?? (issue?.source === "server" ? 72 : 48)) || 0),
+    aiSummary:
+      insight?.aiSummary ??
+      `Active ${fallbackSubsystem} issue: ${trimDebugMessage(issue?.message ?? issue?.code ?? "unknown issue", 96)}`,
+    likelyCause:
+      insight?.likelyCause ??
+      `The ${fallbackSubsystem} path raised ${code || "an unknown issue"} and needs a closer state comparison.`,
+    fixHint:
+      insight?.fixHint ??
+      `Trace the first producer of ${code || "this issue"} and compare client/server state around the failing condition.`,
+    inspectTargets: Array.from(
+      new Set([...(insight?.inspect ?? []), ...(DEBUG_SUBSYSTEM_INSPECT_TARGETS[insight?.subsystem ?? fallbackSubsystem] ?? DEBUG_SUBSYSTEM_INSPECT_TARGETS.unknown)])
+    ).slice(0, 3)
+  };
+}
+
+function buildDebugIssueEvidence(issue, metrics) {
+  const parts = [trimDebugMessage(issue?.message ?? "Unknown debug issue", 120)];
+
+  switch (issue?.subsystem) {
+    case "network":
+      parts.push(`ping ${Math.round(metrics.latestLatencyMs)}ms`);
+      parts.push(`jitter ${Math.round(metrics.jitterMs)}ms`);
+      parts.push(`loss ${metrics.packetLossPercent.toFixed(0)}%`);
+      parts.push(`socket ${metrics.socketState}`);
+      break;
+    case "snapshot":
+    case "replication":
+      parts.push(`snapshot ${metrics.snapshotAgeMs}ms`);
+      parts.push(`state ${formatDebugAgeMs(metrics.statePacketAgeMs)}`);
+      parts.push(`chunks ${metrics.stateChunkSummary}`);
+      parts.push(`resync ${formatDebugAgeMs(metrics.lastResyncAgeMs)}`);
+      break;
+    case "prediction":
+      parts.push(`delta ${metrics.localPredictionDelta.toFixed(1)}`);
+      parts.push(`pending ${metrics.pendingInputs}/${metrics.pendingInputCount}`);
+      parts.push(`snapshot ${metrics.snapshotAgeMs}ms`);
+      break;
+    case "server":
+      parts.push(`loop ${Math.round(metrics.serverLoopLagMs)}ms`);
+      parts.push(`work ${Math.round(metrics.serverTickWorkMs)}ms`);
+      parts.push(`tick ${metrics.estimatedTickRate.toFixed(1)}/${metrics.expectedTickRate}`);
+      break;
+    case "input":
+      parts.push(`ack ${metrics.lastProcessedInputSeq}`);
+      parts.push(`tick ${metrics.lastProcessedInputTick}`);
+      parts.push(`pending ${metrics.pendingInputs}/${metrics.pendingInputCount}`);
+      parts.push(`input ${formatDebugAgeMs(metrics.lastInputAgeMs)}`);
+      break;
+    case "ability":
+      parts.push(`reliable ${metrics.pendingReliableSummary}`);
+      parts.push(`phase ${metrics.roomPhase ?? "-"}`);
+      break;
+    case "combat":
+      parts.push(`shotQ ${metrics.pendingPredictedShots}`);
+      parts.push(`reliable ${metrics.pendingReliableSummary}`);
+      break;
+    case "render":
+      parts.push(`hidden ${metrics.documentHidden ? "yes" : "no"}`);
+      parts.push(`loop ${metrics.renderLoopStopped ? "stopped" : "ok"}`);
+      if (metrics.renderFailure) {
+        parts.push(`failure ${trimDebugMessage(metrics.renderFailure, 64)}`);
+      }
+      break;
+    case "session":
+      parts.push(`socket ${metrics.socketState}`);
+      parts.push(`reconn ${metrics.reconnectSummary}`);
+      break;
+    case "state":
+      parts.push(`phase ${metrics.roomPhase ?? "-"}`);
+      parts.push(`players ${metrics.playersVisible}`);
+      break;
+    default:
+      parts.push(`socket ${metrics.socketState}`);
+      break;
+  }
+
+  if (issue?.scope) {
+    parts.push(`scope ${issue.scope}`);
+  }
+  if (Number(issue?.count ?? 1) > 1) {
+    parts.push(`count x${issue.count}`);
+  }
+  parts.push(`age ${formatDebugAgeMs(Math.max(0, metrics.now - Number(issue?.lastAt ?? metrics.now)))}`);
+
+  return trimDebugMessage(
+    Array.from(new Set(parts.filter(Boolean))).join(" | "),
+    220
+  );
+}
+
+function buildDiagnosedDebugIssue(issue, metrics, now = Date.now()) {
+  const insight = getDebugIssueInsight(issue);
+  const subsystemTag = DEBUG_SUBSYSTEM_TAGS[insight.subsystem] ?? DEBUG_SUBSYSTEM_TAGS.unknown;
+  const ageMs = Math.max(0, now - Number(issue?.lastAt ?? now));
+  const diagnosed = {
+    ...issue,
+    subsystem: insight.subsystem,
+    subsystemTag,
+    kind: insight.kind,
+    confidence: insight.confidence,
+    rootCauseWeight: insight.rootCauseWeight,
+    aiSummary: insight.aiSummary,
+    likelyCause: insight.likelyCause,
+    fixHint: insight.fixHint,
+    inspectTargets: insight.inspectTargets,
+    evidence: "",
+    ageMs,
+    aiPriority: 0
+  };
+
+  diagnosed.evidence = buildDebugIssueEvidence(diagnosed, metrics);
+  diagnosed.aiPriority =
+    getDebugSeverityWeight(diagnosed.severity) * 100 +
+    diagnosed.rootCauseWeight +
+    getDebugIssueKindWeight(diagnosed.kind) +
+    getDebugIssueConfidenceWeight(diagnosed.confidence) +
+    (diagnosed.source === "server" ? 18 : diagnosed.source === "dynamic" ? 10 : 6) +
+    Math.min(24, Math.max(0, Number(diagnosed.count ?? 1) - 1) * 4);
+
+  return diagnosed;
+}
+
+function sortDebugIssuesForAi(left, right) {
+  return (
+    Number(right?.aiPriority ?? 0) - Number(left?.aiPriority ?? 0) ||
+    getDebugSeverityWeight(right?.severity) - getDebugSeverityWeight(left?.severity) ||
+    Number(right?.lastAt ?? 0) - Number(left?.lastAt ?? 0) ||
+    String(left?.code ?? "").localeCompare(String(right?.code ?? ""))
+  );
+}
+
+function buildDebugSubsystemSummary(issues) {
+  const grouped = new Map();
+
+  for (const issue of issues) {
+    const subsystem = issue?.subsystem ?? "unknown";
+    const existing = grouped.get(subsystem) ?? {
+      subsystem,
+      subsystemTag: issue?.subsystemTag ?? DEBUG_SUBSYSTEM_TAGS.unknown,
+      count: 0,
+      highestSeverity: issue?.severity ?? "info",
+      topIssue: issue,
+      aiPriority: 0
+    };
+
+    existing.count += 1;
+    existing.aiPriority += Number(issue?.aiPriority ?? 0);
+    if (
+      getDebugSeverityWeight(issue?.severity) > getDebugSeverityWeight(existing.highestSeverity) ||
+      (existing.topIssue && Number(issue?.aiPriority ?? 0) > Number(existing.topIssue?.aiPriority ?? 0))
+    ) {
+      existing.highestSeverity = issue?.severity ?? existing.highestSeverity;
+      existing.topIssue = issue;
+    }
+
+    grouped.set(subsystem, existing);
+  }
+
+  return Array.from(grouped.values())
+    .sort((left, right) => right.aiPriority - left.aiPriority || left.subsystem.localeCompare(right.subsystem))
+    .map((entry) => ({
+      subsystem: entry.subsystem,
+      subsystemTag: entry.subsystemTag,
+      count: entry.count,
+      highestSeverity: entry.highestSeverity,
+      topCode: entry.topIssue?.code ?? "unknown",
+      topSummary: entry.topIssue?.aiSummary ?? entry.topIssue?.message ?? "Unknown issue"
+    }));
+}
+
+function buildAiDebugReport(now = Date.now(), options = {}) {
+  const metrics = buildDebugMetricsSnapshot(now, options);
+  const issues = getActiveDebugIssues(now)
+    .map((issue) => buildDiagnosedDebugIssue(issue, metrics, now))
+    .sort(sortDebugIssuesForAi);
+  const primary = issues[0] ?? null;
+  const relatedCodes =
+    primary
+      ? issues
+          .filter((issue) => issue.code !== primary.code && issue.subsystem === primary.subsystem)
+          .slice(0, 3)
+          .map((issue) => issue.code)
+      : [];
+
+  const report = {
+    version: 1,
+    generatedAt: new Date(now).toISOString(),
+    generatedAtMs: now,
+    roomId: metrics.roomId,
+    playerId: metrics.playerId,
+    aiFocusPrompt:
+      primary
+        ? `Start with ${primary.subsystem} -> ${primary.code}. Inspect ${primary.inspectTargets.join(", ")}.`
+        : "No active issues. Capture a report while reproducing the bug if behavior still looks wrong.",
+    primaryDiagnosis: primary
+      ? {
+          code: primary.code,
+          severity: primary.severity,
+          source: primary.source,
+          scope: primary.scope ?? null,
+          subsystem: primary.subsystem,
+          subsystemTag: primary.subsystemTag,
+          kind: primary.kind,
+          confidence: primary.confidence,
+          message: primary.message,
+          aiSummary: primary.aiSummary,
+          likelyCause: primary.likelyCause,
+          fixHint: primary.fixHint,
+          inspectTargets: primary.inspectTargets,
+          evidence: primary.evidence,
+          count: primary.count,
+          ageMs: primary.ageMs,
+          relatedCodes
+        }
+      : null,
+    subsystemSummary: buildDebugSubsystemSummary(issues),
+    metrics,
+    issues: issues.map((issue) => ({
+      code: issue.code,
+      severity: issue.severity,
+      source: issue.source,
+      scope: issue.scope ?? null,
+      count: issue.count,
+      ageMs: issue.ageMs,
+      subsystem: issue.subsystem,
+      subsystemTag: issue.subsystemTag,
+      kind: issue.kind,
+      confidence: issue.confidence,
+      message: issue.message,
+      aiSummary: issue.aiSummary,
+      likelyCause: issue.likelyCause,
+      fixHint: issue.fixHint,
+      inspectTargets: issue.inspectTargets,
+      evidence: issue.evidence,
+      aiPriority: issue.aiPriority
+    }))
+  };
+
+  latestAiDebugReport = report;
+  window.__MULTITANK_DEBUG_REPORT__ = report;
+  return report;
+}
+
+function wrapMonospaceDebugText(text, maxChars = 68) {
+  const normalized = trimDebugMessage(text, 400);
+  if (!normalized) {
+    return [""];
+  }
+
+  const words = normalized.split(/\s+/);
+  const lines = [];
+  let current = "";
+
+  for (const word of words) {
+    const nextLine = current ? `${current} ${word}` : word;
+    if (nextLine.length <= maxChars) {
+      current = nextLine;
+      continue;
+    }
+
+    if (current) {
+      lines.push(current);
+    }
+
+    if (word.length <= maxChars) {
+      current = word;
+      continue;
+    }
+
+    let remainder = word;
+    while (remainder.length > maxChars) {
+      lines.push(`${remainder.slice(0, Math.max(1, maxChars - 1))}-`);
+      remainder = remainder.slice(Math.max(1, maxChars - 1));
+    }
+    current = remainder;
+  }
+
+  if (current) {
+    lines.push(current);
+  }
+
+  return lines;
+}
+
+function buildAiDiagnosisPanelLines(report, maxChars = 68) {
+  const primary = report?.primaryDiagnosis ?? null;
+  if (!primary) {
+    return [
+      "AI Focus: clear",
+      `Report: press ${DEBUG_AI_REPORT_HOTKEY} to copy a structured JSON report when the bug reproduces.`
+    ];
+  }
+
+  const focusMeta = `AI Focus: ${primary.code} [${primary.subsystemTag} | ${primary.kind} | ${primary.confidence}]`;
+  const relatedText = Array.isArray(primary.relatedCodes) && primary.relatedCodes.length > 0
+    ? primary.relatedCodes.join(" | ")
+    : "none";
+
+  return [
+    ...wrapMonospaceDebugText(focusMeta, maxChars),
+    ...wrapMonospaceDebugText(`Why: ${primary.aiSummary}`, maxChars),
+    ...wrapMonospaceDebugText(`Cause: ${primary.likelyCause}`, maxChars),
+    ...wrapMonospaceDebugText(`Fix: ${primary.fixHint}`, maxChars),
+    ...wrapMonospaceDebugText(`Inspect: ${primary.inspectTargets.join(" ; ")}`, maxChars),
+    ...wrapMonospaceDebugText(`Evidence: ${primary.evidence}`, maxChars),
+    ...wrapMonospaceDebugText(`Related: ${relatedText}`, maxChars),
+    ...wrapMonospaceDebugText(`Report: ${DEBUG_AI_REPORT_HOTKEY} copies JSON for AI triage.`, maxChars)
+  ];
+}
+
 function buildDebugIssueCodeSummary(issues) {
   if (!Array.isArray(issues) || issues.length === 0) {
     return "clear";
@@ -6839,15 +7797,20 @@ function buildDebugIssueCodeSummary(issues) {
 }
 
 function buildDebugIssueLabel(issue) {
-  const countSuffix = Number(issue?.count ?? 1) > 1 ? ` x${issue.count}` : "";
-  const severityLabel = issue?.severity === "error" ? "ERR" : issue?.severity === "warn" ? "WARN" : "INFO";
+  const metaParts = [issue?.severity === "error" ? "ERR" : issue?.severity === "warn" ? "WARN" : "INFO"];
+  if (Number(issue?.count ?? 1) > 1) {
+    metaParts.push(`x${issue.count}`);
+  }
+  if (issue?.subsystemTag) {
+    metaParts.push(issue.subsystemTag);
+  }
   const sourcePrefix =
     typeof issue?.source === "string" && issue.source
       ? `${issue.source}:`
       : "";
   const codeLabel = trimDebugMessage(`${sourcePrefix}${issue?.code ?? "unknown"}`, 24);
-  const messageLabel = trimDebugMessage(issue?.message, 36);
-  return `[${severityLabel}${countSuffix}] ${codeLabel} | ${messageLabel}`;
+  const messageLabel = trimDebugMessage(issue?.aiSummary ?? issue?.message, 42);
+  return `[${metaParts.join(" ")}] ${codeLabel} | ${messageLabel}`;
 }
 
 function getDebugIssuePanelLayout(issueCount, canvasWidth, canvasHeight, issuePanelY) {
@@ -6880,6 +7843,7 @@ function drawOverlay() {
   const now = Date.now();
   const localPlayer = getLocalPlayer();
   const visualState = ensureLocalVisualState(localPlayer);
+  const aiReport = buildAiDebugReport(now, { localPlayer, visualState });
   const snapshotAge = lastSnapshotAt ? Math.round(performance.now() - lastSnapshotAt) : 0;
   const lastProcessedInputSeq = latestYou?.lastProcessedInputSeq ?? 0;
   const lastProcessedInputTick = latestYou?.lastProcessedInputTick ?? 0;
@@ -6896,7 +7860,7 @@ function drawOverlay() {
   const positionDelta = localPlayer && visualState
     ? Math.hypot((visualState.x ?? localPlayer.x) - (localPlayer.x ?? 0), (visualState.y ?? localPlayer.y) - (localPlayer.y ?? 0))
     : 0;
-  const issues = getActiveDebugIssues(now);
+  const issues = aiReport.issues;
   const socketState = getSocketReadyStateLabel(socket);
   const statePacketAge = getStatePacketAgeMs(now);
   const serverMessageAge = lastServerMessageAt > 0 ? Math.max(0, now - lastServerMessageAt) : 0;
@@ -6946,6 +7910,35 @@ function drawOverlay() {
   context.font = "14px Consolas, monospace";
   leftLines.forEach((line, index) => {
     context.fillText(line, leftX, leftY + index * lineHeight);
+  });
+
+  const diagnosisPanelX = leftX;
+  const diagnosisPanelY = leftY + leftLines.length * lineHeight + 26;
+  const diagnosisPanelWidth = leftPanelWidth;
+  const diagnosisFontSize = 13;
+  const diagnosisLineHeight = 17;
+  const diagnosisCharBudget = Math.max(36, Math.floor((diagnosisPanelWidth - 20) / 7));
+  const diagnosisLines = buildAiDiagnosisPanelLines(aiReport, diagnosisCharBudget);
+  const diagnosisPanelHeight = 18 + diagnosisLines.length * diagnosisLineHeight;
+  const diagnosisSeverity = aiReport.primaryDiagnosis?.severity ?? "info";
+  context.fillStyle =
+    diagnosisSeverity === "error"
+      ? "rgba(42, 22, 10, 0.86)"
+      : diagnosisSeverity === "warn"
+        ? "rgba(34, 28, 10, 0.82)"
+        : "rgba(10, 26, 34, 0.8)";
+  context.fillRect(diagnosisPanelX - 12, diagnosisPanelY - 18, diagnosisPanelWidth, diagnosisPanelHeight);
+  context.font = `${diagnosisFontSize}px Consolas, monospace`;
+  diagnosisLines.forEach((line, index) => {
+    context.fillStyle =
+      index === 0
+        ? diagnosisSeverity === "error"
+          ? "rgba(255, 218, 164, 0.98)"
+          : diagnosisSeverity === "warn"
+            ? "rgba(255, 228, 166, 0.96)"
+            : "rgba(165, 242, 255, 0.96)"
+        : "rgba(235, 239, 244, 0.92)";
+    context.fillText(line, diagnosisPanelX, diagnosisPanelY + index * diagnosisLineHeight, diagnosisPanelWidth - 16);
   });
 
   const issuePanelY = hudTop + 4;
@@ -7148,6 +8141,12 @@ window.addEventListener("keydown", (event) => {
     )
   ) {
     event.preventDefault();
+  }
+
+  if (debugUiEnabled && event.code === DEBUG_AI_REPORT_HOTKEY && !event.repeat) {
+    event.preventDefault();
+    void copyAiDebugReportToClipboard();
+    return;
   }
 
   if (event.code === "KeyR" && !event.repeat && isResultsPhase(latestMatch?.phase)) {
