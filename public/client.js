@@ -7939,6 +7939,272 @@ function getDebugIssuePanelLayout(issueCount, canvasWidth, canvasHeight, issuePa
   };
 }
 
+function shouldUseExpandedDebugIssueBoard(issues) {
+  return Array.isArray(issues) && issues.length > 0;
+}
+
+function getExpandedDebugIssueDetailLevels(issueCount) {
+  if (issueCount <= 8) {
+    return ["full", "compact", "minimal"];
+  }
+
+  if (issueCount <= 20) {
+    return ["compact", "minimal"];
+  }
+
+  return ["minimal"];
+}
+
+function buildExpandedDebugIssueHeader(issue) {
+  const metaParts = [issue?.severity === "error" ? "ERR" : issue?.severity === "warn" ? "WARN" : "INFO"];
+  if (issue?.subsystemTag) {
+    metaParts.push(issue.subsystemTag);
+  }
+  if (Number(issue?.count ?? 1) > 1) {
+    metaParts.push(`x${issue.count}`);
+  }
+  const ageMs = Math.max(0, Number(issue?.ageMs ?? 0) || 0);
+  if (ageMs > 0) {
+    metaParts.push(formatDebugAgeMs(ageMs));
+  }
+  const sourcePrefix =
+    typeof issue?.source === "string" && issue.source
+      ? `${issue.source}:`
+      : "";
+  return `[${metaParts.join(" ")}] ${sourcePrefix}${issue?.code ?? "unknown"}`;
+}
+
+function buildExpandedDebugIssueBlocks(issues, maxChars, detailLevel) {
+  return issues.map((issue) => {
+    const lines = [
+      ...wrapMonospaceDebugText(buildExpandedDebugIssueHeader(issue), maxChars),
+      ...wrapMonospaceDebugText(`Why: ${issue?.aiSummary ?? issue?.message ?? "Unknown debug issue"}`, maxChars)
+    ];
+
+    if (detailLevel !== "minimal") {
+      lines.push(
+        ...wrapMonospaceDebugText(
+          `Fix: ${issue?.fixHint ?? issue?.likelyCause ?? "Inspect the issue producer and compare client/server state."}`,
+          maxChars
+        )
+      );
+    }
+
+    if (detailLevel === "full" && Array.isArray(issue?.inspectTargets) && issue.inspectTargets.length > 0) {
+      lines.push(...wrapMonospaceDebugText(`Inspect: ${issue.inspectTargets.join(" ; ")}`, maxChars));
+    }
+
+    return {
+      issue,
+      lines
+    };
+  });
+}
+
+function tryBuildExpandedDebugIssueBoardLayout(issues, panelWidth, panelHeight, fontSize, detailLevel) {
+  const columnGap = 18;
+  const cardGap = 12;
+  const columnPadding = 12;
+  const lineHeight = fontSize <= 10 ? fontSize + 3 : fontSize + 4;
+  const maxColumns = Math.max(1, Math.min(issues.length, Math.floor((panelWidth + columnGap) / 220)));
+
+  for (let columnCount = 1; columnCount <= maxColumns; columnCount += 1) {
+    const columnWidth = Math.floor((panelWidth - columnGap * Math.max(0, columnCount - 1)) / columnCount);
+    if (columnWidth < 200) {
+      continue;
+    }
+
+    const maxChars = Math.max(24, Math.floor((columnWidth - columnPadding * 2) / Math.max(6.4, fontSize * 0.61)));
+    const blocks = buildExpandedDebugIssueBlocks(issues, maxChars, detailLevel);
+    const columns = Array.from({ length: columnCount }, () => ({
+      blocks: [],
+      height: 0
+    }));
+    let columnIndex = 0;
+    let fits = true;
+
+    for (const block of blocks) {
+      const blockHeight =
+        block.lines.length * lineHeight +
+        (columns[columnIndex].blocks.length > 0 ? cardGap : 0);
+
+      while (columnIndex < columnCount && columns[columnIndex].height + blockHeight > panelHeight) {
+        columnIndex += 1;
+      }
+
+      if (columnIndex >= columnCount) {
+        fits = false;
+        break;
+      }
+
+      columns[columnIndex].blocks.push(block);
+      columns[columnIndex].height += blockHeight;
+    }
+
+    if (fits) {
+      return {
+        columnCount,
+        columnGap,
+        columnPadding,
+        columnWidth,
+        cardGap,
+        detailLevel,
+        fontSize,
+        lineHeight,
+        columns
+      };
+    }
+  }
+
+  return null;
+}
+
+function buildExpandedDebugIssueBoardLayout(issues, panelWidth, panelHeight) {
+  const detailLevels = getExpandedDebugIssueDetailLevels(issues.length);
+  const fontSizes =
+    issues.length > 28
+      ? [11, 10, 9]
+      : issues.length > 14
+        ? [12, 11, 10, 9]
+        : [13, 12, 11, 10];
+
+  for (const detailLevel of detailLevels) {
+    for (const fontSize of fontSizes) {
+      const layout = tryBuildExpandedDebugIssueBoardLayout(
+        issues,
+        panelWidth,
+        panelHeight,
+        fontSize,
+        detailLevel
+      );
+      if (layout) {
+        return layout;
+      }
+    }
+  }
+
+  return tryBuildExpandedDebugIssueBoardLayout(issues, panelWidth, panelHeight, 9, "minimal");
+}
+
+function buildExpandedDebugIssueBoardHeaderLines(aiReport, options = {}) {
+  const issues = Array.isArray(options.issues) ? options.issues : [];
+  const primary = aiReport?.primaryDiagnosis ?? null;
+  const issueCountText = issues.length === 1 ? "1 issue" : `${issues.length} issues`;
+  const headerLines = [
+    `Debug Issue Board | ${issueCountText} | room ${currentRoomId ?? "-"} | phase ${latestMatch?.phase ?? "-"} | ping ${Math.round(latestLatencyMs)}ms | jitter ${Math.round(options.jitterMs ?? 0)}ms | snapshot ${Math.round(options.snapshotAge ?? 0)}ms`
+  ];
+
+  if (options.objectiveStatusText) {
+    headerLines.push(`Objectives${String(options.objectiveStatusText).replace(" | ", ": ")}`);
+  }
+
+  if (primary) {
+    headerLines.push(
+      `Focus: ${primary.code} [${primary.subsystemTag} | ${primary.confidence}] | ${primary.aiSummary}`
+    );
+    headerLines.push(`Fix: ${primary.fixHint}`);
+  } else {
+    headerLines.push("Focus: clear");
+  }
+
+  headerLines.push(`Report: ${DEBUG_AI_REPORT_HOTKEY} copies JSON for AI triage. Game view is dimmed so every active issue can stay visible.`);
+  return headerLines;
+}
+
+function drawExpandedDebugIssueBoard(aiReport, issues, options = {}) {
+  const boardX = 12;
+  const boardY = 12;
+  const boardWidth = Math.max(320, canvas.width - 24);
+  const boardHeight = Math.max(240, canvas.height - 24);
+  const headerPaddingX = 16;
+  const headerFontSize = canvas.width < 1100 ? 11 : 12;
+  const headerLineHeight = headerFontSize + 5;
+  const headerCharBudget = Math.max(36, Math.floor((boardWidth - headerPaddingX * 2) / 7.2));
+  const headerLines = buildExpandedDebugIssueBoardHeaderLines(aiReport, options)
+    .flatMap((line) => wrapMonospaceDebugText(line, headerCharBudget));
+  const headerHeight = 18 + headerLines.length * headerLineHeight;
+  const issueAreaY = boardY + headerHeight + 10;
+  const issueAreaHeight = Math.max(120, boardHeight - headerHeight - 22);
+  const issueAreaWidth = boardWidth - 24;
+  const layout = buildExpandedDebugIssueBoardLayout(issues, issueAreaWidth, issueAreaHeight);
+
+  context.save();
+  context.textAlign = "left";
+  context.fillStyle = "rgba(4, 8, 16, 0.92)";
+  context.fillRect(boardX, boardY, boardWidth, boardHeight);
+  context.strokeStyle = "rgba(102, 206, 255, 0.24)";
+  context.lineWidth = 1;
+  context.strokeRect(boardX, boardY, boardWidth, boardHeight);
+
+  const primarySeverity = aiReport?.primaryDiagnosis?.severity ?? "info";
+  context.fillStyle =
+    primarySeverity === "error"
+      ? "rgba(48, 18, 18, 0.9)"
+      : primarySeverity === "warn"
+        ? "rgba(46, 34, 12, 0.88)"
+        : "rgba(10, 26, 34, 0.88)";
+  context.fillRect(boardX + 8, boardY + 8, boardWidth - 16, headerHeight);
+  context.font = `${headerFontSize}px Consolas, monospace`;
+  headerLines.forEach((line, index) => {
+    context.fillStyle =
+      index === 0
+        ? "rgba(255, 236, 176, 0.98)"
+        : "rgba(234, 241, 247, 0.94)";
+    context.fillText(line, boardX + headerPaddingX, boardY + 26 + index * headerLineHeight, boardWidth - headerPaddingX * 2);
+  });
+
+  if (!layout) {
+    context.fillStyle = "rgba(255, 214, 120, 0.96)";
+    context.font = "11px Consolas, monospace";
+    context.fillText(
+      "Unable to fit the expanded issue board layout. Press F8 to copy the full JSON report.",
+      boardX + 16,
+      issueAreaY + 20,
+      boardWidth - 32
+    );
+    context.restore();
+    return;
+  }
+
+  context.font = `${layout.fontSize}px Consolas, monospace`;
+  layout.columns.forEach((column, columnIndex) => {
+    const columnX = boardX + 12 + columnIndex * (layout.columnWidth + layout.columnGap);
+    let currentY = issueAreaY + 10;
+
+    column.blocks.forEach((block) => {
+      const blockHeight = block.lines.length * layout.lineHeight + 10;
+      context.fillStyle =
+        block.issue?.severity === "error"
+          ? "rgba(54, 20, 20, 0.9)"
+          : block.issue?.severity === "warn"
+            ? "rgba(48, 36, 14, 0.9)"
+            : "rgba(12, 30, 40, 0.88)";
+      context.fillRect(columnX, currentY - 2, layout.columnWidth, blockHeight);
+
+      block.lines.forEach((line, lineIndex) => {
+        context.fillStyle =
+          lineIndex === 0
+            ? block.issue?.severity === "error"
+              ? "rgba(255, 184, 184, 0.98)"
+              : block.issue?.severity === "warn"
+                ? "rgba(255, 225, 146, 0.98)"
+                : "rgba(176, 235, 255, 0.98)"
+            : "rgba(235, 240, 245, 0.94)";
+        context.fillText(
+          line,
+          columnX + layout.columnPadding,
+          currentY + lineIndex * layout.lineHeight + layout.fontSize,
+          layout.columnWidth - layout.columnPadding * 2
+        );
+      });
+
+      currentY += blockHeight + layout.cardGap;
+    });
+  });
+
+  context.restore();
+}
+
 function drawOverlay() {
   const now = Date.now();
   const localPlayer = getLocalPlayer();
@@ -7969,6 +8235,17 @@ function drawOverlay() {
   const lastAimChangeAge = lastAimInputChangedAt > 0 ? Math.max(0, now - lastAimInputChangedAt) : 0;
   const lastResyncAge = lastResyncRequestAt > 0 ? Math.max(0, now - lastResyncRequestAt) : 0;
   const objectiveStatusText = getObjectiveStatusText(latestObjective);
+
+  if (shouldUseExpandedDebugIssueBoard(issues)) {
+    drawExpandedDebugIssueBoard(aiReport, issues, {
+      issues,
+      jitterMs,
+      snapshotAge,
+      objectiveStatusText
+    });
+    return;
+  }
+
   const hudTop = getTopLeftHudInset();
   const leftX = 20;
   const leftY = hudTop + 4;
