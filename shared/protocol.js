@@ -1189,7 +1189,11 @@ export function createBulletSnapshot(bullet) {
     angle: roundTo(normalizeAngle(bullet?.angle), 4),
     speed: roundTo(readFiniteNumber(bullet?.speed, GAME_CONFIG.bullet.speed), 2),
     damage: Math.max(0, readInteger(bullet?.damage, GAME_CONFIG.bullet.damage)),
-    radius: Math.max(1, roundTo(readFiniteNumber(bullet?.radius, GAME_CONFIG.bullet.radius), 2))
+    radius: Math.max(1, roundTo(readFiniteNumber(bullet?.radius, GAME_CONFIG.bullet.radius), 2)),
+    bornAt: Number.isFinite(Number(bullet?.bornAt)) ? Math.round(Number(bullet.bornAt)) : null,
+    clientSentAt: Number.isFinite(Number(bullet?.clientSentAt)) ? Math.round(Number(bullet.clientSentAt)) : null,
+    inputSeq: Math.max(0, readInteger(bullet?.inputSeq, 0)),
+    barrelIndex: Math.max(0, readInteger(bullet?.barrelIndex, 0))
   };
 }
 

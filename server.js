@@ -185,6 +185,8 @@ const DEBUG_SIGNAL_MERGE_WINDOW_MS = 1_200;
 const DEBUG_SIGNAL_MAX_PER_TRACKER = 32;
 const DEBUG_SIGNAL_SNAPSHOT_LIMIT = 16;
 const DEBUG_SIGNAL_EXPANDED_SNAPSHOT_LIMIT = DEBUG_SIGNAL_MAX_PER_TRACKER * 2;
+const SERVER_TIMING_SIGNAL_GRACE_MS = 2_000;
+const SERVER_TIMING_SIGNAL_DEBOUNCE_TICKS = 3;
 const DEBUG_SIGNAL_SEVERITY_WEIGHT = Object.freeze({
   info: 1,
   warn: 2,
@@ -192,7 +194,9 @@ const DEBUG_SIGNAL_SEVERITY_WEIGHT = Object.freeze({
 });
 const serverTiming = {
   loopLagMs: 0,
-  lastTickDurationMs: 0
+  lastTickDurationMs: 0,
+  loopLagStrikeCount: 0,
+  tickDurationStrikeCount: 0
 };
 
 function createDebugTracker(now = Date.now()) {
@@ -11747,7 +11751,7 @@ function resolvePendingShots(room, now) {
     const tankRadius = getPlayerTankRadius(player);
     const barrelLengthMultiplier = getCombatProfileMultiplier(player.classId, "barrelLengthMultiplier", 1);
 
-    for (const barrel of shotBarrels) {
+    for (const [barrelIndex, barrel] of shotBarrels.entries()) {
       const barrelAngle = barrel.autoRotate
         ? (shot.fireTime / 1000) * AUTO_BARREL_ROT_SPEED
         : shot.turretAngle + (barrel.angle ?? 0);
@@ -11771,7 +11775,9 @@ function resolvePendingShots(room, now) {
         bornAt: shot.fireTime,
         lastSimulatedAt: shot.fireTime,
         lagCompensatedMs: shot.compensatedMs,
-        clientSentAt: shot.clientSentAt
+        clientSentAt: shot.clientSentAt,
+        inputSeq: shot.inputSeq,
+        barrelIndex
       };
 
       room.bullets.set(bulletId, bullet);
@@ -12633,14 +12639,29 @@ const simulationInterval = setInterval(() => {
     processedTicks > 0
       ? totalLoopDurationMs / processedTicks
       : totalLoopDurationMs;
-  if (serverTiming.loopLagMs >= fixedTickMs || serverTiming.lastTickDurationMs >= fixedTickMs) {
+  serverTiming.loopLagStrikeCount =
+    serverTiming.loopLagMs >= fixedTickMs
+      ? Math.min(serverTiming.loopLagStrikeCount + 1, 60)
+      : 0;
+  serverTiming.tickDurationStrikeCount =
+    serverTiming.lastTickDurationMs >= fixedTickMs
+      ? Math.min(serverTiming.tickDurationStrikeCount + 1, 60)
+      : 0;
+  if (
+    serverTiming.loopLagStrikeCount >= SERVER_TIMING_SIGNAL_DEBOUNCE_TICKS ||
+    serverTiming.tickDurationStrikeCount >= SERVER_TIMING_SIGNAL_DEBOUNCE_TICKS
+  ) {
     const signalNow = Date.now();
     for (const room of rooms.values()) {
       if (room.clients.size === 0) {
         continue;
       }
 
-      if (serverTiming.loopLagMs >= fixedTickMs) {
+      if (signalNow - Number(room.createdAt ?? signalNow) < SERVER_TIMING_SIGNAL_GRACE_MS) {
+        continue;
+      }
+
+      if (serverTiming.loopLagStrikeCount >= SERVER_TIMING_SIGNAL_DEBOUNCE_TICKS) {
         recordRoomDebugSignal(
           room,
           "server_loop_lag",
@@ -12653,7 +12674,7 @@ const simulationInterval = setInterval(() => {
         );
       }
 
-      if (serverTiming.lastTickDurationMs >= fixedTickMs) {
+      if (serverTiming.tickDurationStrikeCount >= SERVER_TIMING_SIGNAL_DEBOUNCE_TICKS) {
         recordRoomDebugSignal(
           room,
           "tick_rate_low",

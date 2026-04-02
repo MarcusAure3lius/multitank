@@ -150,6 +150,7 @@ const DEBUG_MONITOR = Object.freeze({
   eventTtlMs: 10_000,
   mergeWindowMs: 1_200,
   latencySampleSize: 20,
+  latencySampleWindowMs: 16_000,
   packetWindowSize: 24,
   pingTimeoutMs: 6_000,
   correctionWindowMs: 4_000,
@@ -1052,6 +1053,9 @@ function notePong(sentAt, now = Date.now()) {
     rtt
   });
 
+  debugMonitor.latencySamples = debugMonitor.latencySamples.filter(
+    (sample) => now - Number(sample?.at ?? 0) <= DEBUG_MONITOR.latencySampleWindowMs
+  );
   while (debugMonitor.latencySamples.length > DEBUG_MONITOR.latencySampleSize) {
     debugMonitor.latencySamples.shift();
   }
@@ -1060,6 +1064,10 @@ function notePong(sentAt, now = Date.now()) {
 }
 
 function getLatencyJitterMs() {
+  const now = Date.now();
+  debugMonitor.latencySamples = debugMonitor.latencySamples.filter(
+    (sample) => now - Number(sample?.at ?? 0) <= DEBUG_MONITOR.latencySampleWindowMs
+  );
   if (debugMonitor.latencySamples.length < 2) {
     return 0;
   }
@@ -1207,9 +1215,37 @@ function getLocalPredictionDelta() {
   return Math.hypot((visualState.x ?? localPlayer.x) - localPlayer.x, (visualState.y ?? localPlayer.y) - localPlayer.y);
 }
 
+function getExpectedPredictionSlackDistance(now = Date.now()) {
+  const oneWayLatencyMs = Math.max(0, Number(latestLatencyMs) || 0) * 0.5;
+  const jitterAllowanceMs = Math.min(LOCAL_PREDICTION.stallSoftLimitMs, getLatencyJitterMs()) * 0.4;
+  const snapshotAllowanceMs = Math.max(
+    0,
+    Math.min(
+      LOCAL_PREDICTION.stallSoftLimitMs,
+      getStatePacketAgeMs(now) - Math.round(1000 / GAME_CONFIG.snapshotRate)
+    )
+  ) * 0.35;
+  const effectiveDelayMs = Math.max(
+    getLocalInputDispatchMinIntervalMs(),
+    oneWayLatencyMs + jitterAllowanceMs + snapshotAllowanceMs
+  );
+
+  return getEffectiveLocalMoveSpeed() * (effectiveDelayMs / 1000);
+}
+
+function getActionablePredictionErrorDistance(now = Date.now()) {
+  return Math.max(
+    DEBUG_MONITOR.correctionIssueDistance,
+    Math.round(getExpectedPredictionSlackDistance(now) + Math.max(6, getLocalBodyRadius() * 0.25))
+  );
+}
+
 function noteReconciliation(distanceError, options = {}) {
   const now = Date.now();
-  if (distanceError < DEBUG_MONITOR.correctionIssueDistance) {
+  const actionableDistance = getActionablePredictionErrorDistance(now);
+  const severeDistance = Math.max(LOCAL_PREDICTION.snapGap, actionableDistance * 2);
+  const largeCorrectionDistance = Math.max(LOCAL_PREDICTION.maxSmoothGap, actionableDistance * 1.6);
+  if (distanceError < actionableDistance) {
     return;
   }
 
@@ -1222,22 +1258,22 @@ function noteReconciliation(distanceError, options = {}) {
   );
 
   recordDebugEvent("desync_detected", `Client/server state diverged by ${Math.round(distanceError)} units`, {
-    severity: distanceError >= LOCAL_PREDICTION.snapGap ? "error" : "warn",
+    severity: distanceError >= severeDistance ? "error" : "warn",
     ttlMs: 8_000,
     key: "desync_detected"
   });
   recordDebugEvent("movement_corrected_by_server", `Server reconciliation corrected ${Math.round(distanceError)} units`, {
-    severity: distanceError >= LOCAL_PREDICTION.snapGap ? "error" : "warn",
+    severity: distanceError >= severeDistance ? "error" : "warn",
     ttlMs: 8_000,
     key: "movement_corrected_by_server"
   });
 
-  if (distanceError >= LOCAL_PREDICTION.maxSmoothGap) {
+  if (distanceError >= largeCorrectionDistance) {
     recordDebugEvent(
       "large_reconciliation_correction",
       `Large reconciliation correction detected (${Math.round(distanceError)} units)`,
       {
-        severity: distanceError >= LOCAL_PREDICTION.snapGap ? "error" : "warn",
+        severity: distanceError >= severeDistance ? "error" : "warn",
         ttlMs: 8_000,
         key: "large_reconciliation_correction"
       }
@@ -1246,7 +1282,7 @@ function noteReconciliation(distanceError, options = {}) {
 
   if (
     Math.max(0, Number(options.pendingReplayCount ?? pendingInputs.length) || 0) >= DEBUG_MONITOR.replayInputWarningCount &&
-    distanceError >= DEBUG_MONITOR.correctionIssueDistance
+    distanceError >= actionableDistance
   ) {
     recordDebugEvent(
       "large_correction_after_replay",
@@ -1485,13 +1521,21 @@ function noteSnapshotDebugState(payload, now = Date.now()) {
   pruneSnapshotDebugState(now);
 }
 
-function notePredictedShotPending(projectileId, inputFrame, now = Date.now()) {
+function buildPredictedProjectileId(inputSeq, barrelIndex = 0) {
+  const resolvedSeq = Math.max(0, Number(inputSeq) || 0);
+  const resolvedBarrelIndex = Math.max(0, Number(barrelIndex) || 0);
+  return `predicted:${resolvedSeq}:${resolvedBarrelIndex}`;
+}
+
+function notePredictedShotPending(projectileId, inputFrame, now = Date.now(), barrelIndex = 0) {
   if (!projectileId) {
     return;
   }
 
   debugMonitor.pendingPredictedShots.set(projectileId, {
     seq: Number(inputFrame?.seq ?? 0) || 0,
+    clientSentAt: Number(inputFrame?.clientSentAt ?? 0) || 0,
+    barrelIndex: Math.max(0, Number(barrelIndex) || 0),
     createdAt: now
   });
 }
@@ -1560,6 +1604,11 @@ function getDynamicDebugIssues(now = Date.now()) {
   const serverTickWorkMs = Math.max(0, Number(latestDebugInfo?.tickDurationMs ?? 0) || 0);
   const localPredictionDelta = getLocalPredictionDelta();
   const tickBudgetMs = 1000 / GAME_CONFIG.serverTickRate;
+  const livePredictionIssueDistance = Math.max(
+    LOCAL_PREDICTION.maxSmoothGap,
+    getActionablePredictionErrorDistance(now) * 2
+  );
+  const severeLivePredictionDistance = Math.max(LOCAL_PREDICTION.snapGap, livePredictionIssueDistance * 1.35);
 
   if (latestLatencyMs >= DEBUG_MONITOR.highPingMs) {
     issues.push(buildDynamicDebugIssue("high_ping", `Ping is high at ${Math.round(latestLatencyMs)}ms`, "warn", now));
@@ -1641,12 +1690,12 @@ function getDynamicDebugIssues(now = Date.now()) {
     );
   }
 
-  if (localPredictionDelta >= LOCAL_PREDICTION.maxSmoothGap) {
+  if (localPredictionDelta >= livePredictionIssueDistance) {
     issues.push(
       buildDynamicDebugIssue(
         "desync_detected_live",
         `Live client/server position delta is ${Math.round(localPredictionDelta)} units`,
-        localPredictionDelta >= LOCAL_PREDICTION.snapGap ? "error" : "warn",
+        localPredictionDelta >= severeLivePredictionDistance ? "error" : "warn",
         now
       )
     );
@@ -1708,6 +1757,10 @@ function getActiveDebugIssues(now = Date.now()) {
       Number(right.lastAt ?? 0) - Number(left.lastAt ?? 0) ||
       String(left.message ?? "").localeCompare(String(right.message ?? ""))
   );
+}
+
+function isActionableDebugIssue(issue) {
+  return issue?.severity === "warn" || issue?.severity === "error";
 }
 
 function buildDebugIssuesSummary(now = Date.now()) {
@@ -4480,7 +4533,7 @@ function spawnPredictedProjectile(localPlayer, inputFrame) {
       origin.x + Math.cos(barrelAngle) * muzzleDistance + bRightX * lateralOffset;
     const muzzleY =
       origin.y + Math.sin(barrelAngle) * muzzleDistance + bRightY * lateralOffset;
-    const predictedId = `predicted:${inputFrame.seq}:${index}`;
+    const predictedId = buildPredictedProjectileId(inputFrame.seq, index);
 
     predictedProjectiles.set(predictedId, {
       id: predictedId,
@@ -4499,14 +4552,37 @@ function spawnPredictedProjectile(localPlayer, inputFrame) {
       bornAt: now,
       expiresAt: now + Math.min(450, GAME_CONFIG.bullet.lifeMs)
     });
-    notePredictedShotPending(predictedId, inputFrame, Date.now());
+    notePredictedShotPending(predictedId, inputFrame, Date.now(), index);
   });
 
   triggerShotRecoil(localPlayer, now, { predicted: true });
 }
 
+function getAuthoritativeProjectileMatchKey(authoritativeBullet) {
+  const inputSeq = Number(authoritativeBullet?.inputSeq ?? 0);
+  if (!Number.isInteger(inputSeq) || inputSeq <= 0) {
+    return null;
+  }
+
+  return buildPredictedProjectileId(inputSeq, authoritativeBullet?.barrelIndex ?? 0);
+}
+
 function takePredictedProjectileMatch(authoritativeBullet) {
-  if (!authoritativeBullet || authoritativeBullet.ownerId !== localPlayerId || predictedProjectiles.size === 0) {
+  if (!authoritativeBullet || authoritativeBullet.ownerId !== localPlayerId) {
+    return null;
+  }
+
+  const exactMatchId = getAuthoritativeProjectileMatchKey(authoritativeBullet);
+  if (exactMatchId) {
+    const exactMatch = predictedProjectiles.get(exactMatchId) ?? null;
+    notePredictedShotMatched(exactMatchId);
+    if (exactMatch) {
+      predictedProjectiles.delete(exactMatchId);
+    }
+    return exactMatch;
+  }
+
+  if (predictedProjectiles.size === 0) {
     return null;
   }
 
@@ -7448,6 +7524,8 @@ function buildDebugMetricsSnapshot(now = Date.now(), options = {}) {
     lastAimChangeAgeMs,
     lastResyncAgeMs,
     localPredictionDelta,
+    expectedPredictionSlackDistance: Number(getExpectedPredictionSlackDistance(now).toFixed(1)),
+    actionablePredictionErrorDistance: getActionablePredictionErrorDistance(now),
     estimatedTickRate,
     expectedTickRate: GAME_CONFIG.serverTickRate,
     tickBudgetMs: 1000 / GAME_CONFIG.serverTickRate,
@@ -7517,6 +7595,7 @@ function buildDebugIssueEvidence(issue, metrics) {
       break;
     case "prediction":
       parts.push(`delta ${metrics.localPredictionDelta.toFixed(1)}`);
+      parts.push(`budget ${metrics.actionablePredictionErrorDistance}`);
       parts.push(`pending ${metrics.pendingInputs}/${metrics.pendingInputCount}`);
       parts.push(`snapshot ${metrics.snapshotAgeMs}ms`);
       break;
@@ -7537,6 +7616,7 @@ function buildDebugIssueEvidence(issue, metrics) {
       break;
     case "combat":
       parts.push(`shotQ ${metrics.pendingPredictedShots}`);
+      parts.push(`ping ${Math.round(metrics.latestLatencyMs)}ms`);
       parts.push(`reliable ${metrics.pendingReliableSummary}`);
       break;
     case "render":
@@ -7656,6 +7736,7 @@ function buildDebugSubsystemSummary(issues) {
 function buildAiDebugReport(now = Date.now(), options = {}) {
   const metrics = buildDebugMetricsSnapshot(now, options);
   const issues = getActiveDebugIssues(now)
+    .filter(isActionableDebugIssue)
     .map((issue) => buildDiagnosedDebugIssue(issue, metrics, now))
     .sort(sortDebugIssuesForAi);
   const primary = issues[0] ?? null;
