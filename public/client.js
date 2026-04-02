@@ -5068,6 +5068,7 @@ function connect(options = {}) {
       authToken,
       sessionId: clientSessionId,
       spectate: spectateInput.checked,
+      debugHud: debugUiEnabled,
       mapId: mapSelect.value,
       teamId: teamSelect.value,
       classId: classSelect.value,
@@ -6834,6 +6835,32 @@ function buildDebugIssueLabel(issue) {
   return `[${severityLabel}${countSuffix}] ${codeLabel} | ${messageLabel}`;
 }
 
+function getDebugIssuePanelLayout(issueCount, canvasWidth, canvasHeight, issuePanelY) {
+  const fontSize = issueCount > 48 ? 11 : issueCount > 28 ? 12 : 14;
+  const lineHeight = fontSize + 4;
+  const columnGap = 16;
+  const availableHeight = Math.max(lineHeight * 3, canvasHeight - issuePanelY - 24);
+  const rowsPerColumn = Math.max(1, Math.floor((availableHeight - lineHeight) / lineHeight));
+  const columnCount = Math.max(1, Math.ceil(Math.max(issueCount, 1) / rowsPerColumn));
+  const maxColumnWidth = Math.min(380, Math.max(220, Math.round(canvasWidth * 0.24)));
+  const availableWidth = Math.max(220, canvasWidth - 40);
+  const rawColumnWidth = Math.floor((availableWidth - columnGap * Math.max(0, columnCount - 1)) / columnCount);
+  const columnWidth = Math.max(160, Math.min(maxColumnWidth, rawColumnWidth));
+  const visibleRowCount = issueCount === 0 ? 1 : Math.min(rowsPerColumn, issueCount);
+
+  return {
+    columnCount,
+    columnGap,
+    columnWidth,
+    fontSize,
+    lineHeight,
+    rowsPerColumn,
+    panelWidth: columnWidth * columnCount + columnGap * Math.max(0, columnCount - 1),
+    panelHeight: 18 + (visibleRowCount + 1) * lineHeight,
+    textMaxWidth: Math.max(120, columnWidth - 8)
+  };
+}
+
 function drawOverlay() {
   const now = Date.now();
   const localPlayer = getLocalPlayer();
@@ -6906,24 +6933,34 @@ function drawOverlay() {
     context.fillText(line, leftX, leftY + index * lineHeight);
   });
 
-  const issuePanelWidth = Math.min(560, Math.max(300, canvas.width * 0.36));
-  const issuePanelX = Math.max(20, canvas.width - issuePanelWidth - 20);
   const issuePanelY = hudTop + 4;
+  const issueLayout = getDebugIssuePanelLayout(issues.length, canvas.width, canvas.height, issuePanelY);
+  const issuePanelWidth = issueLayout.panelWidth;
+  const issuePanelX = Math.max(20, canvas.width - issuePanelWidth - 20);
   const issueHeader = issues.length === 0 ? "Debug Issues: clear" : `Debug Issues: ${issues.length}`;
-  const visibleIssues = issues.slice(0, Math.min(8, issues.length));
-  const issuePanelHeight = 18 + (visibleIssues.length === 0 ? 2 : visibleIssues.length + 1) * lineHeight;
+  const issuePanelHeight = issueLayout.panelHeight;
   context.fillStyle = issues.length === 0 ? "rgba(8, 30, 20, 0.78)" : "rgba(38, 14, 14, 0.82)";
   context.fillRect(issuePanelX - 12, issuePanelY - 18, issuePanelWidth, issuePanelHeight);
   context.fillStyle = issues.length === 0 ? "rgba(131, 255, 194, 0.96)" : "rgba(255, 186, 186, 0.96)";
-  context.fillText(issueHeader, issuePanelX, issuePanelY);
+  context.font = `${issueLayout.fontSize}px Consolas, monospace`;
+  context.fillText(issueHeader, issuePanelX, issuePanelY, issuePanelWidth);
 
-  if (visibleIssues.length === 0) {
+  if (issues.length === 0) {
     context.fillStyle = "rgba(195, 255, 219, 0.88)";
-    context.fillText("No active breakage signals detected.", issuePanelX, issuePanelY + lineHeight);
+    context.fillText(
+      "No active breakage signals detected.",
+      issuePanelX,
+      issuePanelY + issueLayout.lineHeight,
+      issueLayout.textMaxWidth
+    );
     return;
   }
 
-  visibleIssues.forEach((issue, index) => {
+  issues.forEach((issue, index) => {
+    const column = Math.floor(index / issueLayout.rowsPerColumn);
+    const row = index % issueLayout.rowsPerColumn;
+    const issueX = issuePanelX + column * (issueLayout.columnWidth + issueLayout.columnGap);
+    const issueY = issuePanelY + (row + 1) * issueLayout.lineHeight;
     context.fillStyle =
       issue.severity === "error"
         ? "rgba(255, 132, 132, 0.96)"
@@ -6932,8 +6969,9 @@ function drawOverlay() {
           : "rgba(176, 235, 255, 0.96)";
     context.fillText(
       buildDebugIssueLabel(issue),
-      issuePanelX,
-      issuePanelY + (index + 1) * lineHeight
+      issueX,
+      issueY,
+      issueLayout.textMaxWidth
     );
   });
 }

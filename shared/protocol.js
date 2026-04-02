@@ -1443,16 +1443,17 @@ function createDebugSignalPayload(signal) {
   };
 }
 
-function createDebugPayload(debug) {
+function createDebugPayload(debug, maxSignals = 16) {
   if (!debug || typeof debug !== "object") {
     return null;
   }
 
+  const signalLimit = clampInteger(maxSignals, 0, 64, 16);
   return {
     serverLoopLagMs: Math.max(0, readInteger(debug?.serverLoopLagMs, 0)),
     tickDurationMs: Math.max(0, readInteger(debug?.tickDurationMs, 0)),
     signals: Array.isArray(debug?.signals)
-      ? debug.signals.map(createDebugSignalPayload).filter(Boolean).slice(0, 16)
+      ? debug.signals.map(createDebugSignalPayload).filter(Boolean).slice(0, signalLimit)
       : []
   };
 }
@@ -1476,7 +1477,8 @@ export function createStatePayload({
   inventory,
   replication,
   you,
-  debug
+  debug,
+  debugSignalLimit
 }) {
   const basicSpecializationChoice =
     typeof you?.basicSpecializationChoice === "string" &&
@@ -1502,7 +1504,7 @@ export function createStatePayload({
     events: (events ?? []).map(createEventSnapshot).filter(Boolean),
     inventory: (inventory ?? []).map(createInventoryState),
     replication: createReplicationPayload(replication),
-    debug: createDebugPayload(debug),
+    debug: createDebugPayload(debug, debugSignalLimit),
     you: you
         ? {
           playerId: sanitizeText(you.playerId ?? "", "", 96),
@@ -1559,6 +1561,7 @@ function normalizeJoinPacket(packet, version) {
     authToken: sanitizeAuthToken(packet.authToken ?? packet.at),
     sessionId: sanitizeSessionId(packet.sessionId ?? packet.sid),
     spectate: readBoolean(packet.spectate ?? packet.sp, false),
+    debugHud: readBoolean(packet.debugHud ?? packet.dbg, false),
     mapId: sanitizeText(packet.mapId ?? packet.mid, "", 24) || null,
     teamId: sanitizeText(packet.teamId ?? packet.tid, "", 24) || null,
     classId: sanitizeText(packet.classId ?? packet.cid, "", 24) || null,
@@ -1863,6 +1866,7 @@ function encodePacketObject(packet) {
         at: sanitizeAuthToken(packet.authToken),
         sid: sanitizeSessionId(packet.sessionId),
         sp: readBoolean(packet.spectate, false),
+        dbg: readBoolean(packet.debugHud, false),
         mid: sanitizeText(packet.mapId ?? "", "", 24) || null,
         tid: sanitizeText(packet.teamId ?? "", "", 24) || null,
         cid: sanitizeText(packet.classId ?? "", "", 24) || null,

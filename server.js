@@ -182,8 +182,9 @@ let isShuttingDown = false;
 let connectedSocketCount = 0;
 const DEBUG_SIGNAL_DEFAULT_TTL_MS = 10_000;
 const DEBUG_SIGNAL_MERGE_WINDOW_MS = 1_200;
-const DEBUG_SIGNAL_MAX_PER_TRACKER = 24;
+const DEBUG_SIGNAL_MAX_PER_TRACKER = 32;
 const DEBUG_SIGNAL_SNAPSHOT_LIMIT = 16;
+const DEBUG_SIGNAL_EXPANDED_SNAPSHOT_LIMIT = DEBUG_SIGNAL_MAX_PER_TRACKER * 2;
 const DEBUG_SIGNAL_SEVERITY_WEIGHT = Object.freeze({
   info: 1,
   warn: 2,
@@ -322,7 +323,12 @@ function getActiveDebugSignals(tracker, now = Date.now()) {
     }));
 }
 
-function buildDebugSnapshot(room, player, now = Date.now()) {
+function buildDebugSnapshot(room, player, now = Date.now(), maxSignals = DEBUG_SIGNAL_SNAPSHOT_LIMIT) {
+  const resolvedMaxSignals = clamp(
+    Math.round(Number(maxSignals ?? DEBUG_SIGNAL_SNAPSHOT_LIMIT) || DEBUG_SIGNAL_SNAPSHOT_LIMIT),
+    0,
+    DEBUG_SIGNAL_EXPANDED_SNAPSHOT_LIMIT
+  );
   const signals = [
     ...getActiveDebugSignals(room?.debug, now),
     ...getActiveDebugSignals(player?.debug, now)
@@ -333,7 +339,7 @@ function buildDebugSnapshot(room, player, now = Date.now()) {
         Number(right.lastAt ?? 0) - Number(left.lastAt ?? 0) ||
         String(left.code ?? "").localeCompare(String(right.code ?? ""))
     )
-    .slice(0, DEBUG_SIGNAL_SNAPSHOT_LIMIT);
+    .slice(0, resolvedMaxSignals);
 
   return {
     serverLoopLagMs: Math.max(0, Math.round(Number(serverTiming.loopLagMs ?? 0) || 0)),
@@ -9360,6 +9366,7 @@ function joinRoom(socket, payload) {
   socket.data.profileId = profile.profileId;
   socket.data.sessionId = player.sessionId ?? requestedSessionId ?? null;
   socket.data.playerName = playerName;
+  socket.data.debugUiEnabled = Boolean(payload.debugHud);
   markSocketForFullSync(socket);
   room.clients.add(socket);
   syncRoomOwner(room);
@@ -12056,6 +12063,9 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq) {
   const interest = buildViewerInterestSet(room, player, socket);
   const replication = buildReplicationPayloadForSocket(socket, room, player, snapshotSeq, now, interest);
   const includeFullCollections = replication.mode === "full";
+  const debugSignalLimit = socket?.data?.debugUiEnabled
+    ? DEBUG_SIGNAL_EXPANDED_SNAPSHOT_LIMIT
+    : DEBUG_SIGNAL_SNAPSHOT_LIMIT;
   const visiblePlayers = includeFullCollections
     ? interest.players.map((candidate) => createViewerPlayerState(candidate, player))
     : [];
@@ -12087,7 +12097,8 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq) {
     events: visibleEvents,
     inventory: player ? [createInventoryState(player)] : [],
     replication,
-    debug: buildDebugSnapshot(room, player, now),
+    debugSignalLimit,
+    debug: buildDebugSnapshot(room, player, now, debugSignalLimit),
     you: player
       ? {
           playerId: player.id,
@@ -12384,6 +12395,7 @@ wss.on("connection", (socket, request) => {
     roomId: null,
     accountId: null,
     playerName: null,
+    debugUiEnabled: false,
     profileId: null,
     sessionId: null,
     origin: request.headers.origin ?? null,
