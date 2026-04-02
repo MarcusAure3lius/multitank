@@ -557,7 +557,27 @@ body {
   background: rgba(255,245,100,0.95); color: #111;
   border-radius: 12px; font-size: 0.88rem;
   box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+  line-height: 1.35;
   white-space: pre-line; pointer-events: none;
+}
+
+.diagnostic-banner.diagnostic-banner--debug {
+  left: auto;
+  right: 18px;
+  bottom: 18px;
+  max-width: min(360px, calc(100vw - 36px));
+  padding: 8px 12px;
+  font-size: 0.8rem;
+  background: rgba(255,245,100,0.9);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.28);
+}
+
+@media (max-width: 900px) {
+  .diagnostic-banner.diagnostic-banner--debug {
+    left: 18px;
+    right: 18px;
+    max-width: calc(100vw - 36px);
+  }
 }
 
 /* ── UPGRADE MENU (HTML fallback, actual drawing is on canvas) ── */

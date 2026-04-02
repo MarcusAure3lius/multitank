@@ -899,6 +899,7 @@ function setDebugUiEnabled(enabled, options = {}) {
   }
 
   updateLocalDevBadge();
+  syncDiagnosticBannerPresentation();
   updateDiagnosticBanner();
 }
 
@@ -925,6 +926,16 @@ function requestCompatibilityRefresh(reason) {
 function setStatus(text) {
   setElementText(statusElement, text);
   updateDiagnosticBanner();
+}
+
+function syncDiagnosticBannerPresentation() {
+  if (!diagnosticBannerElement) {
+    return false;
+  }
+
+  const useDebugCompactLayout = debugUiEnabled && hasPlayableSession();
+  diagnosticBannerElement.classList.toggle("diagnostic-banner--debug", useDebugCompactLayout);
+  return useDebugCompactLayout;
 }
 
 function setElementText(element, text) {
@@ -2306,6 +2317,7 @@ function updateSessionChrome() {
   syncClassTabsVisibility();
   syncJoinMatchButton();
   refreshDeathOverlay();
+  syncDiagnosticBannerPresentation();
   updateDiagnosticBanner();
 }
 
@@ -2315,6 +2327,7 @@ function updateDiagnosticBanner() {
   }
 
   const now = Date.now();
+  const useDebugCompactLayout = syncDiagnosticBannerPresentation();
   const localPlayer = getLocalPlayer();
   const snapshotState = hasSeenLocalPlayerSnapshot ? "yes" : "no";
   const spectatorState = latestYou?.isSpectator ?? localPlayer?.isSpectator ?? false;
@@ -2324,15 +2337,21 @@ function updateDiagnosticBanner() {
   const shouldShowCloseSummary = socket?.readyState !== WebSocket.OPEN && lastSocketCloseInfo;
   const issuesSummary = buildDebugIssuesSummary(now);
 
-  const nextText =
-    `Status: ${statusElement.textContent}\n` +
-    `Room: ${currentRoomId ?? "-"} | Snapshot: ${snapshotState} | Players: ${players.size}\n` +
-    `Local Player: ${playerSummary}\n` +
-    `Playable: ${hasPlayableSession() ? "yes" : "no"} | Spectator: ${spectatorState ? "yes" : "no"} | Zoom: ${cameraZoom.toFixed(2)}` +
-    (debugUiEnabled || issuesSummary !== "none" ? `\nIssues: ${issuesSummary}` : "") +
-    (spectatorState ? "\nFree Cam: WASD/Arrows move | Mouse Wheel or +/- zoom | 0 recenters" : "") +
-    (shouldShowCloseSummary ? `\nLast Close: ${formatSocketCloseInfo(lastSocketCloseInfo)}` : "") +
-    (renderFailure ? `\nRender Error: ${renderFailure}` : "");
+  const nextText = useDebugCompactLayout
+    ? `Status: ${statusElement.textContent}\n` +
+      `Room: ${currentRoomId ?? "-"} | Snapshot: ${snapshotState} | Players: ${players.size}\n` +
+      `Player: ${playerSummary} | Spec: ${spectatorState ? "yes" : "no"} | Zoom: ${cameraZoom.toFixed(2)}` +
+      (spectatorState ? "\nFree Cam: WASD/Arrows | Wheel or +/- | 0 recenters" : "") +
+      (shouldShowCloseSummary ? `\nLast Close: ${formatSocketCloseInfo(lastSocketCloseInfo)}` : "") +
+      (renderFailure ? `\nRender Error: ${renderFailure}` : "")
+    : `Status: ${statusElement.textContent}\n` +
+      `Room: ${currentRoomId ?? "-"} | Snapshot: ${snapshotState} | Players: ${players.size}\n` +
+      `Local Player: ${playerSummary}\n` +
+      `Playable: ${hasPlayableSession() ? "yes" : "no"} | Spectator: ${spectatorState ? "yes" : "no"} | Zoom: ${cameraZoom.toFixed(2)}` +
+      (debugUiEnabled || issuesSummary !== "none" ? `\nIssues: ${issuesSummary}` : "") +
+      (spectatorState ? "\nFree Cam: WASD/Arrows move | Mouse Wheel or +/- zoom | 0 recenters" : "") +
+      (shouldShowCloseSummary ? `\nLast Close: ${formatSocketCloseInfo(lastSocketCloseInfo)}` : "") +
+      (renderFailure ? `\nRender Error: ${renderFailure}` : "");
 
   if (diagnosticBannerElement.hidden) {
     diagnosticBannerElement.hidden = false;
