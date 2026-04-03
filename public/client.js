@@ -2480,9 +2480,9 @@ function updateLocalRenderState(deltaSeconds) {
 
   const gapDistance = Math.hypot(visualState.x - renderState.x, visualState.y - renderState.y);
 
-  const followAmount = canSimulateLocalPlayer() && localPlayer.alive
-    ? clamp(1 - Math.exp(-(hasMovementInputActive() ? 28 : 18) * deltaSeconds), 0.24, 0.62)
-    : clamp(1 - Math.exp(-16 * deltaSeconds), 0.18, 0.4);
+  // This path is only reached when the player is dead or not simulatable,
+  // so always use the passive follow rate (dead/spectator camera catch-up).
+  const followAmount = clamp(1 - Math.exp(-16 * deltaSeconds), 0.18, 0.4);
   const boostedFollowAmount =
     gapDistance >= LOCAL_PREDICTION.maxSmoothGap
       ? Math.max(followAmount, 0.78)
@@ -6269,10 +6269,12 @@ function updateVisualAnimationState(player, fallbackMoveBlend = 0) {
 }
 
 function updateRenderState(deltaSeconds, frameAt) {
-  const smoothing = players.size > 1
-    ? clamp(1 - Math.exp(-15 * deltaSeconds), 0.12, 0.3)
-    : clamp(1 - Math.exp(-20 * deltaSeconds), 0.18, 0.42);
-  const correctionDecay = clamp(1 - Math.exp(-8 * deltaSeconds), 0.06, 0.2);
+  // Decay correction offsets faster so reconciliation rubber-banding resolves in ~150ms
+  // instead of ~500ms, giving cleaner feel after server corrections.
+  const correctionDecay = clamp(1 - Math.exp(-18 * deltaSeconds), 0.12, 0.42);
+  // Frame-rate-independent remote player smoothing: k=42 is equivalent to the old 0.52
+  // constant at 60fps but remains consistent at 30fps, 120fps, 144fps, etc.
+  const remoteFollowAmount = clamp(1 - Math.exp(-42 * deltaSeconds), 0.12, 0.72);
   const renderServerTime = estimateServerTime(frameAt) - getRemoteInterpolationBackTimeMs();
 
   for (const player of players.values()) {
@@ -6280,23 +6282,9 @@ function updateRenderState(deltaSeconds, frameAt) {
     const previousDisplayY = getPlayerVisualY(player);
 
     if (player.id === localPlayerId && canSimulateLocalPlayer()) {
-      player.targetX = player.renderX ?? player.x;
-      player.targetY = player.renderY ?? player.y;
-      player.targetAngle = player.renderAngle ?? player.angle;
-      player.targetTurretAngle = player.renderTurretAngle ?? player.turretAngle;
-
-      player.renderX = lerp(player.renderX ?? player.x, player.targetX ?? player.x, smoothing);
-      player.renderY = lerp(player.renderY ?? player.y, player.targetY ?? player.y, smoothing);
-      player.renderAngle = lerpAngle(
-        player.renderAngle ?? player.angle,
-        player.targetAngle ?? player.angle,
-        smoothing
-      );
-      player.renderTurretAngle = lerpAngle(
-        player.renderTurretAngle ?? player.turretAngle,
-        player.targetTurretAngle ?? player.turretAngle,
-        smoothing
-      );
+      // Local player position/angle is driven by updateResponsiveLocalPrediction and
+      // replayPendingInputs — no lerp needed here. Just decay the server-correction
+      // offsets so reconciliation artifacts blend out, then apply them to displayX/Y.
       player.correctionOffsetX = lerp(player.correctionOffsetX ?? 0, 0, correctionDecay);
       player.correctionOffsetY = lerp(player.correctionOffsetY ?? 0, 0, correctionDecay);
       player.correctionOffsetAngle = lerpAngle(player.correctionOffsetAngle ?? 0, 0, correctionDecay);
@@ -6305,11 +6293,11 @@ function updateRenderState(deltaSeconds, frameAt) {
         0,
         correctionDecay
       );
-      player.displayX = player.renderX + (player.correctionOffsetX ?? 0);
-      player.displayY = player.renderY + (player.correctionOffsetY ?? 0);
-      player.displayAngle = player.renderAngle + (player.correctionOffsetAngle ?? 0);
+      player.displayX = (player.renderX ?? player.x) + (player.correctionOffsetX ?? 0);
+      player.displayY = (player.renderY ?? player.y) + (player.correctionOffsetY ?? 0);
+      player.displayAngle = (player.renderAngle ?? player.angle) + (player.correctionOffsetAngle ?? 0);
       player.displayTurretAngle =
-        player.renderTurretAngle + (player.correctionOffsetTurretAngle ?? 0);
+        (player.renderTurretAngle ?? player.turretAngle) + (player.correctionOffsetTurretAngle ?? 0);
     } else {
       const sample = sampleNetworkHistory(player, "player", renderServerTime) ?? {
         x: player.x,
@@ -6332,17 +6320,17 @@ function updateRenderState(deltaSeconds, frameAt) {
         player.renderAngle = sample.angle;
         player.renderTurretAngle = sample.turretAngle;
       } else {
-        player.renderX = lerp(player.renderX ?? sample.x, sample.x, NETWORK_RENDER.remoteSmoothing);
-        player.renderY = lerp(player.renderY ?? sample.y, sample.y, NETWORK_RENDER.remoteSmoothing);
+        player.renderX = lerp(player.renderX ?? sample.x, sample.x, remoteFollowAmount);
+        player.renderY = lerp(player.renderY ?? sample.y, sample.y, remoteFollowAmount);
         player.renderAngle = lerpAngle(
           player.renderAngle ?? sample.angle,
           sample.angle,
-          NETWORK_RENDER.remoteSmoothing
+          remoteFollowAmount
         );
         player.renderTurretAngle = lerpAngle(
           player.renderTurretAngle ?? sample.turretAngle,
           sample.turretAngle,
-          NETWORK_RENDER.remoteSmoothing
+          remoteFollowAmount
         );
       }
 
@@ -6406,7 +6394,9 @@ function updateRenderState(deltaSeconds, frameAt) {
     const targetBulletY = sample.y + handoffOffsetY;
     const dx = targetBulletX - currentBulletX;
     const dy = targetBulletY - currentBulletY;
-    const bulletFollowAmount = 0.82;
+    // Frame-rate-independent bullet tracking: k=70 gives fast convergence
+    // (~50ms) that is consistent across 30/60/120/144fps.
+    const bulletFollowAmount = clamp(1 - Math.exp(-70 * deltaSeconds), 0.25, 0.88);
     const shouldSnap =
       (bullet.teleportFrames ?? 0) > 0 ||
       dx * dx + dy * dy > NETWORK_RENDER.snapDistance * NETWORK_RENDER.snapDistance;
