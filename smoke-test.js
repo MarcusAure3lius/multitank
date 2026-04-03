@@ -1763,6 +1763,191 @@ try {
   await soloRespawnAckPromise;
 
   solo.close();
+  await once(solo, "close");
+
+  const freshSessionProfileId = "fresh-session-smoke";
+  const freshSessionRoomId = "fresh-session-room";
+  const freshSessionA = await connectClient("FreshSessionA");
+  const freshSessionAJoinedPromise = waitForMessage(
+    freshSessionA,
+    (payload) => payload.type === MESSAGE_TYPES.JOINED
+  );
+  const freshSessionAAckPromise = waitForMessage(
+    freshSessionA,
+    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "join-fresh-session-a"
+  );
+  joinRoom(freshSessionA, "Fresh Session A", freshSessionProfileId, "join-fresh-session-a", {
+    roomId: freshSessionRoomId,
+    sessionId: "fresh-session-a",
+    teamId: "alpha"
+  });
+  const [freshSessionAJoined] = await Promise.all([freshSessionAJoinedPromise, freshSessionAAckPromise]);
+  const freshSessionPlayerId = freshSessionAJoined.playerId;
+  sendInput(freshSessionA, {
+    seq: 1,
+    clientSentAt: Date.now(),
+    forward: false,
+    back: false,
+    left: false,
+    right: true,
+    shoot: false,
+    turretAngle: 0
+  });
+  sendInput(freshSessionA, {
+    seq: 2,
+    clientSentAt: Date.now(),
+    forward: false,
+    back: false,
+    left: false,
+    right: false,
+    shoot: false,
+    turretAngle: 0
+  });
+  await waitForState(
+    freshSessionA,
+    (payload) => payload.you?.lastProcessedInputSeq === 2,
+    "fresh session initial input sequence"
+  );
+  freshSessionA.close();
+  await once(freshSessionA, "close");
+
+  const freshSessionB = await connectClient("FreshSessionB");
+  const freshSessionBJoinedPromise = waitForMessage(
+    freshSessionB,
+    (payload) => payload.type === MESSAGE_TYPES.JOINED
+  );
+  const freshSessionBAckPromise = waitForMessage(
+    freshSessionB,
+    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "join-fresh-session-b"
+  );
+  joinRoom(freshSessionB, "Fresh Session B", freshSessionProfileId, "join-fresh-session-b", {
+    roomId: freshSessionRoomId,
+    sessionId: "fresh-session-b",
+    teamId: "alpha"
+  });
+  const [freshSessionBJoined] = await Promise.all([freshSessionBJoinedPromise, freshSessionBAckPromise]);
+
+  if (freshSessionBJoined.playerId !== freshSessionPlayerId) {
+    throw new Error("Expected a disconnected player to be reclaimed when rejoining from a fresh tab session");
+  }
+
+  await waitForState(
+    freshSessionB,
+    (payload) => payload.you?.playerId === freshSessionPlayerId,
+    "fresh session reclaimed player state"
+  );
+
+  sendInput(freshSessionB, {
+    seq: 1,
+    clientSentAt: Date.now(),
+    forward: false,
+    back: false,
+    left: false,
+    right: true,
+    shoot: false,
+    turretAngle: 0
+  });
+
+  const freshSessionResumeState = await waitForState(
+    freshSessionB,
+    (payload) => payload.you?.lastProcessedInputSeq === 1,
+    "fresh session restarted input sequence"
+  );
+
+  if ((freshSessionResumeState.you?.lastProcessedInputSeq ?? 0) !== 1) {
+    throw new Error("Expected a reclaimed fresh-session player to restart input sequencing from 1");
+  }
+
+  freshSessionB.close();
+  await once(freshSessionB, "close");
+
+  const modeSwitchProfileId = "mode-switch-smoke";
+  const modeSwitchRoomId = "mode-switch-room";
+  const modeSwitchSpectator = await connectClient("ModeSwitchSpectator");
+  const modeSwitchSpectatorJoinedPromise = waitForMessage(
+    modeSwitchSpectator,
+    (payload) => payload.type === MESSAGE_TYPES.JOINED
+  );
+  const modeSwitchSpectatorAckPromise = waitForMessage(
+    modeSwitchSpectator,
+    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "join-mode-switch-spectator"
+  );
+  joinRoom(modeSwitchSpectator, "Mode Switch Spectator", modeSwitchProfileId, "join-mode-switch-spectator", {
+    roomId: modeSwitchRoomId,
+    sessionId: "mode-switch-a",
+    spectate: true,
+    teamId: "bravo"
+  });
+  const [modeSwitchSpectatorJoined] = await Promise.all([
+    modeSwitchSpectatorJoinedPromise,
+    modeSwitchSpectatorAckPromise
+  ]);
+
+  if (!modeSwitchSpectatorJoined.isSpectator) {
+    throw new Error("Expected the initial mode-switch client to join as a spectator");
+  }
+
+  modeSwitchSpectator.close();
+  await once(modeSwitchSpectator, "close");
+
+  const modeSwitchPlayer = await connectClient("ModeSwitchPlayer");
+  const modeSwitchPlayerJoinedPromise = waitForMessage(
+    modeSwitchPlayer,
+    (payload) => payload.type === MESSAGE_TYPES.JOINED
+  );
+  const modeSwitchPlayerAckPromise = waitForMessage(
+    modeSwitchPlayer,
+    (payload) => payload.type === MESSAGE_TYPES.ACK && payload.messageId === "join-mode-switch-player"
+  );
+  joinRoom(modeSwitchPlayer, "Mode Switch Player", modeSwitchProfileId, "join-mode-switch-player", {
+    roomId: modeSwitchRoomId,
+    sessionId: "mode-switch-b",
+    spectate: false,
+    teamId: "bravo"
+  });
+  const [modeSwitchPlayerJoined] = await Promise.all([modeSwitchPlayerJoinedPromise, modeSwitchPlayerAckPromise]);
+
+  if (modeSwitchPlayerJoined.isSpectator) {
+    throw new Error("Expected a reclaimed spectator to switch into active play mode when rejoining as a player");
+  }
+
+  const modeSwitchPlayableState = await waitForState(
+    modeSwitchPlayer,
+    (payload) =>
+      payload.you?.isSpectator === false &&
+      payload.you?.lastProcessedInputSeq === 0 &&
+      getPlayerState(payload, modeSwitchPlayerJoined.playerId)?.alive === true,
+    "mode switch active player state"
+  );
+
+  const modeSwitchPlayerState = getPlayerState(modeSwitchPlayableState, modeSwitchPlayerJoined.playerId);
+  if (!modeSwitchPlayerState?.alive) {
+    throw new Error("Expected a reclaimed spectator switched into player mode to spawn alive");
+  }
+
+  sendInput(modeSwitchPlayer, {
+    seq: 1,
+    clientSentAt: Date.now(),
+    forward: false,
+    back: false,
+    left: true,
+    right: false,
+    shoot: false,
+    turretAngle: 0
+  });
+
+  const modeSwitchMovedState = await waitForState(
+    modeSwitchPlayer,
+    (payload) => payload.you?.lastProcessedInputSeq === 1,
+    "mode switch active input sequence"
+  );
+
+  if ((modeSwitchMovedState.you?.lastProcessedInputSeq ?? 0) !== 1) {
+    throw new Error("Expected a reclaimed spectator switched into player mode to accept active input");
+  }
+
+  modeSwitchPlayer.close();
+  await once(modeSwitchPlayer, "close");
 
   const alphaProfileId = "alpha-smoke";
   const bravoProfileId = "bravo-smoke";

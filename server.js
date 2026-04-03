@@ -8583,6 +8583,60 @@ function clearOwnedEntityLifecycle(room, ownerId) {
   room.pendingShots = room.pendingShots.filter((shot) => shot.playerId !== ownerId);
 }
 
+function resetPlayerInputState(player, options = {}) {
+  if (!player) {
+    return;
+  }
+
+  const { now = Date.now(), resetSequence = false } = options;
+
+  player.pendingInputs.length = 0;
+  player.input.forward = false;
+  player.input.back = false;
+  player.input.left = false;
+  player.input.right = false;
+  player.input.shoot = false;
+  player.input.turretAngle = 0;
+  player.input.clientSentAt = 0;
+  player.input.receivedAt = 0;
+
+  player.antiCheat.duplicateInputWindowStartedAt = now;
+  player.antiCheat.duplicateInputCount = 0;
+
+  if (!resetSequence) {
+    player.input.seq = player.lastProcessedInputSeq;
+    return;
+  }
+
+  player.lastProcessedInputSeq = 0;
+  player.lastProcessedInputTick = 0;
+  player.lastReceivedInputSeq = 0;
+  player.lastProcessedInputClientSentAt = 0;
+  player.lastReceivedInputClientSentAt = 0;
+  player.input.seq = 0;
+}
+
+function convertPlayerToSpectator(room, player, now = Date.now()) {
+  if (!room || !player || player.isSpectator) {
+    return;
+  }
+
+  clearOwnedEntityLifecycle(room, player.id);
+  player.isSpectator = true;
+  player.queuedForSlot = false;
+  player.slotReserved = false;
+  player.ready = false;
+  player.alive = false;
+  player.afk = false;
+  player.afkSinceAt = null;
+  player.disconnectedAt = null;
+  player.reconnectDeadlineAt = null;
+  player.respawnAt = 0;
+  resetPlayerInputState(player, { now });
+  resetPlayerHistory(player);
+  markPlayerActive(player, now);
+}
+
 function rebuildRoomMapState(room) {
   if (!room) {
     return;
@@ -8607,14 +8661,7 @@ function removePlayerFromRoom(room, playerId, options = {}) {
     player.disconnectedAt = now;
     player.reconnectDeadlineAt = now + GAME_CONFIG.session.reconnectGraceMs;
     player.slotReserved = !player.isSpectator;
-    player.pendingInputs.length = 0;
-    player.input.forward = false;
-    player.input.back = false;
-    player.input.left = false;
-    player.input.right = false;
-    player.input.shoot = false;
-    player.input.clientSentAt = 0;
-    player.input.receivedAt = 0;
+    resetPlayerInputState(player, { now });
 
     return player;
   }
@@ -9416,6 +9463,14 @@ function joinRoom(socket, payload) {
   const wasReconnecting = Boolean(existingPlayer && existingPlayer.connected === false);
 
   if (existingPlayer) {
+    const previousSessionId = existingPlayer.sessionId ?? null;
+    const requestedSessionKey = requestedSessionId ?? null;
+    const reclaimedWithFreshSession =
+      wasReconnecting &&
+      (
+        (previousSessionId && requestedSessionKey && previousSessionId !== requestedSessionKey) ||
+        (!previousSessionId && Boolean(requestedSessionKey))
+      );
     const previousSocket = Array.from(room.clients).find(
       (candidate) => candidate.data?.playerId === existingPlayer.id
     );
@@ -9445,13 +9500,19 @@ function joinRoom(socket, payload) {
       player.classId = requestedClassId;
       syncPlayerCombatProfile(player, now);
     }
-    if (player.isSpectator) {
-      player.queuedForSlot = !requestedSpectator;
-      if (
-        player.queuedForSlot &&
-        hasOpenHumanPlayerSlot(room, now) &&
-        (room.match.phase === MATCH_PHASES.WAITING || isResultsPhase(room.match.phase))
-      ) {
+
+    if (reclaimedWithFreshSession) {
+      resetPlayerInputState(player, {
+        now,
+        resetSequence: true
+      });
+    }
+
+    if (requestedSpectator) {
+      convertPlayerToSpectator(room, player, now);
+    } else if (player.isSpectator) {
+      player.queuedForSlot = true;
+      if (hasOpenHumanPlayerSlot(room, now)) {
         promoteSpectatorToActivePlayer(room, player, now);
       }
     }
