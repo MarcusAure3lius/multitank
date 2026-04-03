@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
+import { performance } from "node:perf_hooks";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -209,6 +210,73 @@ const BOT_DESIRED_ASSIGNMENTS = Object.freeze(
   )
 );
 const BOT_DESIRED_ASSIGNMENT_KEYS = new Set(BOT_DESIRED_ASSIGNMENTS.map((id) => id.key));
+const SERVER_PERF_PROFILE_ENABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.PERF_PROFILE ?? process.env.PERFORMANCE_PROFILE ?? "")
+);
+const SERVER_PERF_PROFILE_LOG_INTERVAL_MS = Math.max(
+  1_000,
+  Number(process.env.PERF_PROFILE_LOG_INTERVAL_MS ?? process.env.PERFORMANCE_PROFILE_LOG_INTERVAL_MS ?? 5_000) || 5_000
+);
+const serverPerfProfileStats = new Map();
+let serverPerfProfileLastFlushAt = performance.now();
+
+function maybeFlushServerPerfProfile(now = performance.now()) {
+  if (
+    !SERVER_PERF_PROFILE_ENABLED ||
+    serverPerfProfileStats.size === 0 ||
+    now - serverPerfProfileLastFlushAt < SERVER_PERF_PROFILE_LOG_INTERVAL_MS
+  ) {
+    return;
+  }
+
+  const summary = Array.from(serverPerfProfileStats.entries())
+    .sort((left, right) => right[1].totalMs - left[1].totalMs)
+    .map(([name, stats]) => {
+      const averageMs = stats.count > 0 ? stats.totalMs / stats.count : 0;
+      return `${name} avg=${averageMs.toFixed(2)}ms max=${stats.maxMs.toFixed(2)}ms count=${stats.count}`;
+    })
+    .join(" | ");
+
+  console.log(`[perf][server] ${summary}`);
+  serverPerfProfileStats.clear();
+  serverPerfProfileLastFlushAt = now;
+}
+
+function recordServerPerfProfile(name, durationMs) {
+  if (!SERVER_PERF_PROFILE_ENABLED || !Number.isFinite(durationMs)) {
+    return;
+  }
+
+  const existing = serverPerfProfileStats.get(name) ?? {
+    count: 0,
+    totalMs: 0,
+    maxMs: 0
+  };
+  existing.count += 1;
+  existing.totalMs += durationMs;
+  existing.maxMs = Math.max(existing.maxMs, durationMs);
+  serverPerfProfileStats.set(name, existing);
+  maybeFlushServerPerfProfile();
+}
+
+function startServerPerfProfile(name) {
+  if (!SERVER_PERF_PROFILE_ENABLED) {
+    return null;
+  }
+
+  return {
+    name,
+    startedAt: performance.now()
+  };
+}
+
+function endServerPerfProfile(mark) {
+  if (!mark) {
+    return;
+  }
+
+  recordServerPerfProfile(mark.name, performance.now() - mark.startedAt);
+}
 
 function createDebugTracker(now = Date.now()) {
   return {
@@ -2782,6 +2850,7 @@ function createRoom(roomId) {
       version: -1,
       players: []
     },
+    broadcastCache: createRoomBroadcastCache(),
     interestIndex: {
       tickNumber: -1,
       playerCells: new Map(),
@@ -3825,7 +3894,20 @@ function createViewerObjectiveState(room, viewer) {
   return createObjectiveSnapshot(room.objective);
 }
 
-function canViewerSeeEvent(room, viewer, event) {
+function canViewerSeeTrackedPlayer(room, viewer, playerId, visiblePlayerIds = null) {
+  if (viewer?.id === playerId) {
+    return true;
+  }
+
+  if (visiblePlayerIds?.has(playerId)) {
+    return true;
+  }
+
+  const subject = room.players.get(playerId);
+  return subject ? canViewerSeePlayer(room, viewer, subject) : viewer?.id === playerId;
+}
+
+function canViewerSeeEvent(room, viewer, event, visiblePlayerIds = null) {
   if (!event) {
     return false;
   }
@@ -3843,23 +3925,19 @@ function canViewerSeeEvent(room, viewer, event) {
   }
 
   if (event.type === EVENT_TYPES.SPAWN || event.type === EVENT_TYPES.HEALTH) {
-    const subject = room.players.get(event.playerId);
-    return subject ? canViewerSeePlayer(room, viewer, subject) : viewer.id === event.playerId;
+    return canViewerSeeTrackedPlayer(room, viewer, event.playerId, visiblePlayerIds);
   }
 
   if (event.type === EVENT_TYPES.ANIMATION) {
-    const subject = room.players.get(event.playerId);
-    return subject ? canViewerSeePlayer(room, viewer, subject) : viewer.id === event.playerId;
+    return canViewerSeeTrackedPlayer(room, viewer, event.playerId, visiblePlayerIds);
   }
 
   if (event.type === EVENT_TYPES.HIT) {
-    const attacker = room.players.get(event.attackerId);
-    const target = room.players.get(event.targetId);
     return (
       viewer.id === event.attackerId ||
       viewer.id === event.targetId ||
-      (attacker && canViewerSeePlayer(room, viewer, attacker)) ||
-      (target && canViewerSeePlayer(room, viewer, target))
+      canViewerSeeTrackedPlayer(room, viewer, event.attackerId, visiblePlayerIds) ||
+      canViewerSeeTrackedPlayer(room, viewer, event.targetId, visiblePlayerIds)
     );
   }
 
@@ -3879,7 +3957,12 @@ function getVisibleEventsForViewer(room, viewer) {
     return room.events;
   }
 
-  return room.events.filter((event) => canViewerSeeEvent(room, viewer, event));
+  const visibility = getViewerVisibilityForTick(room, viewer);
+  if (!visibility.playerIds) {
+    visibility.playerIds = new Set(visibility.players.map((candidate) => candidate.id));
+  }
+
+  return room.events.filter((event) => canViewerSeeEvent(room, viewer, event, visibility.playerIds));
 }
 
 function createInterestCellKey(cellX, cellY) {
@@ -3946,6 +4029,119 @@ function getRoomInterestIndex(room) {
   }
 
   return room.interestIndex;
+}
+
+function createRoomBroadcastCache() {
+  return {
+    tickNumber: -1,
+    viewerVisibility: new Map(),
+    publicPlayerStates: new Map(),
+    privatePlayerStates: new Map(),
+    publicPlayerRecords: new Map(),
+    privatePlayerRecords: new Map(),
+    bulletRecords: new Map(),
+    shapeRecords: new Map()
+  };
+}
+
+function resetRoomBroadcastCache(cache, tickNumber) {
+  cache.tickNumber = tickNumber;
+  cache.viewerVisibility.clear();
+  cache.publicPlayerStates.clear();
+  cache.privatePlayerStates.clear();
+  cache.publicPlayerRecords.clear();
+  cache.privatePlayerRecords.clear();
+  cache.bulletRecords.clear();
+  cache.shapeRecords.clear();
+  return cache;
+}
+
+function getRoomBroadcastCache(room) {
+  if (!room.broadcastCache) {
+    room.broadcastCache = createRoomBroadcastCache();
+  }
+
+  if (room.broadcastCache.tickNumber !== room.tickNumber) {
+    return resetRoomBroadcastCache(room.broadcastCache, room.tickNumber);
+  }
+
+  return room.broadcastCache;
+}
+
+function getViewerBroadcastCacheKey(viewer) {
+  return !viewer || viewer.isSpectator ? "spectator" : viewer.id;
+}
+
+function getViewerVisibilityForTick(room, viewer) {
+  const broadcastCache = getRoomBroadcastCache(room);
+  const viewerKey = getViewerBroadcastCacheKey(viewer);
+  const existing = broadcastCache.viewerVisibility.get(viewerKey);
+  if (existing) {
+    return existing;
+  }
+
+  const visibility = {
+    players: getVisiblePlayersForViewer(room, viewer),
+    bullets: getVisibleBulletsForViewer(room, viewer),
+    shapes: getVisibleShapesForViewer(room, viewer)
+  };
+  broadcastCache.viewerVisibility.set(viewerKey, visibility);
+  return visibility;
+}
+
+function getCachedViewerPlayerState(room, candidate, viewer) {
+  const broadcastCache = getRoomBroadcastCache(room);
+  const usePrivateState = viewer?.id === candidate.id;
+  const cache = usePrivateState ? broadcastCache.privatePlayerStates : broadcastCache.publicPlayerStates;
+  const existing = cache.get(candidate.id);
+  if (existing) {
+    return existing;
+  }
+
+  const state = createViewerPlayerState(candidate, usePrivateState ? viewer : null);
+  cache.set(candidate.id, state);
+  return state;
+}
+
+function getCachedReplicationSnapshot(room, kind, entity, viewer = null) {
+  const broadcastCache = getRoomBroadcastCache(room);
+
+  if (kind === REPLICATION_KINDS.PLAYER) {
+    const usePrivateState = viewer?.id === entity.id;
+    const cache = usePrivateState ? broadcastCache.privatePlayerRecords : broadcastCache.publicPlayerRecords;
+    const existing = cache.get(entity.id);
+    if (existing) {
+      return existing;
+    }
+
+    const record = createReplicationSnapshot(kind, entity, usePrivateState ? viewer : null);
+    cache.set(entity.id, record);
+    return record;
+  }
+
+  if (kind === REPLICATION_KINDS.BULLET) {
+    const existing = broadcastCache.bulletRecords.get(entity.id);
+    if (existing) {
+      return existing;
+    }
+
+    const record = createReplicationSnapshot(kind, entity);
+    broadcastCache.bulletRecords.set(entity.id, record);
+    return record;
+  }
+
+  if (kind === REPLICATION_KINDS.SHAPE) {
+    const existing = broadcastCache.shapeRecords.get(entity.id);
+    if (existing) {
+      return existing;
+    }
+
+    const record = createReplicationSnapshot(kind, entity);
+    broadcastCache.shapeRecords.set(entity.id, record);
+    return record;
+  }
+
+  return createReplicationSnapshot(kind, entity, viewer);
 }
 
 function collectInterestCellIds(cellMap, x, y, radius) {
@@ -4168,181 +4364,210 @@ function isBulletRelevantToPlayer(player, bullet) {
 }
 
 function buildViewerInterestSet(room, viewer, socket = null, broadcastContext = null) {
-  const knownEntities = socket?.data?.replication?.knownEntities;
-  const candidatePlayers = getVisiblePlayersForViewer(room, viewer);
-  const candidateBullets = [];
-  for (const bullet of getVisibleBulletsForViewer(room, viewer)) {
-    if (isBulletRelevantToPlayer(viewer, bullet)) {
-      candidateBullets.push(bullet);
+  const perfMark = startServerPerfProfile("buildViewerInterestSet");
+  try {
+    const knownEntities = socket?.data?.replication?.knownEntities;
+    const visibility = getViewerVisibilityForTick(room, viewer);
+    const candidatePlayers = visibility.players;
+    const candidateBullets = [];
+    for (const bullet of visibility.bullets) {
+      if (isBulletRelevantToPlayer(viewer, bullet)) {
+        candidateBullets.push(bullet);
+      }
     }
-  }
-  const selectedShapes = getVisibleShapesForViewer(room, viewer);
-  const playerLimit = !viewer || viewer.isSpectator
-    ? candidatePlayers.length
-    : GAME_CONFIG.replication.maxPlayerRecordsPerSnapshot;
-  const bulletLimit = !viewer || viewer.isSpectator
-    ? candidateBullets.length
-    : GAME_CONFIG.replication.maxBulletRecordsPerSnapshot;
-  const playerPriorityCache = new Map();
-  for (const candidate of candidatePlayers) {
-    playerPriorityCache.set(candidate.id, computePlayerInterestPriority(room, viewer, candidate, knownEntities));
-  }
-  const bulletPriorityCache = new Map();
-  for (const bullet of candidateBullets) {
-    bulletPriorityCache.set(bullet.id, computeBulletInterestPriority(room, viewer, bullet, knownEntities));
-  }
-  const selectedPlayers = prioritizeEntities(
-    candidatePlayers,
-    playerLimit,
-    (candidate) => playerPriorityCache.get(candidate.id),
-    comparePlayersInSimulationOrder
-  );
-  const selectedBullets = prioritizeEntities(
-    candidateBullets,
-    bulletLimit,
-    (bullet) => bulletPriorityCache.get(bullet.id),
-    compareBulletsInInterestOrder
-  );
-  const objectiveState = broadcastContext?.objectiveState ?? createViewerObjectiveState(room, viewer);
-  const objectiveRecord =
-    broadcastContext?.objectiveReplicationRecord ??
-    createReplicationSnapshot(REPLICATION_KINDS.OBJECTIVE, {
-      roomId: room.id,
-      ...objectiveState
-    });
-  const prioritizedRecords = [];
-  for (const candidate of selectedPlayers) {
-    prioritizedRecords.push({
-      priority: playerPriorityCache.get(candidate.id),
-      record: createReplicationSnapshot(REPLICATION_KINDS.PLAYER, candidate, viewer)
-    });
-  }
-  for (const bullet of selectedBullets) {
-    prioritizedRecords.push({
-      priority: bulletPriorityCache.get(bullet.id),
-      record: createReplicationSnapshot(REPLICATION_KINDS.BULLET, bullet)
-    });
-  }
-  for (const shape of selectedShapes) {
-    prioritizedRecords.push({
-      priority: 200_000 + (SHAPE_XP[shape.type] ?? 0),
-      record: createReplicationSnapshot(REPLICATION_KINDS.SHAPE, shape)
-    });
-  }
-  prioritizedRecords.push({
-    priority: canViewerSeeObjective(room, viewer) ? 750_000 : 250_000,
-    record: objectiveRecord
-  });
-
-  prioritizedRecords.sort(
-    (left, right) =>
-      right.priority - left.priority ||
-      String(left.record.kind).localeCompare(String(right.record.kind)) ||
-      String(left.record.id).localeCompare(String(right.record.id))
-  );
-
-  const records = [];
-  for (const entry of prioritizedRecords) {
-    records.push(entry.record);
-  }
-
-  return {
-    players: selectedPlayers,
-    bullets: selectedBullets,
-    shapes: selectedShapes,
-    objectiveState,
-    records,
-    stats: {
-      cellSize: GAME_CONFIG.replication.cellSize,
-      candidatePlayers: candidatePlayers.length,
-      selectedPlayers: selectedPlayers.length,
-      culledPlayers: Math.max(0, candidatePlayers.length - selectedPlayers.length),
-      candidateBullets: candidateBullets.length,
-      selectedBullets: selectedBullets.length,
-      culledBullets: Math.max(0, candidateBullets.length - selectedBullets.length)
+    const selectedShapes = visibility.shapes;
+    const playerLimit = !viewer || viewer.isSpectator
+      ? candidatePlayers.length
+      : GAME_CONFIG.replication.maxPlayerRecordsPerSnapshot;
+    const bulletLimit = !viewer || viewer.isSpectator
+      ? candidateBullets.length
+      : GAME_CONFIG.replication.maxBulletRecordsPerSnapshot;
+    const playerPriorityCache = new Map();
+    for (const candidate of candidatePlayers) {
+      playerPriorityCache.set(candidate.id, computePlayerInterestPriority(room, viewer, candidate, knownEntities));
     }
-  };
+    const bulletPriorityCache = new Map();
+    for (const bullet of candidateBullets) {
+      bulletPriorityCache.set(bullet.id, computeBulletInterestPriority(room, viewer, bullet, knownEntities));
+    }
+    const selectedPlayers = prioritizeEntities(
+      candidatePlayers,
+      playerLimit,
+      (candidate) => playerPriorityCache.get(candidate.id),
+      comparePlayersInSimulationOrder
+    );
+    const selectedBullets = prioritizeEntities(
+      candidateBullets,
+      bulletLimit,
+      (bullet) => bulletPriorityCache.get(bullet.id),
+      compareBulletsInInterestOrder
+    );
+    const objectiveState = broadcastContext?.objectiveState ?? createViewerObjectiveState(room, viewer);
+    const objectiveRecord =
+      broadcastContext?.objectiveReplicationRecord ??
+      createReplicationSnapshot(REPLICATION_KINDS.OBJECTIVE, {
+        roomId: room.id,
+        ...objectiveState
+      });
+    const prioritizedRecords = [];
+    for (const candidate of selectedPlayers) {
+      prioritizedRecords.push({
+        priority: playerPriorityCache.get(candidate.id),
+        record: getCachedReplicationSnapshot(room, REPLICATION_KINDS.PLAYER, candidate, viewer)
+      });
+    }
+    for (const bullet of selectedBullets) {
+      prioritizedRecords.push({
+        priority: bulletPriorityCache.get(bullet.id),
+        record: getCachedReplicationSnapshot(room, REPLICATION_KINDS.BULLET, bullet)
+      });
+    }
+    for (const shape of selectedShapes) {
+      prioritizedRecords.push({
+        priority: 200_000 + (SHAPE_XP[shape.type] ?? 0),
+        record: getCachedReplicationSnapshot(room, REPLICATION_KINDS.SHAPE, shape)
+      });
+    }
+    prioritizedRecords.push({
+      priority: canViewerSeeObjective(room, viewer) ? 750_000 : 250_000,
+      record: objectiveRecord
+    });
+
+    prioritizedRecords.sort(
+      (left, right) =>
+        right.priority - left.priority ||
+        String(left.record.kind).localeCompare(String(right.record.kind)) ||
+        String(left.record.id).localeCompare(String(right.record.id))
+    );
+
+    const records = [];
+    for (const entry of prioritizedRecords) {
+      records.push(entry.record);
+    }
+
+    return {
+      players: selectedPlayers,
+      bullets: selectedBullets,
+      shapes: selectedShapes,
+      objectiveState,
+      records,
+      stats: {
+        cellSize: GAME_CONFIG.replication.cellSize,
+        candidatePlayers: candidatePlayers.length,
+        selectedPlayers: selectedPlayers.length,
+        culledPlayers: Math.max(0, candidatePlayers.length - selectedPlayers.length),
+        candidateBullets: candidateBullets.length,
+        selectedBullets: selectedBullets.length,
+        culledBullets: Math.max(0, candidateBullets.length - selectedBullets.length)
+      }
+    };
+  } finally {
+    endServerPerfProfile(perfMark);
+  }
 }
 
 function buildReplicationPayloadForSocket(socket, room, player, snapshotSeq, now, interestSet = null) {
-  const replicationState = socket.data.replication;
-  const interest = interestSet ?? buildViewerInterestSet(room, player, socket);
-  const relevantRecords = interest.records;
-  const relevantIds = new Set();
-  for (const record of relevantRecords) {
-    relevantIds.add(record.netId);
-  }
-  const spawns = [];
-  const updates = [];
-  const despawns = [];
-  const previousSnapshotSeq = replicationState.lastSnapshotSeq;
-  const needsFullSync =
-    replicationState.forceFullSync ||
-    replicationState.lastFullSyncAt === 0 ||
-    now - replicationState.lastFullSyncAt >= GAME_CONFIG.replication.fullSyncIntervalMs;
+  const perfMark = startServerPerfProfile("buildReplicationPayloadForSocket");
+  try {
+    const replicationState = socket.data.replication;
+    const knownEntities = replicationState.knownEntities;
+    const interest = interestSet ?? buildViewerInterestSet(room, player, socket);
+    const relevantRecords = interest.records;
+    const spawns = [];
+    const updates = [];
+    const despawns = [];
+    const previousSnapshotSeq = replicationState.lastSnapshotSeq;
+    const needsFullSync =
+      replicationState.forceFullSync ||
+      replicationState.lastFullSyncAt === 0 ||
+      now - replicationState.lastFullSyncAt >= GAME_CONFIG.replication.fullSyncIntervalMs;
 
-  if (needsFullSync) {
-    replicationState.knownEntities.clear();
-  }
+    if (needsFullSync) {
+      knownEntities.clear();
+      for (const record of relevantRecords) {
+        spawns.push(record);
+        knownEntities.set(record.netId, {
+          kind: record.kind,
+          id: record.id,
+          ownerId: record.ownerId,
+          state: record.state
+        });
+      }
 
-  for (const record of relevantRecords) {
-    const previous = replicationState.knownEntities.get(record.netId);
+      replicationState.forceFullSync = false;
+      replicationState.lastFullSyncAt = now;
+      replicationState.lastSnapshotSeq = snapshotSeq;
 
-    if (!previous) {
-      spawns.push(record);
-      replicationState.knownEntities.set(record.netId, {
-        kind: record.kind,
-        id: record.id,
-        ownerId: record.ownerId,
-        state: record.state
-      });
-      continue;
+      return {
+        mode: "full",
+        baselineSnapshotSeq: 0,
+        spawns,
+        updates,
+        despawns,
+        interest: interest.stats
+      };
     }
 
-    const stateDelta = diffReplicationState(previous.state, record.state);
-    if (stateDelta) {
+    const relevantIds = new Set();
+    for (const record of relevantRecords) {
+      relevantIds.add(record.netId);
+      const previous = knownEntities.get(record.netId);
+
+      if (!previous) {
+        spawns.push(record);
+        knownEntities.set(record.netId, {
+          kind: record.kind,
+          id: record.id,
+          ownerId: record.ownerId,
+          state: record.state
+        });
+        continue;
+      }
+
+      const stateDelta = diffReplicationState(previous.state, record.state);
+      if (!stateDelta) {
+        continue;
+      }
+
       updates.push({
         kind: record.kind,
         id: record.id,
         ownerId: record.ownerId,
         state: stateDelta
       });
-      replicationState.knownEntities.set(record.netId, {
+      knownEntities.set(record.netId, {
         kind: record.kind,
         id: record.id,
         ownerId: record.ownerId,
         state: record.state
       });
     }
-  }
 
-  for (const [netId, previous] of replicationState.knownEntities.entries()) {
-    if (relevantIds.has(netId)) {
-      continue;
+    for (const [netId, previous] of knownEntities.entries()) {
+      if (relevantIds.has(netId)) {
+        continue;
+      }
+
+      despawns.push({
+        kind: previous.kind,
+        id: previous.id
+      });
+      knownEntities.delete(netId);
     }
 
-    despawns.push({
-      kind: previous.kind,
-      id: previous.id
-    });
-    replicationState.knownEntities.delete(netId);
+    replicationState.lastSnapshotSeq = snapshotSeq;
+
+    return {
+      mode: "delta",
+      baselineSnapshotSeq: previousSnapshotSeq,
+      spawns,
+      updates,
+      despawns,
+      interest: interest.stats
+    };
+  } finally {
+    endServerPerfProfile(perfMark);
   }
-
-  if (needsFullSync) {
-    replicationState.forceFullSync = false;
-    replicationState.lastFullSyncAt = now;
-  }
-
-  replicationState.lastSnapshotSeq = snapshotSeq;
-
-  return {
-    mode: needsFullSync ? "full" : "delta",
-    baselineSnapshotSeq: needsFullSync ? 0 : previousSnapshotSeq,
-    spawns,
-    updates,
-    despawns,
-    interest: interest.stats
-  };
 }
 
 function getRoom(roomId) {
@@ -5999,6 +6224,7 @@ function markRoomPlayerOrderDirty(room) {
     version: -1,
     players: []
   };
+  room.broadcastCache.tickNumber = -1;
   room.interestIndex.tickNumber = -1;
 }
 
@@ -7068,43 +7294,48 @@ function resendAckForDuplicate(socket, payload) {
 }
 
 function sendStatePayload(socket, payload) {
-  const serialized = serializePacket(payload);
-  const byteLength = Buffer.byteLength(serialized, "utf8");
+  const perfMark = startServerPerfProfile("sendStatePayload");
+  try {
+    const serialized = serializePacket(payload);
+    const byteLength = Buffer.byteLength(serialized, "utf8");
 
-  if (byteLength <= GAME_CONFIG.network.maxStatePayloadBytes) {
-    if (socket.readyState !== socket.OPEN) {
-      return false;
+    if (byteLength <= GAME_CONFIG.network.maxStatePayloadBytes) {
+      if (socket.readyState !== socket.OPEN) {
+        return false;
+      }
+      if (!canSendBytes(socket, byteLength)) {
+        return false;
+      }
+      socket.send(serialized);
+      return true;
     }
-    if (!canSendBytes(socket, byteLength)) {
-      return false;
+
+    const chunks = [];
+    for (let offset = 0; offset < serialized.length; offset += GAME_CONFIG.network.stateChunkChars) {
+      chunks.push(serialized.slice(offset, offset + GAME_CONFIG.network.stateChunkChars));
     }
-    socket.send(serialized);
-    return true;
-  }
 
-  const chunks = [];
-  for (let offset = 0; offset < serialized.length; offset += GAME_CONFIG.network.stateChunkChars) {
-    chunks.push(serialized.slice(offset, offset + GAME_CONFIG.network.stateChunkChars));
-  }
+    let sentAllChunks = true;
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunkSent = sendJson(socket, {
+        type: MESSAGE_TYPES.STATE_CHUNK,
+        roomId: payload.roomId,
+        snapshotSeq: payload.snapshotSeq,
+        chunkIndex: index,
+        chunkCount: chunks.length,
+        chunk: chunks[index]
+      });
 
-  let sentAllChunks = true;
-  for (let index = 0; index < chunks.length; index += 1) {
-    const chunkSent = sendJson(socket, {
-      type: MESSAGE_TYPES.STATE_CHUNK,
-      roomId: payload.roomId,
-      snapshotSeq: payload.snapshotSeq,
-      chunkIndex: index,
-      chunkCount: chunks.length,
-      chunk: chunks[index]
-    });
-
-    if (!chunkSent) {
-      sentAllChunks = false;
-      break;
+      if (!chunkSent) {
+        sentAllChunks = false;
+        break;
+      }
     }
-  }
 
-  return sentAllChunks;
+    return sentAllChunks;
+  } finally {
+    endServerPerfProfile(perfMark);
+  }
 }
 
 function writeJson(response, statusCode, payload) {
@@ -12267,75 +12498,80 @@ function updateRoomPhase(room, now) {
 }
 
 function getRoomStatePayload(room, player, socket, now, snapshotSeq, broadcastContext = null) {
-  const roomBroadcastContext = broadcastContext ?? buildRoomBroadcastContext(room, now);
-  const interest = buildViewerInterestSet(room, player, socket, roomBroadcastContext);
-  const replication = buildReplicationPayloadForSocket(socket, room, player, snapshotSeq, now, interest);
-  const includeFullCollections = replication.mode === "full";
-  const debugSignalLimit = socket?.data?.debugUiEnabled
-    ? DEBUG_SIGNAL_EXPANDED_SNAPSHOT_LIMIT
-    : DEBUG_SIGNAL_SNAPSHOT_LIMIT;
-  const visiblePlayers = includeFullCollections
-    ? interest.players.map((candidate) => createViewerPlayerState(candidate, player))
-    : [];
-  const visibleBullets = includeFullCollections ? interest.bullets : [];
-  const visibleShapes = includeFullCollections ? interest.shapes : [];
-  const visibleEvents = getVisibleEventsForViewer(room, player);
-  const objectiveState = interest.objectiveState;
+  const perfMark = startServerPerfProfile("getRoomStatePayload");
+  try {
+    const roomBroadcastContext = broadcastContext ?? buildRoomBroadcastContext(room, now);
+    const interest = buildViewerInterestSet(room, player, socket, roomBroadcastContext);
+    const replication = buildReplicationPayloadForSocket(socket, room, player, snapshotSeq, now, interest);
+    const includeFullCollections = replication.mode === "full";
+    const debugSignalLimit = socket?.data?.debugUiEnabled
+      ? DEBUG_SIGNAL_EXPANDED_SNAPSHOT_LIMIT
+      : DEBUG_SIGNAL_SNAPSHOT_LIMIT;
+    const visiblePlayers = includeFullCollections
+      ? interest.players.map((candidate) => getCachedViewerPlayerState(room, candidate, player))
+      : [];
+    const visibleBullets = includeFullCollections ? interest.bullets : [];
+    const visibleShapes = includeFullCollections ? interest.shapes : [];
+    const visibleEvents = getVisibleEventsForViewer(room, player);
+    const objectiveState = interest.objectiveState;
 
-  return createStatePayload({
-    roomId: room.id,
-    snapshotSeq,
-    simulationTick: room.tickNumber,
-    snapshotTick: room.tickNumber,
-    tickRate: GAME_CONFIG.serverTickRate,
-    serverTime: now,
-    match: roomBroadcastContext.match,
-    lobby: roomBroadcastContext.lobby,
-    roundNumber: room.roundNumber,
-    objective: objectiveState,
-    leaderboard: roomBroadcastContext.leaderboard,
-    players: visiblePlayers,
-    bullets: visibleBullets,
-    shapes: visibleShapes,
-    events: visibleEvents,
-    inventory: player ? [createInventoryState(player)] : [],
-    replication,
-    debugSignalLimit,
-    debug: buildDebugSnapshot(room, player, now, debugSignalLimit, {
-      roomSignals: roomBroadcastContext.roomDebugSignals
-    }),
-    you: player
-      ? {
-          playerId: player.id,
-          profileId: player.profileId,
-          lastProcessedInputSeq: player.lastProcessedInputSeq,
-          lastProcessedInputTick: player.lastProcessedInputTick,
-          lastProcessedInputClientSentAt: player.lastProcessedInputClientSentAt,
-          pendingInputCount: player.pendingInputs.length,
-          alive: player.alive,
-          respawnAt: player.respawnAt,
-          ready: player.ready,
-          assists: player.assists,
-          isSpectator: player.isSpectator,
-          isRoomOwner: room.lobby.ownerPlayerId === player.id,
-          teamId: player.teamId,
-          classId: player.classId,
-          tankClassId: player.tankClassId ?? 'basic',
-          maxHp: getPlayerMaxHitPoints(player),
-          xp: player.xp ?? 0,
-          level: player.level ?? 1,
-          statPoints: player.statPoints ?? 0,
-          pendingUpgrades: player.pendingUpgrades ?? [],
-          basicSpecializationPending: Boolean(player.basicSpecializationPending),
-          basicSpecializationChoice: player.basicSpecializationChoice ?? null,
-          stats: createAllocatedStats(player.stats),
-          queuedForSlot: player.queuedForSlot,
-          slotReserved: player.slotReserved,
-          afk: player.afk,
-          profileStats: getPublicProfileStats(player)
-        }
-      : null
-  });
+    return createStatePayload({
+      roomId: room.id,
+      snapshotSeq,
+      simulationTick: room.tickNumber,
+      snapshotTick: room.tickNumber,
+      tickRate: GAME_CONFIG.serverTickRate,
+      serverTime: now,
+      match: roomBroadcastContext.match,
+      lobby: roomBroadcastContext.lobby,
+      roundNumber: room.roundNumber,
+      objective: objectiveState,
+      leaderboard: roomBroadcastContext.leaderboard,
+      players: visiblePlayers,
+      bullets: visibleBullets,
+      shapes: visibleShapes,
+      events: visibleEvents,
+      inventory: player ? [createInventoryState(player)] : [],
+      replication,
+      debugSignalLimit,
+      debug: buildDebugSnapshot(room, player, now, debugSignalLimit, {
+        roomSignals: roomBroadcastContext.roomDebugSignals
+      }),
+      you: player
+        ? {
+            playerId: player.id,
+            profileId: player.profileId,
+            lastProcessedInputSeq: player.lastProcessedInputSeq,
+            lastProcessedInputTick: player.lastProcessedInputTick,
+            lastProcessedInputClientSentAt: player.lastProcessedInputClientSentAt,
+            pendingInputCount: player.pendingInputs.length,
+            alive: player.alive,
+            respawnAt: player.respawnAt,
+            ready: player.ready,
+            assists: player.assists,
+            isSpectator: player.isSpectator,
+            isRoomOwner: room.lobby.ownerPlayerId === player.id,
+            teamId: player.teamId,
+            classId: player.classId,
+            tankClassId: player.tankClassId ?? 'basic',
+            maxHp: getPlayerMaxHitPoints(player),
+            xp: player.xp ?? 0,
+            level: player.level ?? 1,
+            statPoints: player.statPoints ?? 0,
+            pendingUpgrades: player.pendingUpgrades ?? [],
+            basicSpecializationPending: Boolean(player.basicSpecializationPending),
+            basicSpecializationChoice: player.basicSpecializationChoice ?? null,
+            stats: createAllocatedStats(player.stats),
+            queuedForSlot: player.queuedForSlot,
+            slotReserved: player.slotReserved,
+            afk: player.afk,
+            profileStats: getPublicProfileStats(player)
+          }
+        : null
+    });
+  } finally {
+    endServerPerfProfile(perfMark);
+  }
 }
 
 function applyBodyHit(room, attacker, target, damage, now) {

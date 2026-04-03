@@ -158,7 +158,7 @@ const INPUT_FLAGS = Object.freeze({
 
 export const GAME_CONFIG = Object.freeze({
   serverTickRate: 30,
-  snapshotRate: 30,
+  snapshotRate: 15,
   inputRate: 20,
   input: Object.freeze({
     maxBufferedInputs: 120,

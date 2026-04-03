@@ -92,6 +92,7 @@ const STORAGE_KEYS = {
   profileId: "multitank.profileId",
   spectate: "multitank.spectate",
   debugMode: "multitank.debugMode",
+  perfMode: "multitank.perfMode",
   authToken: "multitank.authToken"
 };
 
@@ -819,14 +820,87 @@ const BASIC_SPECIALIZATION_MENU_OPTIONS = Object.freeze([
 const currentUrl = new URL(window.location.href);
 const initialRoomFromUrl = currentUrl.searchParams.get("room");
 const urlDebugMode = currentUrl.searchParams.get("debug");
+const urlPerfMode = currentUrl.searchParams.get("perf");
+const SNAPSHOT_DEBUG_SAMPLE_INTERVAL = 10;
+const CLIENT_PERF_PROFILE_LOG_INTERVAL_MS = 5_000;
 let debugUiEnabled =
   urlDebugMode === "1"
     ? true
     : urlDebugMode === "0"
       ? false
       : localStorage.getItem(STORAGE_KEYS.debugMode) === "1";
+let performanceProfilingEnabled =
+  urlPerfMode === "1"
+    ? true
+    : urlPerfMode === "0"
+      ? false
+      : localStorage.getItem(STORAGE_KEYS.perfMode) === "1";
 if (urlDebugMode === "1" || urlDebugMode === "0") {
   localStorage.setItem(STORAGE_KEYS.debugMode, debugUiEnabled ? "1" : "0");
+}
+if (urlPerfMode === "1" || urlPerfMode === "0") {
+  localStorage.setItem(STORAGE_KEYS.perfMode, performanceProfilingEnabled ? "1" : "0");
+}
+
+const clientPerfProfileStats = new Map();
+let clientPerfProfileLastFlushAt = performance.now();
+
+function maybeFlushClientPerfProfile(now = performance.now()) {
+  if (
+    !performanceProfilingEnabled ||
+    clientPerfProfileStats.size === 0 ||
+    now - clientPerfProfileLastFlushAt < CLIENT_PERF_PROFILE_LOG_INTERVAL_MS
+  ) {
+    return;
+  }
+
+  const summary = Array.from(clientPerfProfileStats.entries())
+    .sort((left, right) => right[1].totalMs - left[1].totalMs)
+    .map(([name, stats]) => {
+      const averageMs = stats.count > 0 ? stats.totalMs / stats.count : 0;
+      return `${name} avg=${averageMs.toFixed(2)}ms max=${stats.maxMs.toFixed(2)}ms count=${stats.count}`;
+    })
+    .join(" | ");
+
+  console.log(`[perf][client] ${summary}`);
+  clientPerfProfileStats.clear();
+  clientPerfProfileLastFlushAt = now;
+}
+
+function recordClientPerfProfile(name, durationMs) {
+  if (!performanceProfilingEnabled || !Number.isFinite(durationMs)) {
+    return;
+  }
+
+  const existing = clientPerfProfileStats.get(name) ?? {
+    count: 0,
+    totalMs: 0,
+    maxMs: 0
+  };
+  existing.count += 1;
+  existing.totalMs += durationMs;
+  existing.maxMs = Math.max(existing.maxMs, durationMs);
+  clientPerfProfileStats.set(name, existing);
+  maybeFlushClientPerfProfile();
+}
+
+function startClientPerfProfile(name) {
+  if (!performanceProfilingEnabled) {
+    return null;
+  }
+
+  return {
+    name,
+    startedAt: performance.now()
+  };
+}
+
+function endClientPerfProfile(mark) {
+  if (!mark) {
+    return;
+  }
+
+  recordClientPerfProfile(mark.name, performance.now() - mark.startedAt);
 }
 
 function shouldCollectDebugDiagnostics() {
@@ -5354,198 +5428,219 @@ function replayPendingInputs(
 }
 
 function applySnapshot(payload) {
-  const snapshotSeq = payload.snapshotSeq ?? 0;
-  if (snapshotSeq <= lastAppliedSnapshotSeq) {
-    recordDebugEvent(
-      "snapshot_out_of_order",
-      `Received out-of-order snapshot ${snapshotSeq} after ${lastAppliedSnapshotSeq}`,
-      {
-        severity: "warn",
-        ttlMs: 8_000,
-        key: "snapshot_out_of_order"
-      }
-    );
-    return;
-  }
-
-  const previousSnapshotSeq = lastAppliedSnapshotSeq;
-  const previousProcessedInputSeq = latestYou?.lastProcessedInputSeq ?? 0;
-  const previousProcessedInputClientSentAt = latestYou?.lastProcessedInputClientSentAt ?? 0;
-  const previousMatchPhase = latestMatch?.phase ?? null;
-  const previousRoundNumber = Number(latestMatch?.roundNumber ?? 0) || 0;
-  const nextMatchPhase = payload.match?.phase ?? previousMatchPhase;
-  const nextRoundNumber = Number(payload.match?.roundNumber ?? previousRoundNumber) || previousRoundNumber;
-  const replicationStatus = applyReplication(payload.replication, payload.serverTime, previousSnapshotSeq);
-
-  if (replicationStatus === "resync") {
-    const hasPendingOlderFullSnapshot = Array.from(stateChunks.keys()).some((pendingSeq) => pendingSeq < snapshotSeq);
-    if (hasPendingOlderFullSnapshot) {
-      return;
-    }
-    recordDebugEvent("snapshot_missing_entities", "Snapshot replication baseline mismatched and requested a resync", {
-      severity: "error",
-      ttlMs: 10_000,
-      key: "snapshot_baseline_mismatch"
-    });
-    requestLifecycleResync("baseline_mismatch");
-    return;
-  }
-
-  syncServerClock(payload.serverTime, performance.now());
-  syncServerDebugSnapshot(payload.debug, Date.now());
-  noteServerTickSample(payload.simulationTick, performance.now(), payload.tickRate);
-  if (
-    (previousMatchPhase && nextMatchPhase && nextMatchPhase !== previousMatchPhase) ||
-    (previousRoundNumber > 0 && nextRoundNumber > 0 && nextRoundNumber !== previousRoundNumber)
-  ) {
-    debugMonitor.lastKnownPlayers.clear();
-    debugMonitor.knownBullets.clear();
-    debugMonitor.lastVolleyByOwner.clear();
-  }
-  noteSnapshotDebugState(payload, Date.now());
-  lastAppliedSnapshotSeq = snapshotSeq;
-  lastSimulationTick = Number(payload.simulationTick) || lastSimulationTick;
-  lastSnapshotTick = Number(payload.snapshotTick) || lastSnapshotTick;
-  cleanupStaleStateChunks();
-  lastSnapshotAt = performance.now();
-  lastStatePacketAt = Date.now();
-  if (socket?.readyState === WebSocket.OPEN) {
-    setStatus("Connected");
-  }
-  latestMatch = payload.match ?? latestMatch;
-  latestLobby = payload.lobby ?? latestLobby;
-  latestObjective = payload.objective ?? latestObjective;
-  latestLeaderboard = payload.leaderboard ?? latestLeaderboard;
-  latestYou = payload.you ?? latestYou;
-  latestInterestStats = payload.replication?.interest ?? latestInterestStats;
-
-  if (payload.you && previousProcessedInputSeq > 0) {
-    const processedSeqJump = Math.max(0, Number(payload.you.lastProcessedInputSeq ?? 0) - previousProcessedInputSeq);
-    const processedInputWindowMs = Math.max(
-      0,
-      Number(payload.you.lastProcessedInputClientSentAt ?? 0) - Number(previousProcessedInputClientSentAt ?? 0)
-    );
-    const expectedSeqJump =
-      processedInputWindowMs > 0
-        ? Math.max(1, Math.ceil(processedInputWindowMs / getLocalInputDispatchMinIntervalMs()))
-        : 1;
-    const jumpAllowance = Math.max(4, Math.ceil((Number(latestLatencyMs) || 0) / 40));
-    if (
-      processedSeqJump >= DEBUG_MONITOR.inputSeqJumpWarning &&
-      processedSeqJump > expectedSeqJump + jumpAllowance
-    ) {
+  const perfMark = startClientPerfProfile("applySnapshot");
+  try {
+    const snapshotSeq = payload.snapshotSeq ?? 0;
+    if (snapshotSeq <= lastAppliedSnapshotSeq) {
       recordDebugEvent(
-        "last_processed_input_seq_jump",
-        `LastProcessedInputSeq jumped by ${processedSeqJump}`,
+        "snapshot_out_of_order",
+        `Received out-of-order snapshot ${snapshotSeq} after ${lastAppliedSnapshotSeq}`,
         {
-          severity: processedSeqJump >= DEBUG_MONITOR.inputSeqJumpWarning * 2 ? "error" : "warn",
+          severity: "warn",
           ttlMs: 8_000,
-          key: "last_processed_input_seq_jump"
+          key: "snapshot_out_of_order"
         }
       );
+      return;
     }
-  }
 
-  if (replicationStatus !== "applied") {
-    updateEntityMap(players, payload.players ?? [], { alive: true, ready: false }, {
-      kind: "player",
-      serverTime: payload.serverTime
-    });
-    updateEntityMap(bullets, payload.bullets ?? [], {}, {
-      kind: "bullet",
-      serverTime: payload.serverTime
-    });
-  }
+    const previousSnapshotSeq = lastAppliedSnapshotSeq;
+    const previousProcessedInputSeq = latestYou?.lastProcessedInputSeq ?? 0;
+    const previousProcessedInputClientSentAt = latestYou?.lastProcessedInputClientSentAt ?? 0;
+    const previousMatchPhase = latestMatch?.phase ?? null;
+    const previousRoundNumber = Number(latestMatch?.roundNumber ?? 0) || 0;
+    const nextMatchPhase = payload.match?.phase ?? previousMatchPhase;
+    const nextRoundNumber = Number(payload.match?.roundNumber ?? previousRoundNumber) || previousRoundNumber;
+    const replicationPerfMark = startClientPerfProfile("applyReplication");
+    let replicationStatus;
+    try {
+      replicationStatus = applyReplication(payload.replication, payload.serverTime, previousSnapshotSeq);
+    } finally {
+      endClientPerfProfile(replicationPerfMark);
+    }
 
-  // Fallback for baseline or resync cases where shape replication was not applied.
-  if (replicationStatus !== "applied" && payload.replication?.mode === "full" && Array.isArray(payload.shapes)) {
-    const shapeIds = new Set(payload.shapes.map((s) => s.id));
-    for (const [id, shape] of shapes.entries()) {
-      if (!shapeIds.has(id)) {
-        maybeSpawnShapeDeathParticles(shape);
-        shapes.delete(id);
+    if (replicationStatus === "resync") {
+      const hasPendingOlderFullSnapshot = Array.from(stateChunks.keys()).some((pendingSeq) => pendingSeq < snapshotSeq);
+      if (hasPendingOlderFullSnapshot) {
+        return;
       }
+      recordDebugEvent("snapshot_missing_entities", "Snapshot replication baseline mismatched and requested a resync", {
+        severity: "error",
+        ttlMs: 10_000,
+        key: "snapshot_baseline_mismatch"
+      });
+      requestLifecycleResync("baseline_mismatch");
+      return;
     }
-    updateEntityMap(shapes, payload.shapes, {}, {
-      kind: REPLICATION_KINDS.SHAPE,
-      serverTime: payload.serverTime
-    });
-  }
 
-  // Update local XP/level state from 'you' field
-  if (payload.you) {
-    const prevUpgrades = localPendingUpgrades;
-    const prevBasicSpecializationPending = localBasicSpecializationPending;
-    localXp = payload.you.xp ?? localXp;
-    localLevel = payload.you.level ?? localLevel;
-    localPendingUpgrades = payload.you.pendingUpgrades ?? localPendingUpgrades;
-    localBasicSpecializationPending = Boolean(payload.you.basicSpecializationPending);
-    localBasicSpecializationChoice = payload.you.basicSpecializationChoice ?? null;
-    localTankClassId = payload.you.tankClassId ?? localTankClassId;
-    localStats = normalizeAllocatedStats(payload.you.stats, localStats);
-    if (localPendingUpgrades.length > 0 && prevUpgrades.length === 0) {
-      upgradeMenuOpen = true;
+    const frameNow = performance.now();
+    const wallNow = Date.now();
+    syncServerClock(payload.serverTime, frameNow);
+    syncServerDebugSnapshot(payload.debug, wallNow);
+    noteServerTickSample(payload.simulationTick, frameNow, payload.tickRate);
+    if (
+      (previousMatchPhase && nextMatchPhase && nextMatchPhase !== previousMatchPhase) ||
+      (previousRoundNumber > 0 && nextRoundNumber > 0 && nextRoundNumber !== previousRoundNumber)
+    ) {
+      debugMonitor.lastKnownPlayers.clear();
+      debugMonitor.knownBullets.clear();
+      debugMonitor.lastVolleyByOwner.clear();
     }
-    if (localBasicSpecializationPending && !prevBasicSpecializationPending && !localBasicSpecializationChoice) {
-      basicSpecializationMenuOpen = true;
+    if (
+      debugUiEnabled &&
+      (
+        payload.replication?.mode === "full" ||
+        snapshotSeq % SNAPSHOT_DEBUG_SAMPLE_INTERVAL === 0
+      )
+    ) {
+      noteSnapshotDebugState(payload, wallNow);
     }
-    if (!localBasicSpecializationPending || localBasicSpecializationChoice) {
-      basicSpecializationMenuOpen = false;
-    }
-  }
-
-  consumeServerEvents(payload.events ?? []);
-
-  const localPlayer = getLocalPlayer();
-  if (localPlayer) {
-    ensureLocalVisualState(localPlayer);
-    if (!hasSeenLocalPlayerSnapshot) {
-      cameraNeedsSnap = true;
-      hasSeenLocalPlayerSnapshot = true;
-      ensureLocalRenderState(true);
-      updateSessionChrome();
+    lastAppliedSnapshotSeq = snapshotSeq;
+    lastSimulationTick = Number(payload.simulationTick) || lastSimulationTick;
+    lastSnapshotTick = Number(payload.snapshotTick) || lastSnapshotTick;
+    cleanupStaleStateChunks();
+    lastSnapshotAt = frameNow;
+    lastStatePacketAt = wallNow;
+    if (socket?.readyState === WebSocket.OPEN) {
       setStatus("Connected");
     }
+    latestMatch = payload.match ?? latestMatch;
+    latestLobby = payload.lobby ?? latestLobby;
+    latestObjective = payload.objective ?? latestObjective;
+    latestLeaderboard = payload.leaderboard ?? latestLeaderboard;
+    latestYou = payload.you ?? latestYou;
+    latestInterestStats = payload.replication?.interest ?? latestInterestStats;
+
+    if (payload.you && previousProcessedInputSeq > 0) {
+      const processedSeqJump = Math.max(0, Number(payload.you.lastProcessedInputSeq ?? 0) - previousProcessedInputSeq);
+      const processedInputWindowMs = Math.max(
+        0,
+        Number(payload.you.lastProcessedInputClientSentAt ?? 0) - Number(previousProcessedInputClientSentAt ?? 0)
+      );
+      const expectedSeqJump =
+        processedInputWindowMs > 0
+          ? Math.max(1, Math.ceil(processedInputWindowMs / getLocalInputDispatchMinIntervalMs()))
+          : 1;
+      const jumpAllowance = Math.max(4, Math.ceil((Number(latestLatencyMs) || 0) / 40));
+      if (
+        processedSeqJump >= DEBUG_MONITOR.inputSeqJumpWarning &&
+        processedSeqJump > expectedSeqJump + jumpAllowance
+      ) {
+        recordDebugEvent(
+          "last_processed_input_seq_jump",
+          `LastProcessedInputSeq jumped by ${processedSeqJump}`,
+          {
+            severity: processedSeqJump >= DEBUG_MONITOR.inputSeqJumpWarning * 2 ? "error" : "warn",
+            ttlMs: 8_000,
+            key: "last_processed_input_seq_jump"
+          }
+        );
+      }
+    }
+
+    if (replicationStatus !== "applied") {
+      updateEntityMap(players, payload.players ?? [], { alive: true, ready: false }, {
+        kind: "player",
+        serverTime: payload.serverTime
+      });
+      updateEntityMap(bullets, payload.bullets ?? [], {}, {
+        kind: "bullet",
+        serverTime: payload.serverTime
+      });
+    }
+
+    // Fallback for baseline or resync cases where shape replication was not applied.
+    if (replicationStatus !== "applied" && payload.replication?.mode === "full" && Array.isArray(payload.shapes)) {
+      const shapeIds = new Set(payload.shapes.map((s) => s.id));
+      for (const [id, shape] of shapes.entries()) {
+        if (!shapeIds.has(id)) {
+          maybeSpawnShapeDeathParticles(shape);
+          shapes.delete(id);
+        }
+      }
+      updateEntityMap(shapes, payload.shapes, {}, {
+        kind: REPLICATION_KINDS.SHAPE,
+        serverTime: payload.serverTime
+      });
+    }
+
+    // Update local XP/level state from 'you' field
+    if (payload.you) {
+      const prevUpgrades = localPendingUpgrades;
+      const prevBasicSpecializationPending = localBasicSpecializationPending;
+      localXp = payload.you.xp ?? localXp;
+      localLevel = payload.you.level ?? localLevel;
+      localPendingUpgrades = payload.you.pendingUpgrades ?? localPendingUpgrades;
+      localBasicSpecializationPending = Boolean(payload.you.basicSpecializationPending);
+      localBasicSpecializationChoice = payload.you.basicSpecializationChoice ?? null;
+      localTankClassId = payload.you.tankClassId ?? localTankClassId;
+      localStats = normalizeAllocatedStats(payload.you.stats, localStats);
+      if (localPendingUpgrades.length > 0 && prevUpgrades.length === 0) {
+        upgradeMenuOpen = true;
+      }
+      if (localBasicSpecializationPending && !prevBasicSpecializationPending && !localBasicSpecializationChoice) {
+        basicSpecializationMenuOpen = true;
+      }
+      if (!localBasicSpecializationPending || localBasicSpecializationChoice) {
+        basicSpecializationMenuOpen = false;
+      }
+    }
+
+    consumeServerEvents(payload.events ?? []);
+
+    const localPlayer = getLocalPlayer();
+    if (localPlayer) {
+      ensureLocalVisualState(localPlayer);
+      if (!hasSeenLocalPlayerSnapshot) {
+        cameraNeedsSnap = true;
+        hasSeenLocalPlayerSnapshot = true;
+        ensureLocalRenderState(true);
+        updateSessionChrome();
+        setStatus("Connected");
+      }
+
+      setElementText(
+        playerLabelElement,
+        `${localPlayer.name}${localPlayer.isSpectator ? " [SPEC]" : ""} (HP ${Math.round(localPlayer.hp ?? 0)}/${Math.round(localPlayer.maxHp ?? payload.you?.maxHp ?? GAME_CONFIG.tank.hitPoints)} | ${getTeamName(localPlayer.teamId)}/${localPlayer.tankClassId ?? localTankClassId} | ${localPlayer.score}/${localPlayer.assists ?? 0}/${localPlayer.deaths} | ${localPlayer.credits} cr)`
+      );
+
+      if (payload.you) {
+        localPlayer.maxHp = payload.you.maxHp ?? localPlayer.maxHp;
+        localPlayer.tankClassId = payload.you.tankClassId ?? localPlayer.tankClassId ?? localTankClassId;
+        localPlayer.stats = normalizeAllocatedStats(payload.you.stats, localPlayer.stats ?? localStats);
+        refreshSessionUi(localPlayer, payload.you);
+        replayPendingInputs(
+          localPlayer,
+          payload.you.lastProcessedInputSeq ?? 0,
+          estimateClientWallTimeForServerTime(payload.you.lastProcessedInputClientSentAt ?? 0),
+          estimateClientWallTimeForServerTime(payload.serverTime)
+        );
+        setElementText(
+          profileLabelElement,
+          `${payload.you.profileId.slice(0, 8)} | ${payload.you.profileStats.kills}K/${payload.you.profileStats.deaths}D`
+        );
+      }
+    } else if (payload.you) {
+      refreshSessionUi(null, payload.you);
+      if (!payload.you.isSpectator && currentRoomId) {
+        setStatus("Joined room. Waiting for local player state...");
+      }
+    }
+
+    refreshLobbyUi(localPlayer, payload.you ?? latestYou);
+    refreshDeathOverlay(localPlayer, payload.you ?? latestYou);
 
     setElementText(
-      playerLabelElement,
-      `${localPlayer.name}${localPlayer.isSpectator ? " [SPEC]" : ""} (HP ${Math.round(localPlayer.hp ?? 0)}/${Math.round(localPlayer.maxHp ?? payload.you?.maxHp ?? GAME_CONFIG.tank.hitPoints)} | ${getTeamName(localPlayer.teamId)}/${localPlayer.tankClassId ?? localTankClassId} | ${localPlayer.score}/${localPlayer.assists ?? 0}/${localPlayer.deaths} | ${localPlayer.credits} cr)`
+      roundLabelElement,
+      latestMatch ? `#${latestMatch.roundNumber || 0} | ${latestMatch.phase}` : "-"
     );
+    setElementText(matchStatusElement, buildMatchStatusText());
 
-    if (payload.you) {
-      localPlayer.maxHp = payload.you.maxHp ?? localPlayer.maxHp;
-      localPlayer.tankClassId = payload.you.tankClassId ?? localPlayer.tankClassId ?? localTankClassId;
-      localPlayer.stats = normalizeAllocatedStats(payload.you.stats, localPlayer.stats ?? localStats);
-      refreshSessionUi(localPlayer, payload.you);
-      replayPendingInputs(
-        localPlayer,
-        payload.you.lastProcessedInputSeq ?? 0,
-        estimateClientWallTimeForServerTime(payload.you.lastProcessedInputClientSentAt ?? 0),
-        estimateClientWallTimeForServerTime(payload.serverTime)
-      );
-      setElementText(
-        profileLabelElement,
-        `${payload.you.profileId.slice(0, 8)} | ${payload.you.profileStats.kills}K/${payload.you.profileStats.deaths}D`
-      );
+    if (Array.isArray(payload.leaderboard)) {
+      renderScoreboard(payload.leaderboard);
     }
-  } else if (payload.you) {
-    refreshSessionUi(null, payload.you);
-    if (!payload.you.isSpectator && currentRoomId) {
-      setStatus("Joined room. Waiting for local player state...");
-    }
-  }
-
-  refreshLobbyUi(localPlayer, payload.you ?? latestYou);
-  refreshDeathOverlay(localPlayer, payload.you ?? latestYou);
-
-  setElementText(
-    roundLabelElement,
-    latestMatch ? `#${latestMatch.roundNumber || 0} | ${latestMatch.phase}` : "-"
-  );
-  setElementText(matchStatusElement, buildMatchStatusText());
-
-  if (Array.isArray(payload.leaderboard)) {
-    renderScoreboard(payload.leaderboard);
+  } finally {
+    endClientPerfProfile(perfMark);
   }
 }
 
