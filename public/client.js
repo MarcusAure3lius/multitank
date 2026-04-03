@@ -167,6 +167,8 @@ const DEBUG_MONITOR = Object.freeze({
   predictedShotTimeoutMs: 650,
   bulletVolleyWindowMs: 80,
   fireRateSlack: 0.45,
+  aiReportCacheMs: 250,
+  snapshotAnalysisIntervalMs: 200,
   staleReliableActionMs: 2_500,
   movementSampleWindowMs: 750,
   entitySpeedSlack: 2.2,
@@ -771,6 +773,7 @@ let lastRoomBrowserRenderKey = "";
 let lastTimedUiRefreshAt = 0;
 let latestDebugInfo = null;
 let latestAiDebugReport = null;
+let lastSnapshotDebugAnalysisAt = 0;
 const assetState = {
   manifest: null,
   images: new Map(),
@@ -825,6 +828,11 @@ let debugUiEnabled =
 if (urlDebugMode === "1" || urlDebugMode === "0") {
   localStorage.setItem(STORAGE_KEYS.debugMode, debugUiEnabled ? "1" : "0");
 }
+
+function shouldCollectDebugDiagnostics() {
+  return debugUiEnabled;
+}
+
 nameInput.value = localStorage.getItem(STORAGE_KEYS.name) ?? nameInput.value;
 roomInput.value = initialRoomFromUrl ?? localStorage.getItem(STORAGE_KEYS.room) ?? roomInput.value;
 spectateInput.checked = localStorage.getItem(STORAGE_KEYS.spectate) === "1";
@@ -890,6 +898,8 @@ function syncSessionUrl(options = {}) {
 function setDebugUiEnabled(enabled, options = {}) {
   const { persist = true, updateUrl = true } = options;
   debugUiEnabled = Boolean(enabled);
+  latestAiDebugReport = null;
+  lastSnapshotDebugAnalysisAt = 0;
 
   if (persist) {
     localStorage.setItem(STORAGE_KEYS.debugMode, debugUiEnabled ? "1" : "0");
@@ -1114,6 +1124,10 @@ function pruneDebugEvents(now = Date.now()) {
 }
 
 function recordDebugEvent(code, message, options = {}) {
+  if (!shouldCollectDebugDiagnostics()) {
+    return;
+  }
+
   const now = Number(options.now ?? Date.now()) || Date.now();
   const key = String(options.key ?? code).trim() || String(code ?? "debug_event");
   const severity =
@@ -1148,7 +1162,7 @@ function recordDebugEvent(code, message, options = {}) {
 
 function syncServerDebugSnapshot(debugPayload, now = Date.now()) {
   latestDebugInfo = debugPayload ?? latestDebugInfo;
-  if (!debugPayload || !Array.isArray(debugPayload.signals)) {
+  if (!shouldCollectDebugDiagnostics() || !debugPayload || !Array.isArray(debugPayload.signals)) {
     return;
   }
 
@@ -1179,6 +1193,10 @@ function noteServerTickSample(
   frameAt = performance.now(),
   expectedTickRate = GAME_CONFIG.serverTickRate
 ) {
+  if (!shouldCollectDebugDiagnostics()) {
+    return;
+  }
+
   const tickNumber = Number(simulationTick);
   if (!Number.isFinite(tickNumber) || tickNumber <= 0) {
     return;
@@ -1264,6 +1282,10 @@ function getActionableHighJitterThresholdMs() {
 }
 
 function noteReconciliation(distanceError, options = {}) {
+  if (!shouldCollectDebugDiagnostics()) {
+    return;
+  }
+
   const now = Date.now();
   const actionableDistance = getActionablePredictionErrorDistance(now);
   const severeDistance = Math.max(LOCAL_PREDICTION.snapGap, actionableDistance * 2);
@@ -1336,6 +1358,10 @@ function getClassReloadMs(classId) {
 }
 
 function noteBulletVolley(ownerState, now = Date.now()) {
+  if (!shouldCollectDebugDiagnostics()) {
+    return;
+  }
+
   const ownerId = ownerState?.id;
   if (!ownerId) {
     return;
@@ -1381,6 +1407,15 @@ function pruneSnapshotDebugState(now = Date.now()) {
 }
 
 function noteSnapshotDebugState(payload, now = Date.now()) {
+  if (!shouldCollectDebugDiagnostics()) {
+    return;
+  }
+
+  if (now - lastSnapshotDebugAnalysisAt < DEBUG_MONITOR.snapshotAnalysisIntervalMs) {
+    return;
+  }
+  lastSnapshotDebugAnalysisAt = now;
+
   const playersInSnapshot = Array.isArray(payload?.players) ? payload.players : [];
   const bulletsInSnapshot = Array.isArray(payload?.bullets) ? payload.bullets : [];
   const playersById = new Map();
@@ -1813,6 +1848,10 @@ function isActionableDebugIssue(issue) {
 }
 
 function buildDebugIssuesSummary(now = Date.now()) {
+  if (!shouldCollectDebugDiagnostics()) {
+    return "none";
+  }
+
   const issues = buildAiDebugReport(now).issues;
   if (issues.length === 0) {
     return "none";
@@ -1841,6 +1880,8 @@ function resetDebugMonitorState(options = {}) {
   debugMonitor.lastVolleyByOwner.clear();
   debugMonitor.pendingPredictedShots.clear();
   latestDebugInfo = null;
+  latestAiDebugReport = null;
+  lastSnapshotDebugAnalysisAt = 0;
 }
 
 function buildLeaderboardRenderKey(leaderboard = latestLeaderboard) {
@@ -7839,6 +7880,14 @@ function buildDebugSubsystemSummary(issues) {
 }
 
 function buildAiDebugReport(now = Date.now(), options = {}) {
+  if (
+    !options.force &&
+    latestAiDebugReport &&
+    now - Number(latestAiDebugReport.generatedAtMs ?? 0) < DEBUG_MONITOR.aiReportCacheMs
+  ) {
+    return latestAiDebugReport;
+  }
+
   const metrics = buildDebugMetricsSnapshot(now, options);
   const issues = getActiveDebugIssues(now)
     .filter(isActionableDebugIssue)

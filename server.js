@@ -4156,10 +4156,6 @@ function diffReplicationState(previousState, nextState) {
   return hasChanges ? diff : null;
 }
 
-function cloneReplicationState(state) {
-  return cloneReplicationValue(state ?? {});
-}
-
 function isBulletRelevantToPlayer(player, bullet) {
   if (!player || player.id === bullet.ownerId) {
     return true;
@@ -4174,9 +4170,12 @@ function isBulletRelevantToPlayer(player, bullet) {
 function buildViewerInterestSet(room, viewer, socket = null, broadcastContext = null) {
   const knownEntities = socket?.data?.replication?.knownEntities;
   const candidatePlayers = getVisiblePlayersForViewer(room, viewer);
-  const candidateBullets = getVisibleBulletsForViewer(room, viewer).filter((bullet) =>
-    isBulletRelevantToPlayer(viewer, bullet)
-  );
+  const candidateBullets = [];
+  for (const bullet of getVisibleBulletsForViewer(room, viewer)) {
+    if (isBulletRelevantToPlayer(viewer, bullet)) {
+      candidateBullets.push(bullet);
+    }
+  }
   const selectedShapes = getVisibleShapesForViewer(room, viewer);
   const playerLimit = !viewer || viewer.isSpectator
     ? candidatePlayers.length
@@ -4184,12 +4183,14 @@ function buildViewerInterestSet(room, viewer, socket = null, broadcastContext = 
   const bulletLimit = !viewer || viewer.isSpectator
     ? candidateBullets.length
     : GAME_CONFIG.replication.maxBulletRecordsPerSnapshot;
-  const playerPriorityCache = new Map(
-    candidatePlayers.map((c) => [c.id, computePlayerInterestPriority(room, viewer, c, knownEntities)])
-  );
-  const bulletPriorityCache = new Map(
-    candidateBullets.map((b) => [b.id, computeBulletInterestPriority(room, viewer, b, knownEntities)])
-  );
+  const playerPriorityCache = new Map();
+  for (const candidate of candidatePlayers) {
+    playerPriorityCache.set(candidate.id, computePlayerInterestPriority(room, viewer, candidate, knownEntities));
+  }
+  const bulletPriorityCache = new Map();
+  for (const bullet of candidateBullets) {
+    bulletPriorityCache.set(bullet.id, computeBulletInterestPriority(room, viewer, bullet, knownEntities));
+  }
   const selectedPlayers = prioritizeEntities(
     candidatePlayers,
     playerLimit,
@@ -4203,35 +4204,47 @@ function buildViewerInterestSet(room, viewer, socket = null, broadcastContext = 
     compareBulletsInInterestOrder
   );
   const objectiveState = broadcastContext?.objectiveState ?? createViewerObjectiveState(room, viewer);
-  const prioritizedRecords = [
-    ...selectedPlayers.map((candidate) => ({
+  const objectiveRecord =
+    broadcastContext?.objectiveReplicationRecord ??
+    createReplicationSnapshot(REPLICATION_KINDS.OBJECTIVE, {
+      roomId: room.id,
+      ...objectiveState
+    });
+  const prioritizedRecords = [];
+  for (const candidate of selectedPlayers) {
+    prioritizedRecords.push({
       priority: playerPriorityCache.get(candidate.id),
       record: createReplicationSnapshot(REPLICATION_KINDS.PLAYER, candidate, viewer)
-    })),
-    ...selectedBullets.map((bullet) => ({
+    });
+  }
+  for (const bullet of selectedBullets) {
+    prioritizedRecords.push({
       priority: bulletPriorityCache.get(bullet.id),
       record: createReplicationSnapshot(REPLICATION_KINDS.BULLET, bullet)
-    })),
-    ...selectedShapes.map((shape) => ({
+    });
+  }
+  for (const shape of selectedShapes) {
+    prioritizedRecords.push({
       priority: 200_000 + (SHAPE_XP[shape.type] ?? 0),
       record: createReplicationSnapshot(REPLICATION_KINDS.SHAPE, shape)
-    })),
-    {
-      priority: canViewerSeeObjective(room, viewer) ? 750_000 : 250_000,
-      record: createReplicationSnapshot(REPLICATION_KINDS.OBJECTIVE, {
-        roomId: room.id,
-        ...objectiveState
-      })
-    }
-  ];
-  const records = prioritizedRecords
-    .sort(
-      (left, right) =>
-        right.priority - left.priority ||
-        String(left.record.kind).localeCompare(String(right.record.kind)) ||
-        String(left.record.id).localeCompare(String(right.record.id))
-    )
-    .map((entry) => entry.record);
+    });
+  }
+  prioritizedRecords.push({
+    priority: canViewerSeeObjective(room, viewer) ? 750_000 : 250_000,
+    record: objectiveRecord
+  });
+
+  prioritizedRecords.sort(
+    (left, right) =>
+      right.priority - left.priority ||
+      String(left.record.kind).localeCompare(String(right.record.kind)) ||
+      String(left.record.id).localeCompare(String(right.record.id))
+  );
+
+  const records = [];
+  for (const entry of prioritizedRecords) {
+    records.push(entry.record);
+  }
 
   return {
     players: selectedPlayers,
@@ -4281,7 +4294,7 @@ function buildReplicationPayloadForSocket(socket, room, player, snapshotSeq, now
         kind: record.kind,
         id: record.id,
         ownerId: record.ownerId,
-        state: cloneReplicationState(record.state)
+        state: record.state
       });
       continue;
     }
@@ -4298,7 +4311,7 @@ function buildReplicationPayloadForSocket(socket, room, player, snapshotSeq, now
         kind: record.kind,
         id: record.id,
         ownerId: record.ownerId,
-        state: cloneReplicationState(record.state)
+        state: record.state
       });
     }
   }
@@ -6701,6 +6714,7 @@ function getLeaderboard(room) {
 function buildRoomBroadcastContext(room, now = Date.now()) {
   const owner = syncRoomOwner(room);
   const lobbyMap = getLobbyMap(room.lobby?.mapId);
+  const objectiveState = createObjectiveSnapshot(room.objective);
   let activePlayers = 0;
   let spectators = 0;
   let rematchVotes = 0;
@@ -6739,7 +6753,11 @@ function buildRoomBroadcastContext(room, now = Date.now()) {
       spectators
     },
     leaderboard: getLeaderboard(room),
-    objectiveState: createObjectiveSnapshot(room.objective),
+    objectiveState,
+    objectiveReplicationRecord: createReplicationSnapshot(REPLICATION_KINDS.OBJECTIVE, {
+      roomId: room.id,
+      ...objectiveState
+    }),
     roomDebugSignals: getSortedActiveDebugSignals(room?.debug, now)
   };
 }
