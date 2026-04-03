@@ -4453,6 +4453,46 @@ function getShapeCollisionPosition(shape) {
   };
 }
 
+function getPlayerCollisionPosition(player) {
+  return {
+    x: Number.isFinite(Number(player?.x)) ? Number(player.x) : (player?.targetX ?? player?.renderX ?? 0),
+    y: Number.isFinite(Number(player?.y)) ? Number(player.y) : (player?.targetY ?? player?.renderY ?? 0)
+  };
+}
+
+function shouldPredictCollisionAgainstPlayer(player, localPlayer = getLocalPlayer()) {
+  if (!player || player.id === localPlayerId || !player.alive || player.isSpectator) {
+    return false;
+  }
+
+  if (
+    localPlayer?.teamId &&
+    player.teamId &&
+    localPlayer.teamId === player.teamId
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function collidesWithBlockingPlayer(x, y, radius = GAME_CONFIG.tank.radius, options = {}) {
+  const { excludeId = null, localPlayer = getLocalPlayer() } = options;
+  for (const player of players.values()) {
+    if (!player || player.id === excludeId || !shouldPredictCollisionAgainstPlayer(player, localPlayer)) {
+      continue;
+    }
+
+    const collisionPosition = getPlayerCollisionPosition(player);
+    const playerRadius = getPlayerBodyRadius(player);
+    if (circleIntersectsCircle(x, y, radius, collisionPosition.x, collisionPosition.y, playerRadius)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function collidesWithBlockingShape(x, y, radius = GAME_CONFIG.tank.radius, options = {}) {
   const { excludeId = null } = options;
   for (const shape of shapes.values()) {
@@ -4522,6 +4562,84 @@ function resolvePredictedShapeCollisions(x, y, radius = GAME_CONFIG.tank.radius,
       if (
         !collidesWithObstacle(resolvedX, targetY, radius) &&
         !collidesWithBlockingShape(resolvedX, targetY, radius, { excludeId: shape.id })
+      ) {
+        resolvedY = targetY;
+      }
+    }
+
+    if (!collided) {
+      break;
+    }
+  }
+
+  return {
+    x: resolvedX,
+    y: resolvedY
+  };
+}
+
+function resolvePredictedPlayerCollisions(
+  x,
+  y,
+  radius = GAME_CONFIG.tank.radius,
+  fallbackAngle = 0,
+  localPlayer = getLocalPlayer()
+) {
+  let resolvedX = x;
+  let resolvedY = y;
+
+  for (let pass = 0; pass < 3; pass += 1) {
+    let collided = false;
+
+    for (const player of players.values()) {
+      if (!shouldPredictCollisionAgainstPlayer(player, localPlayer)) {
+        continue;
+      }
+
+      const collisionPosition = getPlayerCollisionPosition(player);
+      const playerRadius = getPlayerBodyRadius(player);
+      const dx = resolvedX - collisionPosition.x;
+      const dy = resolvedY - collisionPosition.y;
+      const minDistance = radius + playerRadius;
+      const distSq = dx * dx + dy * dy;
+      if (distSq >= minDistance * minDistance) {
+        continue;
+      }
+
+      collided = true;
+      const dist = Math.sqrt(distSq);
+      const nx = dist > 0.001 ? dx / dist : Math.cos(fallbackAngle);
+      const ny = dist > 0.001 ? dy / dist : Math.sin(fallbackAngle);
+      const pushDistance = minDistance - Math.max(dist, 0.001) + 0.2;
+      const targetX = clamp(
+        resolvedX + nx * pushDistance,
+        GAME_CONFIG.world.padding,
+        GAME_CONFIG.world.width - GAME_CONFIG.world.padding
+      );
+      const targetY = clamp(
+        resolvedY + ny * pushDistance,
+        GAME_CONFIG.world.padding,
+        GAME_CONFIG.world.height - GAME_CONFIG.world.padding
+      );
+
+      if (
+        !collidesWithObstacle(targetX, resolvedY, radius) &&
+        !collidesWithBlockingShape(targetX, resolvedY, radius) &&
+        !collidesWithBlockingPlayer(targetX, resolvedY, radius, {
+          excludeId: player.id,
+          localPlayer
+        })
+      ) {
+        resolvedX = targetX;
+      }
+
+      if (
+        !collidesWithObstacle(resolvedX, targetY, radius) &&
+        !collidesWithBlockingShape(resolvedX, targetY, radius) &&
+        !collidesWithBlockingPlayer(resolvedX, targetY, radius, {
+          excludeId: player.id,
+          localPlayer
+        })
       ) {
         resolvedY = targetY;
       }
@@ -4678,6 +4796,7 @@ function getCapturedInputState() {
 }
 
 function simulateTankMovement(state, input, deltaSeconds) {
+  const localPlayer = getLocalPlayer();
   const moveX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
   const moveY = (input.back ? 1 : 0) - (input.forward ? 1 : 0);
   const moveMagnitude = Math.hypot(moveX, moveY);
@@ -4685,7 +4804,7 @@ function simulateTankMovement(state, input, deltaSeconds) {
   const normalizedMoveY = moveMagnitude > 0 ? moveY / moveMagnitude : 0;
   const nextAngle = moveMagnitude > 0 ? Math.atan2(normalizedMoveY, normalizedMoveX) : state.angle;
   const moveSpeed = moveMagnitude > 0 ? getEffectiveLocalMoveSpeed() : 0;
-  const collisionRadius = getLocalBodyRadius();
+  const collisionRadius = getLocalBodyRadius(localPlayer);
   const nextX = Math.max(
     GAME_CONFIG.world.padding,
     Math.min(GAME_CONFIG.world.width - GAME_CONFIG.world.padding, state.x + normalizedMoveX * moveSpeed * deltaSeconds)
@@ -4708,6 +4827,15 @@ function simulateTankMovement(state, input, deltaSeconds) {
   const shapeResolved = resolvePredictedShapeCollisions(resolvedX, resolvedY, collisionRadius, nextAngle);
   resolvedX = shapeResolved.x;
   resolvedY = shapeResolved.y;
+  const playerResolved = resolvePredictedPlayerCollisions(
+    resolvedX,
+    resolvedY,
+    collisionRadius,
+    nextAngle,
+    localPlayer
+  );
+  resolvedX = playerResolved.x;
+  resolvedY = playerResolved.y;
 
   return {
     x: resolvedX,
