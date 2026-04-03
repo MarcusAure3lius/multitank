@@ -199,6 +199,17 @@ const serverTiming = {
   tickDurationStrikeCount: 0
 };
 
+// Precomputed from frozen GAME_CONFIG — never changes at runtime.
+const BOT_DESIRED_ASSIGNMENTS = Object.freeze(
+  GAME_CONFIG.lobby.teams.flatMap((team) =>
+    Array.from(
+      { length: Math.max(0, Math.floor(GAME_CONFIG.ai.botsPerTeam ?? 0)) },
+      (_, slotIndex) => getBotIdentity(team.id, slotIndex)
+    )
+  )
+);
+const BOT_DESIRED_ASSIGNMENT_KEYS = new Set(BOT_DESIRED_ASSIGNMENTS.map((id) => id.key));
+
 function createDebugTracker(now = Date.now()) {
   return {
     signals: [],
@@ -3724,9 +3735,13 @@ function getVisibleBulletsForViewer(room, viewer) {
     }
   }
 
-  return Array.from(candidates.values())
-    .filter((bullet) => canViewerSeeBullet(room, viewer, bullet))
-    .sort(compareBulletsInInterestOrder);
+  const visibleBullets = [];
+  for (const bullet of candidates.values()) {
+    if (canViewerSeeBullet(room, viewer, bullet)) {
+      visibleBullets.push(bullet);
+    }
+  }
+  return visibleBullets.sort(compareBulletsInInterestOrder);
 }
 
 function canViewerSeeShape(room, viewer, shape) {
@@ -4209,7 +4224,10 @@ function buildReplicationPayloadForSocket(socket, room, player, snapshotSeq, now
   const replicationState = socket.data.replication;
   const interest = interestSet ?? buildViewerInterestSet(room, player, socket);
   const relevantRecords = interest.records;
-  const relevantIds = new Set(relevantRecords.map((record) => record.netId));
+  const relevantIds = new Set();
+  for (const record of relevantRecords) {
+    relevantIds.add(record.netId);
+  }
   const spawns = [];
   const updates = [];
   const despawns = [];
@@ -8902,11 +8920,8 @@ function canAddBotsInPhase(phase) {
 function syncRoomBots(room, now) {
   const humanPlayerCount = getRestorableHumanMatchPlayerCount(room, now);
   const bots = getBotPlayers(room);
-  const botsPerTeam = Math.max(0, Math.floor(GAME_CONFIG.ai.botsPerTeam ?? 0));
-  const desiredAssignments = GAME_CONFIG.lobby.teams.flatMap((team) =>
-    Array.from({ length: botsPerTeam }, (_, slotIndex) => getBotIdentity(team.id, slotIndex))
-  );
-  const desiredAssignmentKeys = new Set(desiredAssignments.map((identity) => identity.key));
+  const desiredAssignments = BOT_DESIRED_ASSIGNMENTS;
+  const desiredAssignmentKeys = BOT_DESIRED_ASSIGNMENT_KEYS;
   const assignedBots = new Map();
   const extraBots = [];
 
@@ -12342,8 +12357,13 @@ function resolveTankBodyCollisions(room, now) {
   }
 }
 
+let simulationTickCount = 0;
+
 function simulateRooms(deltaSeconds, now) {
-  reapIdleRooms(now);
+  simulationTickCount += 1;
+  if (simulationTickCount % GAME_CONFIG.serverTickRate === 0) {
+    reapIdleRooms(now);
+  }
   let shouldBroadcast = false;
 
   for (const [roomId, room] of rooms.entries()) {
