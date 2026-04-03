@@ -11906,7 +11906,13 @@ function updatePlayer(room, player, deltaSeconds, now) {
     const classReloadTimeMultiplier = getCombatProfileMultiplier(player.classId, "reloadTimeMultiplier", 1);
     const effectiveReloadMs = Math.max(50, classReloadMs * classReloadTimeMultiplier * (1 - reloadStat * 0.065));
     if (fireContext.fireTime - player.lastShotAt >= effectiveReloadMs) {
-      player.lastShotAt = fireContext.fireTime;
+      // Use wall-clock-adjusted lastShotAt (now minus raw one-way latency) so the reload
+      // gate measures elapsed real time from when the client fired, not from the
+      // lag-compensated backdate.  Proof: next check = fireTime2 - lastShotAt1
+      // = (now2-comp2) - (now1-rawLat1) = effectiveReloadMs + rawLat2 - comp2
+      // ≥ effectiveReloadMs (since rawLat2 ≥ comp2 always), independent of rawLat1.
+      // This eliminates cooldown_desync for all latency combinations.
+      player.lastShotAt = now - fireContext.rawLatencyMs;
       room.pendingShots.push({
         playerId: player.id,
         fireTime: fireContext.fireTime,
