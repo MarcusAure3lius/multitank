@@ -12365,12 +12365,11 @@ function resolveTankBodyCollisions(room, now) {
 
 let simulationTickCount = 0;
 
-function simulateRooms(deltaSeconds, now) {
+function simulateRooms(deltaSeconds, now, roomsNeedingBroadcast = null) {
   simulationTickCount += 1;
   if (simulationTickCount % GAME_CONFIG.serverTickRate === 0) {
     reapIdleRooms(now);
   }
-  let shouldBroadcast = false;
 
   for (const [roomId, room] of rooms.entries()) {
     room.tickNumber += 1;
@@ -12401,26 +12400,29 @@ function simulateRooms(deltaSeconds, now) {
     recordRoomHistory(room, now);
 
     if (room.clients.size > 0 && room.tickNumber > 0 && room.tickNumber % snapshotTickStride === 0) {
-      shouldBroadcast = true;
+      roomsNeedingBroadcast?.add(room.id);
     }
   }
-
-  return shouldBroadcast;
 }
 
 function broadcastRooms(now, options = {}) {
-  const { force = false } = options;
+  const { force = false, roomIds = null } = options;
+  const targetRooms = roomIds
+    ? Array.from(roomIds, (roomId) => rooms.get(roomId)).filter(Boolean)
+    : rooms.values();
 
-  for (const room of rooms.values()) {
+  for (const room of targetRooms) {
     if (room.clients.size === 0) {
       continue;
     }
 
-    if (!force && room.tickNumber <= 0) {
+    const isExplicitTarget = Boolean(roomIds);
+
+    if (!force && !isExplicitTarget && room.tickNumber <= 0) {
       continue;
     }
 
-    if (!force && room.tickNumber % snapshotTickStride !== 0) {
+    if (!force && !isExplicitTarget && room.tickNumber % snapshotTickStride !== 0) {
       continue;
     }
 
@@ -12660,16 +12662,19 @@ const simulationInterval = setInterval(() => {
   serverTiming.loopLagMs = Math.max(0, elapsedMs - fixedTickMs);
 
   let processedTicks = 0;
+  const roomsNeedingBroadcast = new Set();
   while (simulationAccumulatorMs >= fixedTickMs && processedTicks < GAME_CONFIG.simulation.maxCatchUpTicks) {
     simulatedNowMs += fixedTickMs;
     lastSimulatedAt = Math.round(simulatedNowMs);
-    const shouldBroadcast = simulateRooms(fixedDeltaSeconds, lastSimulatedAt);
-
-    if (shouldBroadcast) {
-      broadcastRooms(lastSimulatedAt);
-    }
+    simulateRooms(fixedDeltaSeconds, lastSimulatedAt, roomsNeedingBroadcast);
     simulationAccumulatorMs -= fixedTickMs;
     processedTicks += 1;
+  }
+
+  if (roomsNeedingBroadcast.size > 0) {
+    broadcastRooms(lastSimulatedAt, {
+      roomIds: roomsNeedingBroadcast
+    });
   }
 
   if (processedTicks >= GAME_CONFIG.simulation.maxCatchUpTicks && simulationAccumulatorMs >= fixedTickMs) {
