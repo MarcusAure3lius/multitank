@@ -12251,6 +12251,12 @@ function updatePlayer(room, player, deltaSeconds, now) {
     turretAngle: player.turretAngle
   };
 
+  const classDef = CLASS_TREE[player.tankClassId] ?? CLASS_TREE.basic;
+  const reloadStat = player.stats?.reload ?? 0;
+  const classReloadMs = classDef.reloadMs ?? GAME_CONFIG.tank.shootCooldownMs;
+  const classReloadTimeMultiplier = getCombatProfileMultiplier(player.classId, "reloadTimeMultiplier", 1);
+  const effectiveReloadMs = Math.max(50, classReloadMs * classReloadTimeMultiplier * (1 - reloadStat * 0.065));
+
   for (const inputSegment of inputSegments) {
     if (!inputSegment || inputSegment.deltaSeconds <= 0) {
       continue;
@@ -12281,40 +12287,43 @@ function updatePlayer(room, player, deltaSeconds, now) {
       x: normalizedMoveX * moveSpeed * inputSegment.deltaSeconds,
       y: normalizedMoveY * moveSpeed * inputSegment.deltaSeconds
     });
-  }
 
-  const stunned = getRemainingStunMs(player, now) > 0;
-  if (!stunned && canShootPhase(room.match.phase) && player.input.shoot) {
-    const fireContext = getLagCompensatedFireContext(player, now);
+    // Fire check per segment so the inputSeq matches the shoot=true input the client
+    // predicted with, not the last-processed input seq after all segments are applied.
+    // When multiple inputs arrive in one tick the old post-loop check used player.input.seq
+    // (last processed), causing seq mismatch with the client prediction → fire_rejected.
+    if (!stunned && canShootPhase(room.match.phase) && activeInput.shoot) {
+      const rawLatencyMs = Math.max(0, now - activeInput.clientSentAt);
+      const compensatedMs = clamp(
+        rawLatencyMs - GAME_CONFIG.lagCompensation.fairnessBiasMs,
+        0,
+        GAME_CONFIG.lagCompensation.maxProjectileCompensationMs
+      );
+      const fireTime = now - compensatedMs;
+      if (fireTime - player.lastShotAt >= effectiveReloadMs) {
+        // Use wall-clock-adjusted lastShotAt (now minus raw one-way latency) so the reload
+        // gate measures elapsed real time from when the client fired, not from the
+        // lag-compensated backdate.  Proof: next check = fireTime2 - lastShotAt1
+        // = (now2-comp2) - (now1-rawLat1) = effectiveReloadMs + rawLat2 - comp2
+        // ≥ effectiveReloadMs (since rawLat2 ≥ comp2 always), independent of rawLat1.
+        // This eliminates cooldown_desync for all latency combinations.
+        player.lastShotAt = now - rawLatencyMs;
+        room.pendingShots.push({
+          playerId: player.id,
+          fireTime,
+          turretAngle: activeInput.turretAngle,
+          compensatedMs,
+          clientSentAt: activeInput.clientSentAt,
+          inputSeq: activeInput.seq
+        });
+        queueAnimationStateEvent(room, player, ANIMATION_ACTIONS.FIRE, now, {
+          inputSeq: activeInput.seq
+        });
 
-    const classDef = CLASS_TREE[player.tankClassId] ?? CLASS_TREE.basic;
-    const reloadStat = player.stats?.reload ?? 0;
-    const classReloadMs = classDef.reloadMs ?? GAME_CONFIG.tank.shootCooldownMs;
-    const classReloadTimeMultiplier = getCombatProfileMultiplier(player.classId, "reloadTimeMultiplier", 1);
-    const effectiveReloadMs = Math.max(50, classReloadMs * classReloadTimeMultiplier * (1 - reloadStat * 0.065));
-    if (fireContext.fireTime - player.lastShotAt >= effectiveReloadMs) {
-      // Use wall-clock-adjusted lastShotAt (now minus raw one-way latency) so the reload
-      // gate measures elapsed real time from when the client fired, not from the
-      // lag-compensated backdate.  Proof: next check = fireTime2 - lastShotAt1
-      // = (now2-comp2) - (now1-rawLat1) = effectiveReloadMs + rawLat2 - comp2
-      // ≥ effectiveReloadMs (since rawLat2 ≥ comp2 always), independent of rawLat1.
-      // This eliminates cooldown_desync for all latency combinations.
-      player.lastShotAt = now - fireContext.rawLatencyMs;
-      room.pendingShots.push({
-        playerId: player.id,
-        fireTime: fireContext.fireTime,
-        turretAngle: fireContext.turretAngle,
-        compensatedMs: fireContext.compensatedMs,
-        clientSentAt: player.input.clientSentAt,
-        inputSeq: player.input.seq
-      });
-      queueAnimationStateEvent(room, player, ANIMATION_ACTIONS.FIRE, now, {
-        inputSeq: player.input.seq
-      });
-
-      updateProfileStats(player.profileId, (stats) => {
-        stats.shotsFired += 1;
-      });
+        updateProfileStats(player.profileId, (stats) => {
+          stats.shotsFired += 1;
+        });
+      }
     }
   }
 
