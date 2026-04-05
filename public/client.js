@@ -147,6 +147,13 @@ const LOCAL_AIM_RESPONSE = Object.freeze({
   inputGraceMs: Math.max(120, Math.ceil(1000 / CLIENT_TICK.rate) * 2)
 });
 
+const LOCAL_CAMERA = Object.freeze({
+  activeFollowRate: 36,
+  activeFollowMin: 0.36,
+  activeFollowMax: 0.88,
+  snapDistance: 84
+});
+
 const DEBUG_MONITOR = Object.freeze({
   eventTtlMs: 10_000,
   mergeWindowMs: 1_200,
@@ -1697,10 +1704,13 @@ function getPredictedShotTimeoutMs(now = Date.now()) {
   const snapshotGapMs = lastSnapshotAt ? Math.max(0, performance.now() - lastSnapshotAt) : 0;
   const networkSlackMs = Math.max(0, Number(latestLatencyMs) || 0) + Math.max(0, getLatencyJitterMs());
   const serverLagSlackMs = Math.max(0, Number(latestDebugInfo?.serverLoopLagMs ?? 0) || 0);
+  // Raise the server-lag slack cap from 300 ms to 1 500 ms and the overall ceiling
+  // from 2 000 ms to 4 000 ms so that legitimate shots aren't falsely flagged as
+  // fire_rejected / cooldown_desync when the server loop is running behind.
   return clamp(
-    Math.round(DEBUG_MONITOR.predictedShotTimeoutMs + networkSlackMs + Math.min(220, snapshotGapMs) + Math.min(300, serverLagSlackMs)),
+    Math.round(DEBUG_MONITOR.predictedShotTimeoutMs + networkSlackMs + Math.min(400, snapshotGapMs) + Math.min(1_500, serverLagSlackMs)),
     DEBUG_MONITOR.predictedShotTimeoutMs,
-    2_000
+    4_000
   );
 }
 
@@ -4048,9 +4058,23 @@ function updateCamera(deltaSeconds) {
     localPlayer.alive
   );
   const localMovementActive = responsiveLocalCamera && hasMovementInputActive();
+  const targetDistance = Math.hypot(target.x - camera.x, target.y - camera.y);
   if (localMovementActive) {
-    camera.x = target.x;
-    camera.y = target.y;
+    if (targetDistance <= 0.5 || targetDistance >= LOCAL_CAMERA.snapDistance) {
+      camera.x = target.x;
+      camera.y = target.y;
+    } else {
+      const activeFollowAmount = clamp(
+        1 - Math.exp(-LOCAL_CAMERA.activeFollowRate * deltaSeconds),
+        LOCAL_CAMERA.activeFollowMin,
+        LOCAL_CAMERA.activeFollowMax
+      );
+      camera.x = lerp(camera.x, target.x, activeFollowAmount);
+      camera.y = lerp(camera.y, target.y, activeFollowAmount);
+      const clamped = clampCameraPosition(camera.x, camera.y);
+      camera.x = clamped.x;
+      camera.y = clamped.y;
+    }
     return;
   }
 
@@ -4454,9 +4478,11 @@ function getShapeCollisionPosition(shape) {
 }
 
 function getPlayerCollisionPosition(player) {
+  const displayX = Number(player?.displayX ?? player?.renderX ?? player?.targetX);
+  const displayY = Number(player?.displayY ?? player?.renderY ?? player?.targetY);
   return {
-    x: Number.isFinite(Number(player?.x)) ? Number(player.x) : (player?.targetX ?? player?.renderX ?? 0),
-    y: Number.isFinite(Number(player?.y)) ? Number(player.y) : (player?.targetY ?? player?.renderY ?? 0)
+    x: Number.isFinite(displayX) ? displayX : (Number.isFinite(Number(player?.x)) ? Number(player.x) : 0),
+    y: Number.isFinite(displayY) ? displayY : (Number.isFinite(Number(player?.y)) ? Number(player.y) : 0)
   };
 }
 
@@ -4485,6 +4511,11 @@ function collidesWithBlockingPlayer(x, y, radius = GAME_CONFIG.tank.radius, opti
 
     const collisionPosition = getPlayerCollisionPosition(player);
     const playerRadius = getPlayerBodyRadius(player);
+    const maxDistance = radius + playerRadius;
+    if (Math.abs(x - collisionPosition.x) >= maxDistance || Math.abs(y - collisionPosition.y) >= maxDistance) {
+      continue;
+    }
+
     if (circleIntersectsCircle(x, y, radius, collisionPosition.x, collisionPosition.y, playerRadius)) {
       return true;
     }
@@ -4601,6 +4632,9 @@ function resolvePredictedPlayerCollisions(
       const dx = resolvedX - collisionPosition.x;
       const dy = resolvedY - collisionPosition.y;
       const minDistance = radius + playerRadius;
+      if (Math.abs(dx) >= minDistance || Math.abs(dy) >= minDistance) {
+        continue;
+      }
       const distSq = dx * dx + dy * dy;
       if (distSq >= minDistance * minDistance) {
         continue;
@@ -4610,7 +4644,8 @@ function resolvePredictedPlayerCollisions(
       const dist = Math.sqrt(distSq);
       const nx = dist > 0.001 ? dx / dist : Math.cos(fallbackAngle);
       const ny = dist > 0.001 ? dy / dist : Math.sin(fallbackAngle);
-      const pushDistance = minDistance - Math.max(dist, 0.001) + 0.2;
+      const overlap = minDistance - Math.max(dist, 0.001);
+      const pushDistance = overlap * 0.5 + 1;
       const targetX = clamp(
         resolvedX + nx * pushDistance,
         GAME_CONFIG.world.padding,

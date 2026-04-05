@@ -1300,14 +1300,16 @@ function findNavigationRoute(start, goal, graph = defaultNavigationGraph, mapLay
   const fScore = new Map([[startNode.id, Math.hypot(goalNode.x - startNode.x, goalNode.y - startNode.y)]]);
 
   while (openSet.size > 0) {
-    const currentId = Array.from(openSet).sort((left, right) => {
-      const leftScore = fScore.get(left) ?? Number.POSITIVE_INFINITY;
-      const rightScore = fScore.get(right) ?? Number.POSITIVE_INFINITY;
-      if (leftScore !== rightScore) {
-        return leftScore - rightScore;
+    // Linear O(n) min-scan instead of O(n log n) Array.from+sort every iteration.
+    let currentId = null;
+    let currentFScore = Number.POSITIVE_INFINITY;
+    for (const id of openSet) {
+      const score = fScore.get(id) ?? Number.POSITIVE_INFINITY;
+      if (score < currentFScore || (score === currentFScore && currentId !== null && id.localeCompare(currentId) < 0)) {
+        currentId = id;
+        currentFScore = score;
       }
-      return left.localeCompare(right);
-    })[0];
+    }
 
     if (currentId === goalNode.id) {
       return reconstructNavigationRoute(cameFrom, nodesById, currentId).slice(0, GAME_CONFIG.ai.maxRouteNodes);
@@ -10401,11 +10403,16 @@ function applyPendingInputs(player, tickNumber, tickStartedAt, tickEndedAt) {
   let activeInput = capturePlayerInputState(player);
   let segmentStartedAt = safeTickStartedAt;
 
-  while (player.pendingInputs.length > 0) {
-    const nextInput = player.pendingInputs[0];
+  // Use an index cursor instead of repeated shift() calls (each shift is O(n) on a
+  // large buffer; splicing once at the end is a single O(consumed) operation).
+  let consumedCount = 0;
+  const pending = player.pendingInputs;
+
+  while (consumedCount < pending.length) {
+    const nextInput = pending[consumedCount];
 
     if (nextInput.seq <= player.lastProcessedInputSeq) {
-      player.pendingInputs.shift();
+      consumedCount += 1;
       continue;
     }
 
@@ -10413,7 +10420,7 @@ function applyPendingInputs(player, tickNumber, tickStartedAt, tickEndedAt) {
       break;
     }
 
-    player.pendingInputs.shift();
+    consumedCount += 1;
     const segmentEndedAt = clamp(
       Number.isFinite(nextInput.receivedAt) ? nextInput.receivedAt : safeTickEndedAt,
       safeTickStartedAt,
@@ -10431,6 +10438,11 @@ function applyPendingInputs(player, tickNumber, tickStartedAt, tickEndedAt) {
     applyInputFrameToPlayer(player, nextInput, tickNumber);
     activeInput = capturePlayerInputState(player);
     segmentStartedAt = segmentEndedAt;
+  }
+
+  // Remove all consumed entries in one splice instead of N individual shifts.
+  if (consumedCount > 0) {
+    pending.splice(0, consumedCount);
   }
 
   const finalSegmentSeconds = Math.max(0, safeTickEndedAt - segmentStartedAt) / 1000;
@@ -13053,7 +13065,18 @@ let lastRealtimeTickAt = Date.now();
 let simulationAccumulatorMs = 0;
 let lastSimulatedAt = lastRealtimeTickAt;
 let simulatedNowMs = lastRealtimeTickAt;
-const simulationInterval = setInterval(() => {
+
+// Self-correcting tick loop: reschedule with the remaining time until the next
+// ideal tick so that accumulated event-loop jitter doesn't compound across ticks
+// the way it does with a plain setInterval.
+let simulationTimeout = null;
+let nextTickAt = lastRealtimeTickAt + fixedTickMs;
+
+function runSimulationTick() {
+  if (isShuttingDown) {
+    return;
+  }
+
   const intervalStartedAt = Date.now();
   const realtimeNow = intervalStartedAt;
   const elapsedMs = Math.max(0, realtimeNow - lastRealtimeTickAt);
@@ -13135,7 +13158,21 @@ const simulationInterval = setInterval(() => {
       }
     }
   }
-}, fixedTickMs);
+
+  // Schedule next tick at the ideal wall-clock time, compensating for any
+  // overrun so drift stays bounded rather than compounding.
+  if (isShuttingDown) {
+    return;
+  }
+  nextTickAt += fixedTickMs;
+  const delay = Math.max(0, nextTickAt - Date.now());
+  simulationTimeout = setTimeout(runSimulationTick, delay);
+}
+
+// Kick off the first tick.
+simulationTimeout = setTimeout(runSimulationTick, fixedTickMs);
+// Keep a no-op reference so shutdown code that expects simulationInterval still works.
+const simulationInterval = { unref: () => simulationTimeout?.unref?.() };
 
 const heartbeatInterval = setInterval(() => {
   const now = Date.now();
@@ -13191,6 +13228,10 @@ async function shutdown(signal, options = {}) {
   console.log(`Received ${signal}, shutting down gracefully`);
 
   clearInterval(simulationInterval);
+  if (simulationTimeout) {
+    clearTimeout(simulationTimeout);
+    simulationTimeout = null;
+  }
   clearInterval(heartbeatInterval);
 
   const shutdownAt = Date.now();
