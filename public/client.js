@@ -5677,6 +5677,11 @@ function applySnapshot(payload) {
     latestLeaderboard = payload.leaderboard ?? latestLeaderboard;
     latestYou = payload.you ?? latestYou;
     latestInterestStats = payload.replication?.interest ?? latestInterestStats;
+    if (payload.you?.recentAcceptedShotSeqs) {
+      for (const seq of payload.you.recentAcceptedShotSeqs) {
+        notePredictedShotConfirmedBySeq(seq);
+      }
+    }
 
     if (payload.you && previousProcessedInputSeq > 0) {
       const processedSeqJump = Math.max(0, Number(payload.you.lastProcessedInputSeq ?? 0) - previousProcessedInputSeq);

@@ -1521,6 +1521,12 @@ export function createStatePayload({
             readInteger(you.lastProcessedInputClientSentAt, 0)
           ),
           pendingInputCount: Math.max(0, readInteger(you.pendingInputCount, 0)),
+          recentAcceptedShotSeqs: Array.isArray(you.recentAcceptedShotSeqs)
+            ? you.recentAcceptedShotSeqs
+              .map((seq) => Math.max(0, readInteger(seq, 0)))
+              .filter((seq) => seq > 0)
+              .slice(-8)
+            : [],
           alive: readBoolean(you.alive, true),
           respawnAt: Number.isFinite(Number(you.respawnAt)) ? Number(you.respawnAt) : null,
           ready: readBoolean(you.ready, false),

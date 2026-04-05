@@ -2645,6 +2645,7 @@ function createPlayerState(id, profileId, name, profileStats, options = {}) {
     spawnProtectedUntil: now + GAME_CONFIG.spawn.protectionMs,
     respawnAt: 0,
     lastShotAt: 0,
+    recentAcceptedShotSeqs: [],
     nextAiThinkAt: botAiState ? now + botAiState.phaseOffsetMs : 0,
     lastProcessedInputSeq: 0,
     lastProcessedInputTick: 0,
@@ -8942,6 +8943,7 @@ function resetPlayerForRound(room, player) {
   player.respawnAt = 0;
   applyRoomSpawnProtection(room, player, now);
   player.lastShotAt = 0;
+  player.recentAcceptedShotSeqs = [];
   player.lastProcessedInputTick = 0;
   player.lastProcessedInputClientSentAt = 0;
   player.lastReceivedInputClientSentAt = 0;
@@ -9020,6 +9022,7 @@ function clearRoomCombatState(room) {
     player.respawnAt = 0;
     applyRoomSpawnProtection(room, player, now);
     player.lastShotAt = 0;
+    player.recentAcceptedShotSeqs = [];
     player.lastProcessedInputTick = 0;
     player.lastProcessedInputClientSentAt = 0;
     player.lastReceivedInputClientSentAt = 0;
@@ -12320,6 +12323,18 @@ function updatePlayer(room, player, deltaSeconds, now) {
         // ≥ effectiveReloadMs (since rawLat2 ≥ comp2 always), independent of rawLat1.
         // This eliminates cooldown_desync for all latency combinations.
         player.lastShotAt = now - rawLatencyMs;
+        if (activeInput.seq > 0) {
+          const acceptedShotSeqs = Array.isArray(player.recentAcceptedShotSeqs)
+            ? player.recentAcceptedShotSeqs
+            : [];
+          if (acceptedShotSeqs[acceptedShotSeqs.length - 1] !== activeInput.seq) {
+            acceptedShotSeqs.push(activeInput.seq);
+            while (acceptedShotSeqs.length > 8) {
+              acceptedShotSeqs.shift();
+            }
+          }
+          player.recentAcceptedShotSeqs = acceptedShotSeqs;
+        }
         room.pendingShots.push({
           playerId: player.id,
           fireTime,
@@ -12566,6 +12581,7 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq, broadcastCo
             lastProcessedInputTick: player.lastProcessedInputTick,
             lastProcessedInputClientSentAt: player.lastProcessedInputClientSentAt,
             pendingInputCount: player.pendingInputs.length,
+            recentAcceptedShotSeqs: player.recentAcceptedShotSeqs,
             alive: player.alive,
             respawnAt: player.respawnAt,
             ready: player.ready,
