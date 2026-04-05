@@ -151,7 +151,7 @@ const LOCAL_CAMERA = Object.freeze({
   activeFollowRate: 36,
   activeFollowMin: 0.36,
   activeFollowMax: 0.88,
-  snapDistance: 84
+  snapDistance: 220
 });
 
 const DEBUG_MONITOR = Object.freeze({
@@ -3253,11 +3253,15 @@ function estimateServerTime(frameAt = performance.now()) {
 }
 
 function getRemoteInterpolationBackTimeMs() {
+  const snapshotIntervalMs = 1000 / Math.max(1, GAME_CONFIG.snapshotRate);
   const halfRtt = latestLatencyMs > 0 ? latestLatencyMs * 0.5 : NETWORK_RENDER.interpolationBackTimeMs;
+  const jitterBufferMs = Math.min(40, getLatencyJitterMs() * 0.75);
+  const cadenceFloorMs = snapshotIntervalMs * 1.35;
+  const maxBackTimeMs = Math.max(NETWORK_RENDER.interpolationBackTimeMs, Math.round(snapshotIntervalMs * 3));
   return clamp(
-    Math.round(halfRtt + 8),
-    NETWORK_RENDER.minInterpolationBackTimeMs,
-    NETWORK_RENDER.interpolationBackTimeMs
+    Math.round(Math.max(halfRtt + 8, cadenceFloorMs + jitterBufferMs)),
+    Math.max(NETWORK_RENDER.minInterpolationBackTimeMs, Math.round(snapshotIntervalMs)),
+    maxBackTimeMs
   );
 }
 
