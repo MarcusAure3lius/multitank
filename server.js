@@ -444,6 +444,12 @@ function buildDebugSnapshot(room, player, now = Date.now(), maxSignals = DEBUG_S
   return {
     serverLoopLagMs: Math.max(0, Math.round(Number(serverTiming.loopLagMs ?? 0) || 0)),
     tickDurationMs: Math.max(0, Math.round(Number(serverTiming.lastTickDurationMs ?? 0) || 0)),
+    lastStatePayloadBytes: Math.max(0, Math.round(Number(options.transportStats?.lastStatePayloadBytes ?? 0) || 0)),
+    lastStateChunkCount: Math.max(0, Math.round(Number(options.transportStats?.lastStateChunkCount ?? 0) || 0)),
+    lastReplicationMode:
+      options.transportStats?.lastReplicationMode === "full" || options.transportStats?.lastReplicationMode === "delta"
+        ? options.transportStats.lastReplicationMode
+        : null,
     signals
   };
 }
@@ -461,17 +467,26 @@ function buildDebugSnapshotFromBroadcastContext(roomBroadcastContext, player, no
     return null;
   }
 
+  const transportStats = player?.socketDebugTransportStats ?? null;
+
   if (playerSignals.length === 0) {
     return {
       serverLoopLagMs: Math.max(0, Math.round(Number(serverTiming.loopLagMs ?? 0) || 0)),
       tickDurationMs: Math.max(0, Math.round(Number(serverTiming.lastTickDurationMs ?? 0) || 0)),
+      lastStatePayloadBytes: Math.max(0, Math.round(Number(transportStats?.lastStatePayloadBytes ?? 0) || 0)),
+      lastStateChunkCount: Math.max(0, Math.round(Number(transportStats?.lastStateChunkCount ?? 0) || 0)),
+      lastReplicationMode:
+        transportStats?.lastReplicationMode === "full" || transportStats?.lastReplicationMode === "delta"
+          ? transportStats.lastReplicationMode
+          : null,
       signals: roomSignals.slice(0, resolvedMaxSignals)
     };
   }
 
   return buildDebugSnapshot(null, player, now, resolvedMaxSignals, {
     roomSignals,
-    playerSignals
+    playerSignals,
+    transportStats
   });
 }
 
@@ -7359,6 +7374,13 @@ function sendStatePayload(socket, payload) {
   try {
     const serialized = serializePacket(payload);
     const byteLength = Buffer.byteLength(serialized, "utf8");
+    socket.data.lastStateTransportStats = {
+      lastStatePayloadBytes: byteLength,
+      lastStateChunkCount: byteLength <= GAME_CONFIG.network.maxStatePayloadBytes
+        ? 1
+        : Math.max(1, Math.ceil(serialized.length / GAME_CONFIG.network.stateChunkChars)),
+      lastReplicationMode: payload?.replication?.mode === "full" ? "full" : "delta"
+    };
 
     if (byteLength <= GAME_CONFIG.network.maxStatePayloadBytes) {
       if (socket.readyState !== socket.OPEN) {
@@ -12616,6 +12638,9 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq, broadcastCo
     const visibleShapes = includeFullCollections ? interest.shapes : [];
     const visibleEvents = getVisibleEventsForViewer(room, player);
     const objectiveState = interest.objectiveState;
+    if (player) {
+      player.socketDebugTransportStats = socket?.data?.lastStateTransportStats ?? null;
+    }
     const debugSnapshot = includeDebugSnapshot
       ? buildDebugSnapshotFromBroadcastContext(roomBroadcastContext, player, now, debugSignalLimit)
       : null;
@@ -12962,6 +12987,11 @@ wss.on("connection", (socket, request) => {
     outgoingBudget: {
       windowStartedAt: connectedAt,
       sentBytes: 0
+    },
+    lastStateTransportStats: {
+      lastStatePayloadBytes: 0,
+      lastStateChunkCount: 0,
+      lastReplicationMode: null
     },
     replication: {
       knownEntities: new Map(),

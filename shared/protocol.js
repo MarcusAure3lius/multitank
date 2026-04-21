@@ -1457,6 +1457,12 @@ function createDebugPayload(debug, maxSignals = 16) {
   return {
     serverLoopLagMs: Math.max(0, readInteger(debug?.serverLoopLagMs, 0)),
     tickDurationMs: Math.max(0, readInteger(debug?.tickDurationMs, 0)),
+    lastStatePayloadBytes: Math.max(0, readInteger(debug?.lastStatePayloadBytes, 0)),
+    lastStateChunkCount: Math.max(0, readInteger(debug?.lastStateChunkCount, 0)),
+    lastReplicationMode:
+      debug?.lastReplicationMode === "full" || debug?.lastReplicationMode === "delta"
+        ? debug.lastReplicationMode
+        : null,
     signals: Array.isArray(debug?.signals)
       ? debug.signals.map(createDebugSignalPayload).filter(Boolean).slice(0, signalLimit)
       : []

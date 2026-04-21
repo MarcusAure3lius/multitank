@@ -1357,6 +1357,15 @@ function getActionablePredictionErrorDistance(now = Date.now()) {
   );
 }
 
+function getAuthoritativeInputClientTime(now = Date.now()) {
+  const authoritativeServerSentAt = Number(latestYou?.lastProcessedInputClientSentAt ?? 0);
+  if (!Number.isFinite(authoritativeServerSentAt) || authoritativeServerSentAt <= 0) {
+    return 0;
+  }
+
+  return estimateClientWallTimeForServerTime(authoritativeServerSentAt, now);
+}
+
 function getActionableHighJitterThresholdMs() {
   return Math.max(
     DEBUG_MONITOR.highJitterMs + 4,
@@ -8033,6 +8042,7 @@ function buildDebugMetricsSnapshot(now = Date.now(), options = {}) {
   const lastAimChangeAgeMs = lastAimInputChangedAt > 0 ? Math.max(0, now - lastAimInputChangedAt) : 0;
   const lastResyncAgeMs = lastResyncRequestAt > 0 ? Math.max(0, now - lastResyncRequestAt) : 0;
   const estimatedTickRate = Number(debugMonitor.estimatedServerTickRate) || GAME_CONFIG.serverTickRate;
+  const authoritativeInputClientTime = getAuthoritativeInputClientTime(now);
   const localPredictionDelta = localPlayer && visualState
     ? Math.hypot((visualState.x ?? localPlayer.x) - (localPlayer.x ?? 0), (visualState.y ?? localPlayer.y) - (localPlayer.y ?? 0))
     : 0;
@@ -8052,6 +8062,11 @@ function buildDebugMetricsSnapshot(now = Date.now(), options = {}) {
     lastInputChangeAgeMs,
     lastAimChangeAgeMs,
     lastResyncAgeMs,
+    authoritativeInputAgeMs: authoritativeInputClientTime > 0 ? Math.max(0, now - authoritativeInputClientTime) : 0,
+    inputPhaseDriftMs:
+      authoritativeInputClientTime > 0 && lastLocalInputChangedAt > 0
+        ? Math.round(lastLocalInputChangedAt - authoritativeInputClientTime)
+        : 0,
     localPredictionDelta,
     expectedPredictionSlackDistance: Number(getExpectedPredictionSlackDistance(now).toFixed(1)),
     actionablePredictionErrorDistance: getActionablePredictionErrorDistance(now),
@@ -8060,6 +8075,12 @@ function buildDebugMetricsSnapshot(now = Date.now(), options = {}) {
     tickBudgetMs: 1000 / GAME_CONFIG.serverTickRate,
     serverLoopLagMs: Math.max(0, Number(latestDebugInfo?.serverLoopLagMs ?? 0) || 0),
     serverTickWorkMs: Math.max(0, Number(latestDebugInfo?.tickDurationMs ?? 0) || 0),
+    lastStatePayloadBytes: Math.max(0, Number(latestDebugInfo?.lastStatePayloadBytes ?? 0) || 0),
+    lastStateChunkCount: Math.max(0, Number(latestDebugInfo?.lastStateChunkCount ?? 0) || 0),
+    lastReplicationMode:
+      latestDebugInfo?.lastReplicationMode === "full" || latestDebugInfo?.lastReplicationMode === "delta"
+        ? latestDebugInfo.lastReplicationMode
+        : null,
     lastProcessedInputSeq: latestYou?.lastProcessedInputSeq ?? 0,
     lastProcessedInputTick: latestYou?.lastProcessedInputTick ?? 0,
     pendingInputs: pendingInputs.length,
@@ -8927,6 +8948,12 @@ function drawOverlay() {
   const lastInputAge = lastInputDispatchAt > 0 ? Math.max(0, now - lastInputDispatchAt) : 0;
   const lastInputChangeAge = lastLocalInputChangedAt > 0 ? Math.max(0, now - lastLocalInputChangedAt) : 0;
   const lastAimChangeAge = lastAimInputChangedAt > 0 ? Math.max(0, now - lastAimInputChangedAt) : 0;
+  const authoritativeInputClientTime = getAuthoritativeInputClientTime(now);
+  const authoritativeInputAge = authoritativeInputClientTime > 0 ? Math.max(0, now - authoritativeInputClientTime) : 0;
+  const inputPhaseDriftMs =
+    authoritativeInputClientTime > 0 && lastLocalInputChangedAt > 0
+      ? Math.round(lastLocalInputChangedAt - authoritativeInputClientTime)
+      : 0;
   const lastResyncAge = lastResyncRequestAt > 0 ? Math.max(0, now - lastResyncRequestAt) : 0;
   const objectiveStatusText = getObjectiveStatusText(latestObjective);
 
@@ -8950,9 +8977,11 @@ function drawOverlay() {
     `Room: ${currentRoomId ?? "-"} | Players: ${players.size} | Phase: ${latestMatch?.phase ?? "-"}`,
     `Net: ping ${Math.round(latestLatencyMs)}ms | jitter ${Math.round(jitterMs)}ms | loss ${packetLossPercent.toFixed(0)}% | snapshot ${snapshotAge}ms`,
     `Pos: client ${clientPositionText} | server ${serverPositionText} | delta ${positionDelta.toFixed(1)}`,
+    `Ack: input ${formatDebugAgeMs(authoritativeInputAge)} | phase ${inputPhaseDriftMs >= 0 ? "+" : ""}${inputPhaseDriftMs}ms | seq ${lastProcessedInputSeq}`,
     `Seq: ack ${lastProcessedInputSeq} | tick ${lastProcessedInputTick} | pending ${pendingInputs.length}/${pendingInputCount}`,
     `Ticks: server ${lastSimulationTick} | snapshot ${lastSnapshotTick} | client ${clientSimulationTick} | est ${estimatedTickRate.toFixed(1)}/s`,
     `Server: loop ${Math.round(Number(latestDebugInfo?.serverLoopLagMs ?? 0) || 0)}ms | work ${Math.round(Number(latestDebugInfo?.tickDurationMs ?? 0) || 0)}ms`,
+    `State: ${latestDebugInfo?.lastReplicationMode ?? "-"} | ${Math.round(Number(latestDebugInfo?.lastStatePayloadBytes ?? 0) || 0)}B | chunks ${Math.max(0, Number(latestDebugInfo?.lastStateChunkCount ?? 0) || 0)}`,
     `Socket: ${socketState} | msg ${formatDebugAgeMs(serverMessageAge)} | state ${formatDebugAgeMs(statePacketAge)} | pingQ ${debugMonitor.pendingPings.size} | reconn ${reconnectTimer !== null ? `wait(${reconnectAttempts})` : reconnectAttempts}`,
     `Session: play ${hasPlayableSession() ? "yes" : "no"} | join ${joinInProgress ? "yes" : "no"} | self ${hasSeenLocalPlayerSnapshot ? "yes" : "no"} | alive ${localPlayer?.alive ? "yes" : "no"} | spec ${isSpectatorSession(localPlayer) ? "yes" : "no"} | zoom ${cameraZoom.toFixed(2)}`,
     `Snapshot: applied ${lastAppliedSnapshotSeq} | chunks ${buildStateChunkDebugSummary(now)} | resync ${formatDebugAgeMs(lastResyncAge)}`,
