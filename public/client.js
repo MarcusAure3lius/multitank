@@ -4909,16 +4909,6 @@ function simulateTankMovement(state, input, deltaSeconds) {
   const shapeResolved = resolvePredictedShapeCollisions(resolvedX, resolvedY, collisionRadius, nextAngle);
   resolvedX = shapeResolved.x;
   resolvedY = shapeResolved.y;
-  const playerResolved = resolvePredictedPlayerCollisions(
-    resolvedX,
-    resolvedY,
-    collisionRadius,
-    nextAngle,
-    localPlayer
-  );
-  resolvedX = playerResolved.x;
-  resolvedY = playerResolved.y;
-
   return {
     x: resolvedX,
     y: resolvedY,
