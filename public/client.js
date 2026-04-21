@@ -127,6 +127,8 @@ const LOCAL_PREDICTION = Object.freeze({
   stallSoftLimitMs: 120,
   stallHardLimitMs: 280,
   maxReplayWindowMs: 160,
+  directSettleDistance: 10,
+  directSettleAngle: 0.035,
   maxSmoothGap: 72,
   snapGap: 140,
   maxCorrectionOffset: 96
@@ -5633,12 +5635,16 @@ function applyPredictionCorrection(localPlayer, correctedState) {
   const correctionTurretAngle = normalizeAngle(previousVisual.turretAngle - correctedState.turretAngle);
   const distanceError = Math.hypot(correctionX, correctionY);
   const stalledStream = getStatePacketAgeMs() >= LOCAL_PREDICTION.stallHardLimitMs;
+  const smallCorrection =
+    distanceError <= LOCAL_PREDICTION.directSettleDistance &&
+    Math.abs(correctionAngle) <= LOCAL_PREDICTION.directSettleAngle &&
+    Math.abs(correctionTurretAngle) <= LOCAL_PREDICTION.directSettleAngle;
   noteReconciliation(distanceError, {
     stalledStream,
     pendingReplayCount: pendingInputs.length
   });
 
-  if (distanceError >= LOCAL_PREDICTION.snapGap || stalledStream) {
+  if (smallCorrection || distanceError >= LOCAL_PREDICTION.snapGap || stalledStream) {
     localPlayer.correctionOffsetX = 0;
     localPlayer.correctionOffsetY = 0;
     localPlayer.correctionOffsetAngle = 0;
