@@ -3414,8 +3414,23 @@ function simulatePredictedMovementForDuration(state, input, durationMs, predicti
   if (simulatedDurationSeconds <= 0.0005) {
     return state;
   }
+  const fixedStepSeconds = CLIENT_TICK.fixedDeltaSeconds;
+  let remainingSeconds = simulatedDurationSeconds;
+  let predictedState = state;
+  let steps = 0;
+  const maxSteps = Math.max(1, Math.ceil(LOCAL_PREDICTION.maxReplayWindowMs / (fixedStepSeconds * 1000)) + 4);
 
-  return simulateTankMovement(state, input, simulatedDurationSeconds);
+  while (remainingSeconds >= fixedStepSeconds * 0.999 && steps < maxSteps) {
+    predictedState = simulateTankMovement(predictedState, input, fixedStepSeconds);
+    remainingSeconds -= fixedStepSeconds;
+    steps += 1;
+  }
+
+  if (remainingSeconds > 0.0005) {
+    predictedState = simulateTankMovement(predictedState, input, remainingSeconds);
+  }
+
+  return predictedState;
 }
 
 function getTurretVisualSmoothing(deltaSeconds) {
@@ -5196,7 +5211,7 @@ function updateResponsiveLocalPrediction(deltaSeconds) {
 
   const liveInput = captureLiveInputState();
   const predictionScale = getPredictionScaleForGapMs(getStatePacketAgeMs());
-  const predicted = simulateTankMovement(
+  const predicted = simulatePredictedMovementForDuration(
     {
       x: visualState.x,
       y: visualState.y,
@@ -5204,7 +5219,8 @@ function updateResponsiveLocalPrediction(deltaSeconds) {
       turretAngle: visualState.turretAngle
     },
     liveInput,
-    Math.min(deltaSeconds, LOCAL_INPUT_RESPONSE.maxPredictionStepSeconds) * predictionScale
+    Math.min(deltaSeconds, LOCAL_INPUT_RESPONSE.maxPredictionStepSeconds) * 1000,
+    predictionScale
   );
   const interactionResolved = resolvePredictedLocalBodyPush(predicted, localPlayer);
 
