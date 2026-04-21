@@ -1714,10 +1714,30 @@ function getPredictedShotTimeoutMs(now = Date.now()) {
   );
 }
 
+function hasServerProcessedPredictedShot(pendingShot) {
+  const pendingSeq = Math.max(0, Number(pendingShot?.seq ?? 0) || 0);
+  if (pendingSeq <= 0) {
+    return false;
+  }
+
+  const processedSeq = Math.max(0, Number(latestYou?.lastProcessedInputSeq ?? 0) || 0);
+  return processedSeq >= pendingSeq;
+}
+
 function prunePredictedShotExpectations(now = Date.now()) {
   const timeoutMs = getPredictedShotTimeoutMs(now);
   for (const [projectileId, pendingShot] of debugMonitor.pendingPredictedShots.entries()) {
-    if (now - Number(pendingShot.createdAt ?? 0) < timeoutMs) {
+    const shotAgeMs = now - Number(pendingShot.createdAt ?? 0);
+    const serverProcessedShot = hasServerProcessedPredictedShot(pendingShot);
+
+    if (shotAgeMs < timeoutMs) {
+      continue;
+    }
+
+    // Don't treat an unconfirmed shot as rejected until the server has actually
+    // processed that input sequence. A pure timeout can race with legitimate
+    // snapshot/ack delay and create false fire_rejected noise.
+    if (!serverProcessedShot) {
       continue;
     }
 
