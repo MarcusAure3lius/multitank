@@ -447,6 +447,33 @@ function buildDebugSnapshot(room, player, now = Date.now(), maxSignals = DEBUG_S
   };
 }
 
+function buildDebugSnapshotFromBroadcastContext(roomBroadcastContext, player, now = Date.now(), maxSignals = DEBUG_SIGNAL_SNAPSHOT_LIMIT) {
+  const resolvedMaxSignals = clamp(
+    Math.round(Number(maxSignals ?? DEBUG_SIGNAL_SNAPSHOT_LIMIT) || DEBUG_SIGNAL_SNAPSHOT_LIMIT),
+    0,
+    DEBUG_SIGNAL_EXPANDED_SNAPSHOT_LIMIT
+  );
+  const roomSignals = roomBroadcastContext?.roomDebugSignals ?? [];
+  const playerSignals = getSortedActiveDebugSignals(player?.debug, now);
+
+  if (resolvedMaxSignals <= 0) {
+    return null;
+  }
+
+  if (playerSignals.length === 0) {
+    return {
+      serverLoopLagMs: Math.max(0, Math.round(Number(serverTiming.loopLagMs ?? 0) || 0)),
+      tickDurationMs: Math.max(0, Math.round(Number(serverTiming.lastTickDurationMs ?? 0) || 0)),
+      signals: roomSignals.slice(0, resolvedMaxSignals)
+    };
+  }
+
+  return buildDebugSnapshot(null, player, now, resolvedMaxSignals, {
+    roomSignals,
+    playerSignals
+  });
+}
+
 function normalizePublicOrigin(value) {
   if (!value) {
     return null;
@@ -6944,6 +6971,7 @@ function buildRoomBroadcastContext(room, now = Date.now()) {
   const owner = syncRoomOwner(room);
   const lobbyMap = getLobbyMap(room.lobby?.mapId);
   const objectiveState = createObjectiveSnapshot(room.objective);
+  const roomDebugSignals = getSortedActiveDebugSignals(room?.debug, now);
   let activePlayers = 0;
   let spectators = 0;
   let rematchVotes = 0;
@@ -6987,7 +7015,7 @@ function buildRoomBroadcastContext(room, now = Date.now()) {
       roomId: room.id,
       ...objectiveState
     }),
-    roomDebugSignals: getSortedActiveDebugSignals(room?.debug, now)
+    roomDebugSignals
   };
 }
 
@@ -12540,9 +12568,10 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq, broadcastCo
     const interest = buildViewerInterestSet(room, player, socket, roomBroadcastContext);
     const replication = buildReplicationPayloadForSocket(socket, room, player, snapshotSeq, now, interest);
     const includeFullCollections = replication.mode === "full";
-    const debugSignalLimit = socket?.data?.debugUiEnabled
+    const debugUiEnabled = Boolean(socket?.data?.debugUiEnabled);
+    const debugSignalLimit = debugUiEnabled
       ? DEBUG_SIGNAL_EXPANDED_SNAPSHOT_LIMIT
-      : DEBUG_SIGNAL_SNAPSHOT_LIMIT;
+      : 0;
     const visiblePlayers = includeFullCollections
       ? interest.players.map((candidate) => getCachedViewerPlayerState(room, candidate, player))
       : [];
@@ -12550,6 +12579,9 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq, broadcastCo
     const visibleShapes = includeFullCollections ? interest.shapes : [];
     const visibleEvents = getVisibleEventsForViewer(room, player);
     const objectiveState = interest.objectiveState;
+    const debugSnapshot = debugUiEnabled
+      ? buildDebugSnapshotFromBroadcastContext(roomBroadcastContext, player, now, debugSignalLimit)
+      : null;
 
     return createStatePayload({
       roomId: room.id,
@@ -12570,9 +12602,7 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq, broadcastCo
       inventory: player ? [createInventoryState(player)] : [],
       replication,
       debugSignalLimit,
-      debug: buildDebugSnapshot(room, player, now, debugSignalLimit, {
-        roomSignals: roomBroadcastContext.roomDebugSignals
-      }),
+      debug: debugSnapshot,
       you: player
         ? {
             playerId: player.id,
