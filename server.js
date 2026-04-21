@@ -13081,6 +13081,7 @@ let lastRealtimeTickAt = Date.now();
 let simulationAccumulatorMs = 0;
 let lastSimulatedAt = lastRealtimeTickAt;
 let simulatedNowMs = lastRealtimeTickAt;
+const simulationClockResetThresholdMs = Math.max(fixedTickMs * 2, maxSimulationFrameMs);
 
 // Self-correcting tick loop: reschedule with the remaining time until the next
 // ideal tick so that accumulated event-loop jitter doesn't compound across ticks
@@ -13097,8 +13098,18 @@ function runSimulationTick() {
   const realtimeNow = intervalStartedAt;
   const elapsedMs = Math.max(0, realtimeNow - lastRealtimeTickAt);
   lastRealtimeTickAt = realtimeNow;
-  simulationAccumulatorMs = Math.min(simulationAccumulatorMs + elapsedMs, maxSimulationFrameMs);
+  const uncappedAccumulatorMs = simulationAccumulatorMs + elapsedMs;
+  const droppedCatchUpMs = Math.max(0, uncappedAccumulatorMs - maxSimulationFrameMs);
+  simulationAccumulatorMs = Math.min(uncappedAccumulatorMs, maxSimulationFrameMs);
   serverTiming.loopLagMs = Math.max(0, elapsedMs - fixedTickMs);
+
+  if (droppedCatchUpMs > 0 || realtimeNow - nextTickAt > simulationClockResetThresholdMs) {
+    // When the event loop stalls badly, trying to "pay back" old timing debt
+    // with a burst of zero-delay wakeups creates choppy snapshot delivery and
+    // visible rubber-banding. Drop the stale backlog and resume from now.
+    simulatedNowMs = realtimeNow - simulationAccumulatorMs;
+    nextTickAt = realtimeNow;
+  }
 
   let processedTicks = 0;
   const roomsNeedingBroadcast = new Set();
@@ -13181,6 +13192,9 @@ function runSimulationTick() {
     return;
   }
   nextTickAt += fixedTickMs;
+  if (nextTickAt < Date.now()) {
+    nextTickAt = Date.now() + fixedTickMs;
+  }
   const delay = Math.max(0, nextTickAt - Date.now());
   simulationTimeout = setTimeout(runSimulationTick, delay);
 }
