@@ -4186,6 +4186,29 @@ function getEffectiveLocalReloadMs() {
   return Math.max(50, classReloadMs * classReloadTimeMultiplier * (1 - getLocalStatValue("reload") * 0.065));
 }
 
+function getAuthoritativeLocalReloadRemainingMs(now = Date.now()) {
+  const authoritativeShotAt = Number(latestYou?.lastShotAt ?? 0);
+  if (!Number.isFinite(authoritativeShotAt) || authoritativeShotAt <= 0) {
+    return 0;
+  }
+
+  const authoritativeClientShotAt = estimateClientWallTimeForServerTime(authoritativeShotAt, now);
+  return Math.max(0, authoritativeClientShotAt + getEffectiveLocalReloadMs() - now);
+}
+
+function canPredictShotForInput(localPlayer, inputFrame, now = Date.now()) {
+  if (!inputFrame?.shoot || !canPredictLocalShots() || !localPlayer?.alive) {
+    return false;
+  }
+
+  const localReloadRemainingMs = Math.max(
+    0,
+    getEffectiveLocalReloadMs() - (now - Number(localPlayer.lastPredictedShotAt ?? 0))
+  );
+  const authoritativeReloadRemainingMs = getAuthoritativeLocalReloadRemainingMs(now);
+  return Math.max(localReloadRemainingMs, authoritativeReloadRemainingMs) <= getLocalInputDispatchMinIntervalMs();
+}
+
 function getEffectiveLocalBulletSpeed() {
   const classDef = getLocalTankClassDef();
   return (classDef.bulletSpeed ?? GAME_CONFIG.bullet.speed) * (1 + getLocalStatValue("bulletSpeed") * 0.08);
@@ -5083,12 +5106,8 @@ function dispatchLocalInput(options = {}) {
   }
 
   bufferPendingInput(inputFrame);
-  if (
-    inputFrame.shoot &&
-    canPredictLocalShots() &&
-    Date.now() - (localPlayer.lastPredictedShotAt ?? 0) >= getEffectiveLocalReloadMs()
-  ) {
-    localPlayer.lastPredictedShotAt = Date.now();
+  if (canPredictShotForInput(localPlayer, inputFrame, now)) {
+    localPlayer.lastPredictedShotAt = now;
     spawnPredictedProjectile(localPlayer, inputFrame);
   }
 

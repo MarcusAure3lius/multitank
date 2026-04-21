@@ -12580,6 +12580,7 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq, broadcastCo
             lastProcessedInputSeq: player.lastProcessedInputSeq,
             lastProcessedInputTick: player.lastProcessedInputTick,
             lastProcessedInputClientSentAt: player.lastProcessedInputClientSentAt,
+            lastShotAt: player.lastShotAt,
             pendingInputCount: player.pendingInputs.length,
             recentAcceptedShotSeqs: player.recentAcceptedShotSeqs,
             alive: player.alive,

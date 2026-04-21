@@ -1520,6 +1520,7 @@ export function createStatePayload({
             0,
             readInteger(you.lastProcessedInputClientSentAt, 0)
           ),
+          lastShotAt: Math.max(0, readInteger(you.lastShotAt, 0)),
           pendingInputCount: Math.max(0, readInteger(you.pendingInputCount, 0)),
           recentAcceptedShotSeqs: Array.isArray(you.recentAcceptedShotSeqs)
             ? you.recentAcceptedShotSeqs
