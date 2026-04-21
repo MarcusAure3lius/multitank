@@ -5298,6 +5298,33 @@ function purgeExpiredSessions(now = Date.now()) {
   return removed;
 }
 
+function getPersistenceSaveDelayMs() {
+  let hasConnectedPlayers = false;
+  let hasCombatRoom = false;
+
+  for (const room of rooms.values()) {
+    if (room.clients.size <= 0) {
+      continue;
+    }
+
+    hasConnectedPlayers = true;
+    if (isCombatPhase(room.match?.phase) || isWarmupPhase(room.match?.phase)) {
+      hasCombatRoom = true;
+      break;
+    }
+  }
+
+  if (hasCombatRoom) {
+    return 2_000;
+  }
+
+  if (hasConnectedPlayers) {
+    return 750;
+  }
+
+  return 150;
+}
+
 function createAuthSession(accountId, context = {}, now = Date.now()) {
   purgeExpiredSessions(now);
   const secret = crypto.randomBytes(32).toString("hex");
@@ -5780,6 +5807,7 @@ async function loadBackend() {
 }
 
 function scheduleBackendSave() {
+  const saveDelayMs = getPersistenceSaveDelayMs();
   if (saveBackendTimer) {
     return;
   }
@@ -5797,7 +5825,7 @@ function scheduleBackendSave() {
     } catch (error) {
       console.error("Failed to persist backend data", error);
     }
-  }, 150);
+  }, saveDelayMs);
 }
 
 async function flushBackend() {
@@ -6142,6 +6170,7 @@ async function loadProfiles() {
 }
 
 function scheduleProfileSave() {
+  const saveDelayMs = getPersistenceSaveDelayMs();
   if (saveProfilesTimer) {
     return;
   }
@@ -6159,7 +6188,7 @@ function scheduleProfileSave() {
     } catch (error) {
       console.error("Failed to persist profiles", error);
     }
-  }, 150);
+  }, saveDelayMs);
 }
 
 async function flushProfiles() {
