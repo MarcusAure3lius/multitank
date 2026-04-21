@@ -10779,19 +10779,32 @@ function scoreBotTarget(room, player, candidate, now) {
 }
 
 function selectBotTarget(room, player, now) {
-  const scoredCandidates = getPlayersInSimulationOrder(room)
-    .filter((candidate) => canBotSenseTarget(room, player, candidate, now))
-    .map((candidate) => ({
+  let best = null;
+  let current = null;
+
+  for (const candidate of getPlayersInSimulationOrder(room)) {
+    if (!canBotSenseTarget(room, player, candidate, now)) {
+      continue;
+    }
+
+    const scored = {
       candidate,
       score: scoreBotTarget(room, player, candidate, now)
-    }))
-    .sort((left, right) => {
-      const scoreDelta = right.score - left.score;
-      return scoreDelta || comparePlayersInSimulationOrder(left.candidate, right.candidate);
-    });
+    };
 
-  const best = scoredCandidates[0] ?? null;
-  const current = scoredCandidates.find((entry) => entry.candidate.id === player.ai?.targetId) ?? null;
+    if (
+      !best ||
+      scored.score > best.score ||
+      (scored.score === best.score && comparePlayersInSimulationOrder(scored.candidate, best.candidate) < 0)
+    ) {
+      best = scored;
+    }
+
+    if (candidate.id === player.ai?.targetId) {
+      current = scored;
+    }
+  }
+
   let selected = best;
 
   if (current) {
@@ -10843,8 +10856,22 @@ function scoreBotShapeTarget(room, player, shape) {
 }
 
 function selectBotShapeTarget(room, player) {
-  return Array.from(room.shapes.values())
-    .sort((left, right) => scoreBotShapeTarget(room, player, right) - scoreBotShapeTarget(room, player, left))[0] ?? null;
+  let bestShape = null;
+  let bestScore = -Infinity;
+
+  for (const shape of room.shapes.values()) {
+    if (!shape) {
+      continue;
+    }
+
+    const score = scoreBotShapeTarget(room, player, shape);
+    if (score > bestScore) {
+      bestScore = score;
+      bestShape = shape;
+    }
+  }
+
+  return bestShape;
 }
 
 function chooseBotGoalCandidate(room, player, target, candidates, options = {}) {
@@ -10852,42 +10879,50 @@ function chooseBotGoalCandidate(room, player, target, candidates, options = {}) 
   const mapLayout = getRoomMapLayout(room);
   const tankRadius = getPlayerTankRadius(player);
   const targetShapeId = target && room.shapes.has(target.id) ? target.id : null;
-  return candidates
-    .filter((candidate) => candidate && isBotNavigableWorldPoint(room, candidate.x, candidate.y, tankRadius, mapLayout))
-    .map((candidate) => {
-      const hasLineToTarget =
-        target &&
-        !segmentHitsBotBlocker(
-          room,
-          candidate.x,
-          candidate.y,
-          target.x,
-          target.y,
-          GAME_CONFIG.bullet.radius,
-          mapLayout,
-          { excludeShapeId: targetShapeId }
-        );
-      const lineToTargetScore = target
-        ? preferCover
-          ? (hasLineToTarget ? -260 : 460)
-          : (hasLineToTarget ? 400 : 40)
+  let bestCandidate = null;
+  let bestScore = -Infinity;
+
+  for (const candidate of candidates) {
+    if (!candidate || !isBotNavigableWorldPoint(room, candidate.x, candidate.y, tankRadius, mapLayout)) {
+      continue;
+    }
+
+    const hasLineToTarget =
+      target &&
+      !segmentHitsBotBlocker(
+        room,
+        candidate.x,
+        candidate.y,
+        target.x,
+        target.y,
+        GAME_CONFIG.bullet.radius,
+        mapLayout,
+        { excludeShapeId: targetShapeId }
+      );
+    const lineToTargetScore = target
+      ? preferCover
+        ? (hasLineToTarget ? -260 : 460)
+        : (hasLineToTarget ? 400 : 40)
+      : 0;
+    const directTravelScore = canBotNavigateDirectly(room, player, candidate, tankRadius + 4, mapLayout) ? 180 : 0;
+    const spacingPenalty =
+      target && Number.isFinite(desiredSpacing)
+        ? Math.abs(Math.hypot(candidate.x - target.x, candidate.y - target.y) - desiredSpacing) *
+          (preferCover ? 0.95 : 1.2)
         : 0;
-      const directTravelScore = canBotNavigateDirectly(room, player, candidate, tankRadius + 4, mapLayout) ? 180 : 0;
-      const spacingPenalty =
-        target && Number.isFinite(desiredSpacing)
-          ? Math.abs(Math.hypot(candidate.x - target.x, candidate.y - target.y) - desiredSpacing) *
-            (preferCover ? 0.95 : 1.2)
-          : 0;
-      return {
-        candidate,
-        score:
-          lineToTargetScore +
-          directTravelScore -
-          spacingPenalty -
-          Math.round(distanceSquaredBetweenPoints(candidate, player) / 150)
-      };
-    })
-    .sort((left, right) => right.score - left.score)[0]?.candidate ?? null;
+    const score =
+      lineToTargetScore +
+      directTravelScore -
+      spacingPenalty -
+      Math.round(distanceSquaredBetweenPoints(candidate, player) / 150);
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestCandidate = candidate;
+    }
+  }
+
+  return bestCandidate;
 }
 
 function getBotCoverCandidates(room, player, target) {
@@ -11170,6 +11205,10 @@ function chooseBotIntentAndGoal(room, player, target, targetDistance, hasLineOfS
 }
 
 function selectBotBulletThreat(room, player) {
+  if (isServerUnderTickStress()) {
+    return null;
+  }
+
   const lookaheadSeconds = GAME_CONFIG.ai.dodgeLookaheadMs / 1000;
   const dangerRadiusBase = getPlayerTankRadius(player) + GAME_CONFIG.ai.dodgeRadius;
   let bestThreat = null;
@@ -11308,6 +11347,10 @@ function getBotAimPoint(player, target, now, options = {}) {
     return null;
   }
 
+  if (isServerUnderTickStress()) {
+    return { x: target.x, y: target.y };
+  }
+
   if (target.remembered || !Array.isArray(target.stateHistory) || target.stateHistory.length < 2) {
     return { x: target.x, y: target.y };
   }
@@ -11351,6 +11394,13 @@ function getAdaptiveBotThinkIntervalMs() {
     BOT_AI_MAX_THINK_INTERVAL_MULTIPLIER
   );
   return Math.round(baseThinkIntervalMs * intervalMultiplier);
+}
+
+function isServerUnderTickStress() {
+  return Math.max(
+    Number(serverTiming.loopLagMs ?? 0) || 0,
+    Number(serverTiming.lastTickDurationMs ?? 0) || 0
+  ) >= fixedTickMs;
 }
 
 function getBotSeparationVector(room, player) {
