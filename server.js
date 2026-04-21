@@ -11403,6 +11403,19 @@ function isServerUnderTickStress() {
   ) >= fixedTickMs;
 }
 
+function getAdaptiveBotRepathIntervalMs() {
+  const baseIntervalMs = GAME_CONFIG.ai.repathIntervalMs;
+  if (!isServerUnderTickStress()) {
+    return baseIntervalMs;
+  }
+
+  const lagRatio = fixedTickMs > 0 ? Math.max(
+    Number(serverTiming.loopLagMs ?? 0) || 0,
+    Number(serverTiming.lastTickDurationMs ?? 0) || 0
+  ) / fixedTickMs : 1;
+  return Math.round(baseIntervalMs * clamp(1 + lagRatio * 0.8, 1.35, 4));
+}
+
 function getBotSeparationVector(room, player) {
   let totalX = 0;
   let totalY = 0;
@@ -11535,7 +11548,7 @@ function updateBotRoute(player, goal, now, options = {}) {
   const waypoint = ai.route[ai.pathIndex] ?? null;
   const waypointInvalid =
     waypoint && !isBotNavigableWorldPoint(room, waypoint.x, waypoint.y, getPlayerTankRadius(player) + 2, mapLayout);
-  const routeExpired = now - ai.lastPlanAt >= GAME_CONFIG.ai.repathIntervalMs;
+  const routeExpired = now - ai.lastPlanAt >= getAdaptiveBotRepathIntervalMs();
 
   if (forceReplan || goalChanged || waypointInvalid || routeExpired || ai.stuck) {
     ai.goalX = goal.x;
@@ -11688,9 +11701,12 @@ function updateBotInputs(room, player, now) {
           goal: { x: shapeTarget.x, y: shapeTarget.y }
         }
       : chooseBotIntentAndGoal(room, player, null, Infinity, false);
+  const repathLossOfSightMs = isServerUnderTickStress()
+    ? Math.round(GAME_CONFIG.ai.repathLossOfSightMs * 2)
+    : GAME_CONFIG.ai.repathLossOfSightMs;
   const shouldForceRepath =
     ai.stuck ||
-    (activeTarget && !hasLineOfSight && now - ai.lastLineOfSightAt >= GAME_CONFIG.ai.repathLossOfSightMs);
+    (activeTarget && !hasLineOfSight && now - ai.lastLineOfSightAt >= repathLossOfSightMs);
   const moveTarget = updateBotRoute(player, decision.goal, now, { forceReplan: shouldForceRepath, room });
 
   ai.intent = ai.stuck ? BOT_AI_INTENTS.RECOVER : decision.intent;
