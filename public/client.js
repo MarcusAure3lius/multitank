@@ -4738,6 +4738,56 @@ function resolvePredictedPlayerCollisions(
   };
 }
 
+function resolvePredictedLocalBodyPush(state, localPlayer = getLocalPlayer()) {
+  if (!state || !localPlayer) {
+    return state;
+  }
+
+  let resolvedX = state.x;
+  let resolvedY = state.y;
+  const localRadius = getPlayerBodyRadius(localPlayer);
+
+  for (const player of players.values()) {
+    if (!shouldPredictCollisionAgainstPlayer(player, localPlayer)) {
+      continue;
+    }
+
+    const collisionPosition = getPlayerCollisionPosition(player);
+    const remoteRadius = getPlayerBodyRadius(player);
+    const dx = collisionPosition.x - resolvedX;
+    const dy = collisionPosition.y - resolvedY;
+    const minDistance = localRadius + remoteRadius;
+    const distSq = dx * dx + dy * dy;
+    if (distSq >= minDistance * minDistance) {
+      continue;
+    }
+
+    const dist = Math.max(0.5, Math.sqrt(distSq));
+    const overlap = minDistance - dist;
+    const nx = dx / dist;
+    const ny = dy / dist;
+    const push = overlap * 0.5 + 1;
+
+    resolvedX = clamp(
+      resolvedX - nx * push,
+      GAME_CONFIG.world.padding,
+      GAME_CONFIG.world.width - GAME_CONFIG.world.padding
+    );
+    resolvedY = clamp(
+      resolvedY - ny * push,
+      GAME_CONFIG.world.padding,
+      GAME_CONFIG.world.height - GAME_CONFIG.world.padding
+    );
+  }
+
+  return {
+    x: resolvedX,
+    y: resolvedY,
+    angle: state.angle,
+    turretAngle: state.turretAngle
+  };
+}
+
 function getTeleportDistanceForKind(kind) {
   return kind === "bullet" ? NETWORK_RENDER.bulletTeleportDistance : NETWORK_RENDER.playerTeleportDistance;
 }
@@ -5147,8 +5197,9 @@ function updateResponsiveLocalPrediction(deltaSeconds) {
     liveInput,
     Math.min(deltaSeconds, LOCAL_INPUT_RESPONSE.maxPredictionStepSeconds) * predictionScale
   );
+  const interactionResolved = resolvePredictedLocalBodyPush(predicted, localPlayer);
 
-  applyLocalPredictedState(localPlayer, predicted);
+  applyLocalPredictedState(localPlayer, interactionResolved);
 }
 
 function bufferPendingInput(inputFrame) {
