@@ -3327,6 +3327,15 @@ function getInputTimelineSentAt(input, fallback = Date.now()) {
   return fallback;
 }
 
+function getInputReplayTimelineAt(input, now = Date.now()) {
+  const clientSentAt = Number(input?.clientSentAt);
+  if (lastAppliedSnapshotSeq > 0 && Number.isFinite(clientSentAt) && clientSentAt > 0) {
+    return estimateClientWallTimeForServerTime(clientSentAt, now);
+  }
+
+  return getInputTimelineSentAt(input, now);
+}
+
 function getEstimatedServerInputTimestamp(fallback = Date.now()) {
   if (lastAppliedSnapshotSeq <= 0) {
     return Math.round(fallback);
@@ -5502,7 +5511,7 @@ function computePredictedLocalState(
   let segmentStartMs = replayStartMs;
 
   for (const input of pendingInputs) {
-    const inputSentAt = getInputTimelineSentAt(input);
+    const inputSentAt = getInputReplayTimelineAt(input, now);
     if (inputSentAt < replayCutoffMs) {
       continue;
     }
