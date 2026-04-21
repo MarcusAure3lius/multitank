@@ -186,6 +186,7 @@ const DEBUG_SIGNAL_MERGE_WINDOW_MS = 1_200;
 const DEBUG_SIGNAL_MAX_PER_TRACKER = 32;
 const DEBUG_SIGNAL_SNAPSHOT_LIMIT = 16;
 const DEBUG_SIGNAL_EXPANDED_SNAPSHOT_LIMIT = DEBUG_SIGNAL_MAX_PER_TRACKER * 2;
+const DEBUG_SNAPSHOT_STRIDE = 6;
 const SERVER_TIMING_SIGNAL_GRACE_MS = 2_000;
 const SERVER_TIMING_SIGNAL_DEBOUNCE_TICKS = 3;
 const DEBUG_SIGNAL_SEVERITY_WEIGHT = Object.freeze({
@@ -12598,8 +12599,15 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq, broadcastCo
     const replication = buildReplicationPayloadForSocket(socket, room, player, snapshotSeq, now, interest);
     const includeFullCollections = replication.mode === "full";
     const debugUiEnabled = Boolean(socket?.data?.debugUiEnabled);
-    const debugSignalLimit = debugUiEnabled
-      ? DEBUG_SIGNAL_EXPANDED_SNAPSHOT_LIMIT
+    const includeDebugSnapshot =
+      debugUiEnabled &&
+      (
+        includeFullCollections ||
+        snapshotSeq <= 1 ||
+        snapshotSeq % DEBUG_SNAPSHOT_STRIDE === 0
+      );
+    const debugSignalLimit = includeDebugSnapshot
+      ? DEBUG_SIGNAL_SNAPSHOT_LIMIT
       : 0;
     const visiblePlayers = includeFullCollections
       ? interest.players.map((candidate) => getCachedViewerPlayerState(room, candidate, player))
@@ -12608,7 +12616,7 @@ function getRoomStatePayload(room, player, socket, now, snapshotSeq, broadcastCo
     const visibleShapes = includeFullCollections ? interest.shapes : [];
     const visibleEvents = getVisibleEventsForViewer(room, player);
     const objectiveState = interest.objectiveState;
-    const debugSnapshot = debugUiEnabled
+    const debugSnapshot = includeDebugSnapshot
       ? buildDebugSnapshotFromBroadcastContext(roomBroadcastContext, player, now, debugSignalLimit)
       : null;
 
