@@ -2057,6 +2057,7 @@ const BOT_AI_MAX_LEAD_SECONDS = 0.65;
 const BOT_AI_ANCHOR_HOLD_MS = 850;
 const BOT_AI_AXIS_COMMIT_MS = 320;
 const BOT_AI_AXIS_FLIP_THRESHOLD = 0.72;
+const BOT_AI_MAX_THINK_INTERVAL_MULTIPLIER = 4;
 
 function createProfilesDocument() {
   return {
@@ -11338,6 +11339,20 @@ function getBotAimPoint(player, target, now, options = {}) {
   );
 }
 
+function getAdaptiveBotThinkIntervalMs() {
+  const baseThinkIntervalMs = Math.max(100, Math.round(1000 / GAME_CONFIG.ai.thinkRate));
+  const lagRatio = fixedTickMs > 0 ? Math.max(
+    Number(serverTiming.loopLagMs ?? 0) || 0,
+    Number(serverTiming.lastTickDurationMs ?? 0) || 0
+  ) / fixedTickMs : 0;
+  const intervalMultiplier = clamp(
+    1 + Math.max(0, lagRatio - 0.35) * 0.9,
+    1,
+    BOT_AI_MAX_THINK_INTERVAL_MULTIPLIER
+  );
+  return Math.round(baseThinkIntervalMs * intervalMultiplier);
+}
+
 function getBotSeparationVector(room, player) {
   let totalX = 0;
   let totalY = 0;
@@ -11536,7 +11551,7 @@ function updateBotInputs(room, player, now) {
     return;
   }
 
-  const thinkIntervalMs = Math.max(100, Math.round(1000 / GAME_CONFIG.ai.thinkRate));
+  const thinkIntervalMs = getAdaptiveBotThinkIntervalMs();
   player.nextAiThinkAt = Math.max(player.nextAiThinkAt + thinkIntervalMs, now + Math.round(thinkIntervalMs * 0.75));
 
   const ai = player.ai;
