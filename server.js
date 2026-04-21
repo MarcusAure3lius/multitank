@@ -1089,6 +1089,26 @@ function segmentHitsBotBlocker(room, startX, startY, endX, endY, radius = 0, map
   );
 }
 
+function getCachedSegmentHitsBotBlocker(room, startX, startY, endX, endY, radius = 0, mapLayout = getRoomMapLayout(room), options = {}) {
+  const cache = getRoomBroadcastCache(room).botBlockerCache;
+  const excludeShapeId = options?.excludeShapeId ?? "";
+  const key = [
+    Math.round(startX),
+    Math.round(startY),
+    Math.round(endX),
+    Math.round(endY),
+    Math.round(radius * 10),
+    String(excludeShapeId)
+  ].join("|");
+  if (cache.has(key)) {
+    return cache.get(key);
+  }
+
+  const value = segmentHitsBotBlocker(room, startX, startY, endX, endY, radius, mapLayout, options);
+  cache.set(key, value);
+  return value;
+}
+
 function isBotNavigableWorldPoint(room, x, y, radius = GAME_CONFIG.tank.radius, mapLayout = getRoomMapLayout(room)) {
   return isNavigableWorldPoint(x, y, radius, mapLayout) && !collidesWithShape(room, x, y, radius);
 }
@@ -3719,8 +3739,23 @@ function canViewerSeePosition(room, viewer, x, y, radius = 0, maxDistance = unde
   if (dx * dx + dy * dy > effectiveMaxDistance * effectiveMaxDistance) {
     return false;
   }
+  const cache = getRoomBroadcastCache(room).viewerSightCache;
+  const key = [
+    viewer.id ?? "spectator",
+    Math.round(viewer.x),
+    Math.round(viewer.y),
+    Math.round(x),
+    Math.round(y),
+    Math.round(radius * 10),
+    Math.round(effectiveMaxDistance)
+  ].join("|");
+  if (cache.has(key)) {
+    return cache.get(key);
+  }
 
-  return !segmentHitsObstacle(viewer.x, viewer.y, x, y, radius, getRoomMapLayout(room));
+  const visible = !segmentHitsObstacle(viewer.x, viewer.y, x, y, radius, getRoomMapLayout(room));
+  cache.set(key, visible);
+  return visible;
 }
 
 function canViewerSeePlayer(room, viewer, candidate) {
@@ -4082,6 +4117,8 @@ function createRoomBroadcastCache() {
   return {
     tickNumber: -1,
     viewerVisibility: new Map(),
+    viewerSightCache: new Map(),
+    botBlockerCache: new Map(),
     publicPlayerStates: new Map(),
     privatePlayerStates: new Map(),
     publicPlayerRecords: new Map(),
@@ -4094,6 +4131,8 @@ function createRoomBroadcastCache() {
 function resetRoomBroadcastCache(cache, tickNumber) {
   cache.tickNumber = tickNumber;
   cache.viewerVisibility.clear();
+  cache.viewerSightCache.clear();
+  cache.botBlockerCache.clear();
   cache.publicPlayerStates.clear();
   cache.privatePlayerStates.clear();
   cache.publicPlayerRecords.clear();
@@ -10738,7 +10777,7 @@ function scoreBotTarget(room, player, candidate, now) {
   const shootRange = getBotShootRange(player);
   const preferredRange = getBotPreferredRange(player);
   const distance = Math.hypot(candidate.x - player.x, candidate.y - player.y);
-  const hasLineOfSight = !segmentHitsBotBlocker(
+  const hasLineOfSight = !getCachedSegmentHitsBotBlocker(
     room,
     player.x,
     player.y,
@@ -10835,7 +10874,7 @@ function hasLivingEnemyHuman(room, player, now) {
 
 function scoreBotShapeTarget(room, player, shape) {
   const distance = Math.hypot(shape.x - player.x, shape.y - player.y);
-  const hasLineOfSight = !segmentHitsBotBlocker(
+  const hasLineOfSight = !getCachedSegmentHitsBotBlocker(
     room,
     player.x,
     player.y,
@@ -10889,7 +10928,7 @@ function chooseBotGoalCandidate(room, player, target, candidates, options = {}) 
 
     const hasLineToTarget =
       target &&
-      !segmentHitsBotBlocker(
+      !getCachedSegmentHitsBotBlocker(
         room,
         candidate.x,
         candidate.y,
@@ -10934,7 +10973,7 @@ function getBotCoverCandidates(room, player, target) {
   const maxDistance = Math.max(GAME_CONFIG.ai.coverSearchDistance, GAME_CONFIG.ai.retreatDistance * 1.7);
   return getNavigationGraphForRoom(room).nodes
     .filter((node) => Math.hypot(node.x - player.x, node.y - player.y) <= maxDistance)
-    .filter((node) => segmentHitsBotBlocker(room, node.x, node.y, target.x, target.y, GAME_CONFIG.bullet.radius, mapLayout))
+    .filter((node) => getCachedSegmentHitsBotBlocker(room, node.x, node.y, target.x, target.y, GAME_CONFIG.bullet.radius, mapLayout))
     .map((node) => ({ x: node.x, y: node.y }));
 }
 
@@ -11623,7 +11662,7 @@ function updateBotInputs(room, player, now) {
   const shootRange = getBotShootRange(player);
   const liveEnemyTarget = selectBotTarget(room, player, now);
   const liveEnemyHasLineOfSight = liveEnemyTarget
-    ? !segmentHitsBotBlocker(room, player.x, player.y, liveEnemyTarget.x, liveEnemyTarget.y, GAME_CONFIG.bullet.radius, mapLayout)
+    ? !getCachedSegmentHitsBotBlocker(room, player.x, player.y, liveEnemyTarget.x, liveEnemyTarget.y, GAME_CONFIG.bullet.radius, mapLayout)
     : false;
   if (liveEnemyTarget && liveEnemyHasLineOfSight) {
     updateBotTargetMemory(player, liveEnemyTarget, now);
@@ -11641,7 +11680,7 @@ function updateBotInputs(room, player, now) {
   const hasLineOfSight = enemyTarget
     ? liveEnemyHasLineOfSight
     : shapeTarget
-      ? !segmentHitsBotBlocker(
+      ? !getCachedSegmentHitsBotBlocker(
           room,
           player.x,
           player.y,
