@@ -3327,7 +3327,20 @@ function getInputTimelineSentAt(input, fallback = Date.now()) {
   return fallback;
 }
 
+function getEstimatedLocalInputReceiveTime(localSentAt = Date.now()) {
+  const normalizedLocalSentAt = Number(localSentAt);
+  const safeLocalSentAt = Number.isFinite(normalizedLocalSentAt) ? normalizedLocalSentAt : Date.now();
+  const oneWayLatencyMs = Math.max(0, Number(latestLatencyMs) || 0) * 0.5;
+  const jitterPaddingMs = Math.min(12, getLatencyJitterMs() * 0.25);
+  return safeLocalSentAt + oneWayLatencyMs + jitterPaddingMs;
+}
+
 function getInputReplayTimelineAt(input, now = Date.now()) {
+  const estimatedReceivedAt = Number(input?.estimatedReceivedAt);
+  if (Number.isFinite(estimatedReceivedAt) && estimatedReceivedAt > 0) {
+    return estimatedReceivedAt;
+  }
+
   const clientSentAt = Number(input?.clientSentAt);
   if (lastAppliedSnapshotSeq > 0 && Number.isFinite(clientSentAt) && clientSentAt > 0) {
     return estimateClientWallTimeForServerTime(clientSentAt, now);
@@ -5126,11 +5139,13 @@ function bridgeAuthoritativeBulletToPrediction(current, authoritativeBullet, pre
 function createInputFrame(liveInputState = captureLiveInputState()) {
   const seq = nextInputSeq++;
   const localSentAt = getInputTimelineSentAt(liveInputState);
+  const estimatedReceivedAt = getEstimatedLocalInputReceiveTime(localSentAt);
 
   return {
     seq,
     ...liveInputState,
     localSentAt,
+    estimatedReceivedAt,
     clientSentAt: getEstimatedServerInputTimestamp(localSentAt)
   };
 }
